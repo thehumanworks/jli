@@ -1,0 +1,23 @@
+{
+  "name": "jli",
+  "version": "0.1.0",
+  "description": "Plain-language CLI that routes requests with a System 1 decision model and learns from use",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "jli": "src/index.ts"
+  },
+  "scripts": {
+    "jli": "bun src/index.ts",
+    "demo": "bun src/index.ts demo",
+    "build": "bun build --compile src/index.ts --outfile dist/jli",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.18.0",
+    "@typesafe-ai/sdk": "^0.6.0"
+  }
+}
