@@ -1,0 +1,28 @@
+[package]
+name = "jli"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Plain-language CLI that routes requests with a System 1 decision model and learns from use"
+publish = false
+
+[[bin]]
+name = "jli"
+path = "src/main.rs"
+
+[[example]]
+name = "bench-translator"
+path = "examples/bench-translator.rs"
+
+[dependencies]
+anyhow = "1"
+gethostname = "1"
+libsql = "0.9"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+# preserve_order: criteria, state, request bodies and JSON Schemas keep the key order they are
+# written in. A structured-output model generates fields in schema order, so this is behaviour.
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["rt"] }
+typesafe-jev = "0.2"
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
