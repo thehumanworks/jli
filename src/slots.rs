@@ -1,0 +1,374 @@
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::LazyLock;
+
+use anyhow::Result;
+use regex::Regex;
+
+use crate::context::{list_branches, list_entries, Context};
+use crate::system2::extract;
+use crate::types::{Slot, SlotKind};
+use crate::Models;
+
+const NUMBER_WORDS: [(&str, &str); 10] = [
+    ("one", "1"),
+    ("two", "2"),
+    ("three", "3"),
+    ("four", "4"),
+    ("five", "5"),
+    ("six", "6"),
+    ("seven", "7"),
+    ("eight", "8"),
+    ("nine", "9"),
+    ("ten", "10"),
+];
+
+static QUOTED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""([^"]+)"|'([^']+)'|`([^`]+)`"#).unwrap());
+static DIGITS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)[0-9]+(?-u:\b)").unwrap());
+
+/// The first quoted string in the request.
+pub fn quoted(query: &str) -> Option<String> {
+    let captures = QUOTED.captures(query)?;
+    (1..=3).find_map(|group| captures.get(group)).map(|found| found.as_str().to_string())
+}
+
+/// The first number in the request, in digits or as a word up to ten.
+pub fn number_in(query: &str) -> Option<String> {
+    if let Some(digits) = DIGITS.find(query) {
+        return Some(digits.as_str().to_string());
+    }
+    let lower = query.to_lowercase();
+    lower
+        .split(|ch: char| !ch.is_ascii_lowercase())
+        .filter(|word| !word.is_empty())
+        .find_map(|word| NUMBER_WORDS.iter().find(|(name, _)| *name == word).map(|(_, value)| value.to_string()))
+}
+
+/// How a slot value was found, for the trace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    Agent,
+    System1,
+    Pattern,
+    Default,
+}
+
+impl fmt::Display for Source {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Source::Agent => "agent",
+            Source::System1 => "system1",
+            Source::Pattern => "pattern",
+            Source::Default => "default",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Filled {
+    pub values: HashMap<String, String>,
+    /// Slots that could not be given a value.
+    pub missing: Vec<String>,
+    /// How each value was found, in the order they were found.
+    pub sources: Vec<(String, Source)>,
+    pub ms_system1: u64,
+    pub ms_system2: u64,
+}
+
+impl Filled {
+    fn set(&mut self, name: &str, value: String, source: Source) {
+        self.values.insert(name.to_string(), value);
+        match self.sources.iter_mut().find(|(known, _)| known == name) {
+            Some(entry) => entry.1 = source,
+            None => self.sources.push((name.to_string(), source)),
+        }
+    }
+
+    fn has(&self, name: &str) -> bool {
+        self.values.get(name).is_some_and(|value| !value.is_empty())
+    }
+}
+
+const PICK_CONFIDENCE: f64 = 0.6;
+
+/// What fill_slots needs to know about a skill.
+pub struct Template<'a> {
+    pub steps: &'a [String],
+    pub scenario: &'a str,
+    pub slots: &'a [Slot],
+}
+
+/// Give every `{slot}` a value, cheapest method first:
+/// a value the agent already supplied, a pattern in the request, a System 1 pick among real
+/// candidates, then the agent, and the slot's default only as a last resort.
+pub fn fill_slots(
+    models: &Models,
+    query: &str,
+    skill: &Template,
+    context: &Context,
+    provided: &HashMap<String, String>,
+) -> Result<Filled> {
+    let mut filled = Filled::default();
+    let mut pending: Vec<&Slot> = Vec::new();
+
+    for slot in skill.slots {
+        if let Some(given) = provided.get(&slot.name).filter(|given| !given.is_empty()) {
+            filled.set(&slot.name, given.clone(), Source::Agent);
+            continue;
+        }
+        let found = match slot.kind {
+            SlotKind::Number => number_in(query),
+            SlotKind::Text => quoted(query),
+            SlotKind::File | SlotKind::Branch => None,
+        };
+        if let Some(value) = found {
+            filled.set(&slot.name, value, Source::Pattern);
+            continue;
+        }
+        if matches!(slot.kind, SlotKind::File | SlotKind::Branch) {
+            let options =
+                if slot.kind == SlotKind::File { list_entries(&context.cwd) } else { list_branches(&context.cwd) };
+            if !options.is_empty() {
+                let picked = models.system1.pick(query, &slot.description, &options)?;
+                filled.ms_system1 += picked.ms;
+                if let Some(value) = picked.value.filter(|_| picked.confidence >= PICK_CONFIDENCE) {
+                    filled.set(&slot.name, value, Source::System1);
+                    continue;
+                }
+            }
+        }
+        pending.push(slot);
+    }
+
+    // Text always goes to the agent when the request did not quote it; a default is only a last resort.
+    let for_agent: Vec<&Slot> =
+        pending.iter().copied().filter(|slot| slot.kind == SlotKind::Text || slot.default.is_none()).collect();
+    if !for_agent.is_empty() {
+        let (values, ms) = extract(&models.llm, query, skill.steps, skill.scenario, &for_agent)?;
+        filled.ms_system2 += ms;
+        for slot in &for_agent {
+            if let Some(value) = values.get(&slot.name).filter(|value| !value.is_empty()) {
+                filled.set(&slot.name, value.clone(), Source::Agent);
+            }
+        }
+    }
+    for slot in pending {
+        if filled.has(&slot.name) {
+            continue;
+        }
+        match &slot.default {
+            Some(default) => filled.set(&slot.name, default.clone(), Source::Default),
+            None => filled.missing.push(slot.name.clone()),
+        }
+    }
+    Ok(filled)
+}
+
+/// A piece of a step template: literal text, or a `{name}` placeholder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part<'a> {
+    Text(&'a str),
+    Slot(&'a str),
+}
+
+/// Splits a template at its placeholders: `{name}`, but not the shell's own `${name}`,
+/// and not the `{}` of `find -exec`.
+fn parts(template: &str) -> Vec<Part<'_>> {
+    let bytes = template.as_bytes();
+    let mut out = Vec::new();
+    let mut text_start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' && (i == 0 || bytes[i - 1] != b'$') {
+            let name_start = i + 1;
+            let mut j = name_start;
+            if j < bytes.len() && (bytes[j].is_ascii_alphabetic() || bytes[j] == b'_') {
+                j += 1;
+                while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'}' {
+                    out.push(Part::Text(&template[text_start..i]));
+                    out.push(Part::Slot(&template[name_start..j]));
+                    i = j + 1;
+                    text_start = i;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    out.push(Part::Text(&template[text_start..]));
+    out
+}
+
+fn shell_quote(value: &str) -> String {
+    let plain = !value.is_empty()
+        && value.chars().all(|ch| ch.is_ascii_alphanumeric() || "_-.,/:=@%+".contains(ch));
+    if plain {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', r"'\''"))
+    }
+}
+
+/// Substitute shell-quoted slot values into the step templates.
+pub fn render(steps: &[String], values: &HashMap<String, String>) -> Vec<String> {
+    steps
+        .iter()
+        .map(|step| {
+            parts(step)
+                .into_iter()
+                .map(|part| match part {
+                    Part::Text(text) => text.to_string(),
+                    Part::Slot(name) => match values.get(name) {
+                        Some(value) => shell_quote(value),
+                        None => format!("{{{name}}}"),
+                    },
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// A literal piece of a template as a pattern: escaped, with any run of whitespace matching any run.
+fn literal_pattern(text: &str) -> String {
+    let mut pattern = String::new();
+    let mut run = String::new();
+    let mut in_space = false;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            if !in_space {
+                pattern.push_str(&regex::escape(&run));
+                run.clear();
+                pattern.push_str(r"\s+");
+                in_space = true;
+            }
+        } else {
+            in_space = false;
+            run.push(ch);
+        }
+    }
+    pattern.push_str(&regex::escape(&run));
+    pattern
+}
+
+fn unquote(value: &str) -> &str {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2 && (bytes[0] == b'\'' || bytes[0] == b'"') && bytes[bytes.len() - 1] == bytes[0] {
+        let inner = &value[1..value.len() - 1];
+        if !inner.contains(['\n', '\r', '\u{2028}', '\u{2029}']) {
+            return inner;
+        }
+    }
+    value
+}
+
+/// If `command` is what `steps` would produce for some slot values, return those values.
+/// Lets a taught command be recognised as a known skill with different values, with no model call.
+pub fn match_template(steps: &[String], command: &str) -> Option<HashMap<String, String>> {
+    let joined = steps.join(" && ");
+    let mut names = Vec::new();
+    let mut pattern = String::from("^");
+    for part in parts(&joined) {
+        match part {
+            Part::Text(text) => pattern.push_str(&literal_pattern(text)),
+            Part::Slot(name) => {
+                names.push(name);
+                pattern.push_str(r#"(\S+|'[^']*'|"[^"]*")"#);
+            }
+        }
+    }
+    pattern.push('$');
+    let captures = Regex::new(&pattern).ok()?.captures(command.trim())?;
+    let mut values = HashMap::new();
+    for (index, name) in names.into_iter().enumerate() {
+        let value = captures.get(index + 1).map_or("", |found| found.as_str());
+        values.insert(name.to_string(), unquote(value).to_string());
+    }
+    Some(values)
+}
+
+/// Placeholders used in steps that no slot declares, in order of first use.
+pub fn undeclared(steps: &[String], slots: &[Slot]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for step in steps {
+        for part in parts(step) {
+            if let Part::Slot(name) = part {
+                if !slots.iter().any(|slot| slot.name == name) && !out.iter().any(|seen| seen == name) {
+                    out.push(name.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn values(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    fn steps(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn placeholders_do_not_match_shell_syntax() {
+        let rendered = render(
+            &steps(&["echo ${HOME} {name} {} {1x} {{name}}", "find . -exec ls {} \\;"]),
+            &values(&[("name", "x"), ("HOME", "no")]),
+        );
+        assert_eq!(rendered, ["echo ${HOME} x {} {1x} {x}", "find . -exec ls {} \\;"]);
+        assert_eq!(render(&steps(&["wc -l {file}"]), &values(&[])), ["wc -l {file}"]);
+    }
+
+    #[test]
+    fn values_are_shell_quoted_unless_plain() {
+        let template = steps(&["git commit -m {message}"]);
+        assert_eq!(render(&template, &values(&[("message", "first draft")])), ["git commit -m 'first draft'"]);
+        assert_eq!(render(&template, &values(&[("message", "it's")])), [r"git commit -m 'it'\''s'"]);
+        assert_eq!(render(&template, &values(&[("message", "a/b.c:d=e@f%g+h,i-j_k")])), ["git commit -m a/b.c:d=e@f%g+h,i-j_k"]);
+        assert_eq!(render(&template, &values(&[("message", "")])), ["git commit -m ''"]);
+    }
+
+    #[test]
+    fn templates_recognise_their_own_commands() {
+        let log = steps(&["git log --oneline -n {count}"]);
+        assert_eq!(match_template(&log, "git log --oneline -n 10"), Some(values(&[("count", "10")])));
+        assert_eq!(match_template(&log, "  git   log --oneline -n 10 "), Some(values(&[("count", "10")])));
+        assert_eq!(match_template(&log, "git log --oneline -n"), None);
+        assert_eq!(match_template(&log, "git log --oneline -n 10 --all"), None);
+        let commit = steps(&["git commit -m {message}"]);
+        assert_eq!(match_template(&commit, "git commit -m 'two words'"), Some(values(&[("message", "two words")])));
+        assert_eq!(match_template(&commit, "git commit -m \"x\""), Some(values(&[("message", "x")])));
+        let fixed = steps(&["ls -ltr"]);
+        assert_eq!(match_template(&fixed, "ls -ltr"), Some(values(&[])));
+        assert_eq!(match_template(&fixed, "ls -lt"), None);
+        let chained = steps(&["git add -A", "git commit -m {message}"]);
+        assert!(match_template(&chained, "git add -A && git commit -m wip").is_some());
+        let regexy = steps(&["grep -E 'a.b' {file}"]);
+        assert!(match_template(&regexy, "grep -E 'axb' notes.txt").is_none(), "literals are escaped");
+    }
+
+    #[test]
+    fn undeclared_placeholders_are_found_once() {
+        let slots = vec![Slot { name: "file".into(), kind: SlotKind::File, description: String::new(), default: None }];
+        assert_eq!(undeclared(&steps(&["cp {file} {dest}", "ls {dest} ${HOME}"]), &slots), ["dest"]);
+    }
+
+    #[test]
+    fn patterns_find_numbers_and_quotes() {
+        assert_eq!(number_in("give me the 7 most recent commits").as_deref(), Some("7"));
+        assert_eq!(number_in("show the last three commits").as_deref(), Some("3"));
+        assert_eq!(number_in("abc123 commits"), None, "digits inside a word are not a number");
+        assert_eq!(number_in("no number here"), None);
+        assert_eq!(quoted(r#"commit with message "first draft""#).as_deref(), Some("first draft"));
+        assert_eq!(quoted("commit as 'wip' or \"x\"").as_deref(), Some("wip"));
+        assert_eq!(quoted("say `hi`").as_deref(), Some("hi"));
+        assert_eq!(quoted("nothing quoted"), None);
+    }
+}

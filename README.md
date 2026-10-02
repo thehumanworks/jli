@@ -56,17 +56,20 @@ command you taught.
 right command. In auto mode the translator reads stderr and gives one of three verdicts: wrong
 command, wrong value, or an environment problem. Only the first two lead to a correction.
 
-`bun examples/bench-translator.ts` compares manual and semi on held-out paraphrases. One run, ten
-commands, thirty requests written by the author of the benchmark:
+`cargo run --release --example bench-translator`, run from the repository root, compares manual
+and semi on held-out paraphrases. One run on 2026-10-02, ten commands, thirty requests written by
+the author of the benchmark:
 
 | | manual routed | manual right command | semi routed | semi right command |
 | --- | --- | --- | --- | --- |
 | fixed commands (21 requests) | 100% | 100% | 100% | 100% |
-| commands with a value (9 requests) | 22% | 0% | 100% | 100% |
-| all (30 requests) | 77% | 70% | 100% | 100% |
+| commands with a value (9 requests) | 0% | 0% | 100% | 100% |
+| all (30 requests) | 73% | 70% | 100% | 100% |
 
 The gain is entirely in commands that carry a value, such as a count, a file or a port. A raw phrase
-already generalises well for fixed commands.
+already generalises well for fixed commands. A run costs about 200 System 1 requests (about $0.012)
+and a dozen translator calls. Earlier runs, including the TypeScript prototype's, are in
+[ADR 6](docs/adr/0006-learning-modes.md).
 
 ## Confirmation
 
@@ -84,17 +87,18 @@ across hosts), `JLI_CONFIDENCE=0.7`, or `--confidence=0.7` for one run.
 export TYPESAFE_API_KEY=…      # System 1
 export OPENROUTER_API_KEY=…    # System 2 and the translator (here it is injected by fnox)
 
-bun run demo                   # watch a fresh brain learn in a throwaway git repo
-bun run build                  # compiles a standalone binary to dist/jli
-bun link                       # optional: puts `jli` on your PATH
+cargo build --release          # the binary is target/release/jli
+cargo install --path .         # optional: puts `jli` on your PATH
+jli demo                       # watch a fresh brain learn in a throwaway git repo
 jli which branch am I on
 jli                            # interactive session
 jli help
+cargo test                     # offline: System 1 and the language models are faked
 ```
 
 The demo asks five things, then asks them again in different words. In a real run, three requests
 that needed the agent the first time (4 to 6 s each) were answered by System 1 in about 250 ms the
-second time, and the time spent deciding fell from 16.4 s to 1.4 s.
+second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 
 ## Commands
 
@@ -141,33 +145,44 @@ The cloud modes are wired but have not been run against a live Turso database ye
 
 | File | Role |
 | --- | --- |
-| `src/system1.ts` | builds the matrix from the database and makes the typed `systemOne` call |
-| `src/system2.ts` | the agent: structured proposals and free-text slot filling |
-| `src/translator.ts` | turns a taught phrase and command into a general matrix row |
-| `src/learn.ts` | writes a row and verifies it against System 1 |
-| `src/suggest.ts` | auto mode: diagnoses a failure and offers alternatives |
-| `src/llm.ts` | the one HTTP call every language model request goes through |
-| `src/router.ts` | the loop: decide, escalate, confirm, run, write back |
-| `src/store.ts` | the brain: skills and events in libSQL |
-| `src/slots.ts` | fills and shell-quotes `{slot}` values |
-| `src/seed.ts` | the original hard-coded matrix, now only the seed for an empty brain |
-| `src/demo.ts` | the two-pass learning demo |
-| `examples/original-matrix.ts` | the original proof of concept, untouched |
-| `examples/bench-translator.ts` | manual versus semi on held-out paraphrases |
+| `src/system1.rs` | builds the matrix from the database and asks Jev; the only module that uses `typesafe-jev` |
+| `src/system2.rs` | the agent: structured proposals and free-text slot filling |
+| `src/translator.rs` | turns a taught phrase and command into a general matrix row |
+| `src/learn.rs` | writes a row and verifies it against System 1, one thread per check |
+| `src/suggest.rs` | auto mode: diagnoses a failure and offers alternatives |
+| `src/llm.rs` | the one HTTP call every language model request goes through |
+| `src/router.rs` | the loop: decide, escalate, confirm, run, write back |
+| `src/store.rs` | the brain: skills and events in libSQL, behind a runtime that never leaves the module |
+| `src/slots.rs` | fills and shell-quotes `{slot}` values |
+| `src/seed.rs` | the original hard-coded matrix, now only the seed for an empty brain |
+| `src/exec.rs` | runs the steps with `bash -c`, watching stderr in auto mode |
+| `src/cli.rs` | argument parsing, subcommands and the interactive session |
+| `src/ui.rs` | the trace on stderr, and the one owner of stdin |
+| `src/demo.rs` | the two-pass learning demo |
+| `src/tests.rs` | the router and learning loop, offline, against fake models and a scripted prompt |
+| `examples/bench-translator.rs` | manual versus semi on held-out paraphrases |
+| `docs/adr/` | the design decisions, and the lessons and known gaps behind them |
 
-## Porting
+## How it talks to the world
 
-There is no model SDK to port. The app makes two kinds of HTTP call and uses one database.
+The app makes two kinds of HTTP call and uses one database. It is synchronous throughout.
 
 - **Language models:** `POST {base}/chat/completions` in the OpenAI-compatible shape, with a
-  `response_format` of type `json_schema`. Schemas are plain JSON Schema objects in the source.
-  OpenRouter is used when `OPENROUTER_API_KEY` is set, the Vercel AI Gateway otherwise, or any
-  compatible endpoint through `JLI_LLM_BASE_URL` and `JLI_LLM_API_KEY`.
-- **System 1:** `POST https://api.typesafe.ai/v1/systemone` with `{ model, state, questions }`.
-  The TypeScript SDK is a thin wrapper around this one endpoint and is only imported in
-  `src/system1.ts`.
-- **Storage:** libSQL, which has a first-party Rust crate.
+  `response_format` of type `json_schema`, sent with `ureq`. Schemas are plain JSON Schema objects
+  in the source. `JLI_LLM_BASE_URL` with `JLI_LLM_API_KEY` is used when both are set, then
+  OpenRouter when `OPENROUTER_API_KEY` is set, then the Vercel AI Gateway.
+- **System 1:** `POST https://api.typesafe.ai/v1/systemone` with `{ model, state, questions }`,
+  through the `typesafe-jev` crate, with a 10 second timeout and two retries.
+- **Storage:** libSQL through its first-party crate. It is async, so `store.rs` owns a
+  current-thread Tokio runtime and blocks on it; nothing outside that module is async.
 
 Models are set with `JLI_AGENT_MODEL` (default `openai/gpt-5-mini`) and `JLI_TRANSLATOR_MODEL`
 (default `inception/mercury-2.5`).
+
+## Design decisions
+
+The reasons behind all of this are in [docs/adr](docs/adr/README.md): why there are two systems,
+why the prompts are frozen, why rows are never replaced, how slots are quoted, and what is known
+not to work yet. `jli` started as a TypeScript prototype; [ADR 9](docs/adr/0009-port-to-rust.md)
+records the port, and the acceptance checks to re-run after changing routing, learning or storage.
 
