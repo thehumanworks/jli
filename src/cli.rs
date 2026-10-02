@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 
+use crate::args;
 use crate::demo::run_demo;
 use crate::learn::{learn_phrase, LearnInput};
 use crate::router::{route, split_steps, Outcome, RouteOptions, DEFAULT_THRESHOLD};
@@ -31,6 +32,11 @@ fn help() -> String {
       --agent      skip the decision model and ask the reasoning agent directly
 
 {}
+  jli commit message=\"fix the parser\"  name=value goes straight to the command's {{message}} slot
+  jli commit with message: fix it      so does the slot's name with a colon, or any \"quoted text\"
+  Stated values are passed as written, by no model, and never influence which command is picked.
+
+{}
   jli skills                           what it knows, and the phrasings it learned
   jli stats                            how much it has learned
   jli history                          recent requests and how they were routed
@@ -54,6 +60,7 @@ fn help() -> String {
         c::bold("jli"),
         c::bold("Usage"),
         c::bold("Options"),
+        c::bold("Arguments"),
         c::bold("The brain"),
         c::bold("Storage"),
     )
@@ -373,8 +380,12 @@ impl App {
         if flags.dry_run {
             eprintln!("{}\n", c::dim(format!("  Dry run: would unlearn that \"{}\" means {label}.", last.query)));
         } else {
+            // What was learned is the request with its stated values hidden; older rows hold it whole.
+            let slots = self.brain.skill(&label)?.map(|skill| skill.slots).unwrap_or_default();
+            let phrase = args::phrase(&last.query, &slots);
             self.brain.remove_example(&label, &last.query)?;
-            self.brain.add_counter_example(&label, &last.query)?;
+            self.brain.remove_example(&label, &phrase)?;
+            self.brain.add_counter_example(&label, &phrase)?;
             self.brain.mark_rejected(last.id)?;
             eprintln!(
                 "{} \"{}\" does {} mean {label}. Trying again.\n",
@@ -491,7 +502,7 @@ impl App {
             return Ok(0);
         }
         let query: Vec<&str> = words.iter().chain(rest).map(String::as_str).collect();
-        Ok(self.ask(&query.join(" "), flags, vec![])?.exit_code())
+        Ok(self.ask(&args::request_from(&query), flags, vec![])?.exit_code())
     }
 }
 

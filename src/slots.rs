@@ -1,52 +1,20 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::LazyLock;
 
 use anyhow::Result;
 use regex::Regex;
 
+use crate::args;
 use crate::context::{list_branches, list_entries, Context};
 use crate::system2::extract;
 use crate::types::{Slot, SlotKind};
 use crate::Models;
 
-const NUMBER_WORDS: [(&str, &str); 10] = [
-    ("one", "1"),
-    ("two", "2"),
-    ("three", "3"),
-    ("four", "4"),
-    ("five", "5"),
-    ("six", "6"),
-    ("seven", "7"),
-    ("eight", "8"),
-    ("nine", "9"),
-    ("ten", "10"),
-];
-
-static QUOTED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""([^"]+)"|'([^']+)'|`([^`]+)`"#).unwrap());
-static DIGITS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)[0-9]+(?-u:\b)").unwrap());
-
-/// The first quoted string in the request.
-pub fn quoted(query: &str) -> Option<String> {
-    let captures = QUOTED.captures(query)?;
-    (1..=3).find_map(|group| captures.get(group)).map(|found| found.as_str().to_string())
-}
-
-/// The first number in the request, in digits or as a word up to ten.
-pub fn number_in(query: &str) -> Option<String> {
-    if let Some(digits) = DIGITS.find(query) {
-        return Some(digits.as_str().to_string());
-    }
-    let lower = query.to_lowercase();
-    lower
-        .split(|ch: char| !ch.is_ascii_lowercase())
-        .filter(|word| !word.is_empty())
-        .find_map(|word| NUMBER_WORDS.iter().find(|(name, _)| *name == word).map(|(_, value)| value.to_string()))
-}
-
 /// How a slot value was found, for the trace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
+    /// Stated by name in the request: `name=value` or `name: value`.
+    Request,
     Agent,
     System1,
     Pattern,
@@ -56,6 +24,7 @@ pub enum Source {
 impl fmt::Display for Source {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Source::Request => "request",
             Source::Agent => "agent",
             Source::System1 => "system1",
             Source::Pattern => "pattern",
@@ -71,6 +40,10 @@ pub struct Filled {
     pub missing: Vec<String>,
     /// How each value was found, in the order they were found.
     pub sources: Vec<(String, Source)>,
+    /// `name=value` arguments in the request that name no slot of the skill.
+    pub unmatched: Vec<String>,
+    /// The request with its stated values hidden: what is learned as a phrasing.
+    pub phrase: String,
     pub ms_system1: u64,
     pub ms_system2: u64,
 }
@@ -98,9 +71,32 @@ pub struct Template<'a> {
     pub slots: &'a [Slot],
 }
 
-/// Give every `{slot}` a value, cheapest method first:
-/// a value the agent already supplied, a pattern in the request, a System 1 pick among real
-/// candidates, then the agent, and the slot's default only as a last resort.
+/// The skill's slots in the order the steps first use them, then any the steps never use.
+fn in_template_order<'a>(skill: &Template<'a>) -> Vec<&'a Slot> {
+    let mut ordered: Vec<&Slot> = Vec::new();
+    for step in skill.steps {
+        for part in parts(step) {
+            if let Part::Slot(name) = part {
+                if let Some(slot) = skill.slots.iter().find(|slot| slot.name == name) {
+                    if !ordered.iter().any(|seen| seen.name == slot.name) {
+                        ordered.push(slot);
+                    }
+                }
+            }
+        }
+    }
+    for slot in skill.slots {
+        if !ordered.iter().any(|seen| seen.name == slot.name) {
+            ordered.push(slot);
+        }
+    }
+    ordered
+}
+
+/// Give every `{slot}` a value, most certain and cheapest method first:
+/// a value the request states by name, a value the agent already supplied, a quoted string or a
+/// number in the request, a System 1 pick among real candidates, then the agent, and the slot's
+/// default only as a last resort.
 pub fn fill_slots(
     models: &Models,
     query: &str,
@@ -108,21 +104,45 @@ pub fn fill_slots(
     context: &Context,
     provided: &HashMap<String, String>,
 ) -> Result<Filled> {
-    let mut filled = Filled::default();
+    let reading = args::read(query, skill.slots);
+    let mut filled = Filled { unmatched: reading.unmatched, phrase: reading.phrase, ..Filled::default() };
     let mut pending: Vec<&Slot> = Vec::new();
+    let slots = in_template_order(skill);
 
-    for slot in skill.slots {
-        if let Some(given) = provided.get(&slot.name).filter(|given| !given.is_empty()) {
-            filled.set(&slot.name, given.clone(), Source::Agent);
+    for (name, value) in reading.named {
+        filled.set(&name, value, Source::Request);
+    }
+    for slot in &slots {
+        if filled.has(&slot.name) {
             continue;
         }
-        let found = match slot.kind {
-            SlotKind::Number => number_in(query),
-            SlotKind::Text => quoted(query),
-            SlotKind::File | SlotKind::Branch => None,
-        };
-        if let Some(value) = found {
+        if let Some(given) = provided.get(&slot.name).filter(|given| !given.is_empty()) {
+            filled.set(&slot.name, given.clone(), Source::Agent);
+        }
+    }
+    // Values with no name go to slots in template order. Quoted strings are only handed out when
+    // there is one for every text slot still open: with fewer, which slot each belongs to is a
+    // judgement, and the agent that must write the others makes it.
+    let open = |filled: &Filled, kind: SlotKind| -> Vec<&Slot> {
+        slots.iter().copied().filter(|slot| slot.kind == kind && !filled.has(&slot.name)).collect()
+    };
+    let text = open(&filled, SlotKind::Text);
+    if reading.quoted.len() >= text.len() {
+        for (slot, value) in text.into_iter().zip(reading.quoted) {
             filled.set(&slot.name, value, Source::Pattern);
+        }
+    }
+    for (slot, value) in open(&filled, SlotKind::Number).into_iter().zip(reading.numbers) {
+        filled.set(&slot.name, value, Source::Pattern);
+    }
+
+    // An argument the skill does not take stops the run, so no model is asked for the rest.
+    if !filled.unmatched.is_empty() {
+        return Ok(filled);
+    }
+
+    for slot in slots {
+        if filled.has(&slot.name) {
             continue;
         }
         if matches!(slot.kind, SlotKind::File | SlotKind::Branch) {
@@ -358,17 +378,5 @@ mod tests {
     fn undeclared_placeholders_are_found_once() {
         let slots = vec![Slot { name: "file".into(), kind: SlotKind::File, description: String::new(), default: None }];
         assert_eq!(undeclared(&steps(&["cp {file} {dest}", "ls {dest} ${HOME}"]), &slots), ["dest"]);
-    }
-
-    #[test]
-    fn patterns_find_numbers_and_quotes() {
-        assert_eq!(number_in("give me the 7 most recent commits").as_deref(), Some("7"));
-        assert_eq!(number_in("show the last three commits").as_deref(), Some("3"));
-        assert_eq!(number_in("abc123 commits"), None, "digits inside a word are not a number");
-        assert_eq!(number_in("no number here"), None);
-        assert_eq!(quoted(r#"commit with message "first draft""#).as_deref(), Some("first draft"));
-        assert_eq!(quoted("commit as 'wip' or \"x\"").as_deref(), Some("wip"));
-        assert_eq!(quoted("say `hi`").as_deref(), Some("hi"));
-        assert_eq!(quoted("nothing quoted"), None);
     }
 }

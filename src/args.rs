@@ -1,0 +1,420 @@
+//! Arguments the request states outright, read without any model. See docs/adr/0011-stated-arguments.md.
+//!
+//! Three forms are recognised:
+//!   `name=value` or `name="some words"`   an argument for the slot called `name`
+//!   `name: "some words"` or `name: rest`  the same in plainer words, once the skill is known
+//!   `"some words"`                        a value with no name, given to text slots in order
+//!
+//! Stated values are hidden from routing: System 1 sees `commit message=…`, so the words of a
+//! commit message cannot change which command is picked or how risky it looks.
+
+use std::ops::Range;
+
+use crate::types::{Slot, SlotKind};
+
+/// What replaces a stated value in the text that is routed and learned.
+pub const HIDDEN: &str = "…";
+
+const NUMBER_WORDS: [(&str, &str); 10] = [
+    ("one", "1"),
+    ("two", "2"),
+    ("three", "3"),
+    ("four", "4"),
+    ("five", "5"),
+    ("six", "6"),
+    ("seven", "7"),
+    ("eight", "8"),
+    ("nine", "9"),
+    ("ten", "10"),
+];
+
+/// One value found in the request: `key=value`, or a quoted string with no key.
+#[derive(Debug, Clone, PartialEq)]
+struct Stated {
+    key: Option<String>,
+    value: String,
+    /// The whole item, and the part of it that holds the value.
+    span: Range<usize>,
+    hide: Range<usize>,
+}
+
+fn closing(open: char) -> Option<char> {
+    match open {
+        '"' | '\'' | '`' => Some(open),
+        '“' => Some('”'),
+        _ => None,
+    }
+}
+
+/// A quoted run that opens at `at`: the range between the quotes and where the run ends.
+/// A closing quote followed by a letter or digit is an apostrophe, as in `'it's done'`.
+fn quoted_at(text: &str, at: usize) -> Option<(Range<usize>, usize)> {
+    let open = text.get(at..)?.chars().next()?;
+    let close = closing(open)?;
+    let start = at + open.len_utf8();
+    let mut search = start;
+    while let Some(found) = text[search..].find(close) {
+        let end = search + found;
+        let after = end + close.len_utf8();
+        if end == start {
+            return None;
+        }
+        if !text[after..].chars().next().is_some_and(char::is_alphanumeric) {
+            return Some((start..end, after));
+        }
+        search = after;
+    }
+    None
+}
+
+/// Where the key of a `key=value` ends, when one starts at `at`.
+fn key_at(text: &str, at: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if !(bytes.get(at)?.is_ascii_alphabetic() || bytes[at] == b'_') {
+        return None;
+    }
+    let mut end = at + 1;
+    while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_' || bytes[end] == b'-') {
+        end += 1;
+    }
+    (bytes.get(end) == Some(&b'=') && bytes.get(end + 1) != Some(&b'=')).then_some(end)
+}
+
+fn scan(text: &str) -> Vec<Stated> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    let mut word_start = true;
+    while let Some(ch) = text[at..].chars().next() {
+        if word_start {
+            if let Some((inner, end)) = quoted_at(text, at) {
+                out.push(Stated { key: None, value: text[inner.clone()].to_string(), span: at..end, hide: inner });
+                at = end;
+                word_start = false;
+                continue;
+            }
+            if let Some(key_end) = key_at(text, at) {
+                let value_at = key_end + 1;
+                let (hide, end) = quoted_at(text, value_at).unwrap_or_else(|| {
+                    let end = text[value_at..].find(char::is_whitespace).map_or(text.len(), |n| value_at + n);
+                    (value_at..end, end)
+                });
+                if !hide.is_empty() {
+                    let key = Some(text[at..key_end].to_string());
+                    out.push(Stated { key, value: text[hide.clone()].to_string(), span: at..end, hide });
+                }
+                at = end;
+                word_start = false;
+                continue;
+            }
+        }
+        word_start = ch.is_whitespace() || ch == ':' || ch == '(';
+        at += ch.len_utf8();
+    }
+    out
+}
+
+/// Slot names and argument keys compare without case, and `-` is the same as `_`.
+fn normal(name: &str) -> String {
+    name.to_ascii_lowercase().replace('-', "_")
+}
+
+fn as_number(value: &str) -> String {
+    let lower = value.to_lowercase();
+    NUMBER_WORDS.iter().find(|(word, _)| *word == lower).map_or_else(|| value.to_string(), |(_, digits)| digits.to_string())
+}
+
+/// Every number in the text, in order: digits standing alone, or a word from one to ten.
+fn numbers_in(text: &str) -> Vec<String> {
+    text.split(|ch: char| !ch.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .filter_map(|word| {
+            if word.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Some(word.to_string());
+            }
+            let lower = word.to_lowercase();
+            NUMBER_WORDS.iter().find(|(name, _)| *name == lower).map(|(_, value)| value.to_string())
+        })
+        .collect()
+}
+
+/// A slot's name used as a label in the request: `message: …` or `message "…"`.
+struct Label {
+    slot: usize,
+    start: usize,
+    /// Where the value starts, after the colon and any spaces.
+    value_at: usize,
+    colon: bool,
+}
+
+fn labels(text: &str, items: &[Stated], slots: &[Slot], skip: &[bool]) -> Vec<Label> {
+    let lower = text.to_ascii_lowercase();
+    let inside = |at: usize| items.iter().any(|item| item.span.contains(&at));
+    let mut found = Vec::new();
+    for (slot, wanted) in slots.iter().enumerate() {
+        if skip[slot] {
+            continue;
+        }
+        let name = wanted.name.to_ascii_lowercase();
+        let mut from = 0;
+        while let Some(offset) = lower[from..].find(&name) {
+            let start = from + offset;
+            let end = start + name.len();
+            from = end;
+            let boundary = !lower[..start].chars().next_back().is_some_and(|ch| ch.is_alphanumeric() || ch == '_');
+            if !boundary || inside(start) {
+                continue;
+            }
+            let rest = &text[end..];
+            let after_name = rest.trim_start();
+            let colon = after_name.starts_with(':');
+            let value = if colon { after_name[1..].trim_start() } else { after_name };
+            let value_at = text.len() - value.len();
+            // Without a colon, only a quoted string right after the name counts.
+            let quoted_next = items.iter().any(|item| item.key.is_none() && item.span.start == value_at);
+            if colon || (quoted_next && value_at > end) {
+                found.push(Label { slot, start, value_at, colon });
+                break;
+            }
+        }
+    }
+    found.sort_by_key(|label| label.start);
+    found
+}
+
+/// What the request states for a skill's slots.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Reading {
+    /// Values stated by name, as (slot name, value).
+    pub named: Vec<(String, String)>,
+    /// Quoted strings that carry no name, in order.
+    pub quoted: Vec<String>,
+    /// Numbers outside any stated value, in order.
+    pub numbers: Vec<String>,
+    /// `key=value` arguments whose key is not a slot of the skill.
+    pub unmatched: Vec<String>,
+    /// The request with every stated value hidden. This is what gets routed and learned.
+    pub phrase: String,
+}
+
+/// Read the request against a skill's slots. With no slots, only the phrase and the raw
+/// arguments are of use: that is how a request is read before a skill has been chosen.
+pub fn read(query: &str, slots: &[Slot]) -> Reading {
+    let items = scan(query);
+    let mut reading = Reading::default();
+    let mut value_of: Vec<Option<String>> = vec![None; slots.len()];
+    let mut used = vec![false; items.len()];
+    let mut hidden: Vec<Range<usize>> = items.iter().map(|item| item.hide.clone()).collect();
+    let mut blanked: Vec<Range<usize>> = items.iter().map(|item| item.span.clone()).collect();
+
+    for (index, item) in items.iter().enumerate() {
+        let Some(key) = &item.key else { continue };
+        used[index] = true;
+        match slots.iter().position(|slot| normal(&slot.name) == normal(key)) {
+            Some(slot) if value_of[slot].is_none() => value_of[slot] = Some(item.value.clone()),
+            Some(_) => {}
+            None => reading.unmatched.push(key.clone()),
+        }
+    }
+
+    let skip: Vec<bool> = value_of.iter().map(Option::is_some).collect();
+    let found = labels(query, &items, slots, &skip);
+    for (position, label) in found.iter().enumerate() {
+        if let Some(index) = items.iter().position(|item| item.key.is_none() && item.span.start == label.value_at) {
+            value_of[label.slot] = Some(items[index].value.clone());
+            used[index] = true;
+            continue;
+        }
+        if !label.colon {
+            continue;
+        }
+        // Unquoted: a text slot takes the rest of the request, up to the next stated value.
+        // Any other kind takes one word.
+        let next_label = found.get(position + 1).map(|next| next.start);
+        let next_item = items.iter().map(|item| item.span.start).find(|start| *start >= label.value_at);
+        let mut end = [next_label, next_item].into_iter().flatten().min().unwrap_or(query.len());
+        if slots[label.slot].kind != SlotKind::Text {
+            end = query[label.value_at..end].find(char::is_whitespace).map_or(end, |n| label.value_at + n);
+        }
+        let raw = &query[label.value_at..end];
+        let value = raw.trim_end();
+        if !value.is_empty() {
+            let span = label.value_at..label.value_at + value.len();
+            value_of[label.slot] = Some(value.to_string());
+            hidden.push(span.clone());
+            blanked.push(span);
+        }
+    }
+
+    for (slot, value) in slots.iter().zip(value_of) {
+        if let Some(value) = value {
+            let value = if slot.kind == SlotKind::Number { as_number(&value) } else { value };
+            reading.named.push((slot.name.clone(), value));
+        }
+    }
+    reading.quoted = items.iter().zip(&used).filter(|(_, used)| !**used).map(|(item, _)| item.value.clone()).collect();
+
+    let outside = replace(query, &blanked, " ");
+    reading.numbers = numbers_in(&outside);
+    // A request that is nothing but a stated value is routed as it is.
+    reading.phrase =
+        if outside.chars().any(char::is_alphanumeric) { replace(query, &hidden, HIDDEN) } else { query.to_string() };
+    reading
+}
+
+/// The request as it is routed and learned: stated values hidden.
+pub fn phrase(query: &str, slots: &[Slot]) -> String {
+    read(query, slots).phrase
+}
+
+/// The `name=value` arguments of a request, whatever skill it turns out to be for.
+pub fn stated(query: &str) -> Vec<(String, String)> {
+    scan(query).into_iter().filter_map(|item| item.key.map(|key| (key, item.value))).collect()
+}
+
+fn replace(text: &str, ranges: &[Range<usize>], with: &str) -> String {
+    let mut ranges: Vec<&Range<usize>> = ranges.iter().collect();
+    ranges.sort_by_key(|range| range.start);
+    let mut out = String::new();
+    let mut at = 0;
+    for range in ranges {
+        if range.start < at {
+            continue;
+        }
+        out.push_str(&text[at..range.start]);
+        out.push_str(with);
+        at = range.end;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
+/// Join command-line words into a request. The shell has already removed the quotes the user
+/// typed, so a word with spaces in it must have been quoted: the quotes are put back, which
+/// makes `jli commit message="two words"` read the same here as in an interactive session.
+pub fn request_from(words: &[&str]) -> String {
+    if words.len() == 1 {
+        return words[0].to_string();
+    }
+    let quote = |value: &str| {
+        let fits = [('"', '"'), ('\'', '\''), ('`', '`'), ('“', '”')]
+            .into_iter()
+            .find(|(open, close)| !value.contains(*open) && !value.contains(*close));
+        match fits {
+            // A value ending in a quote character would confuse the reader; such a word is rare enough to pass through.
+            Some((open, close)) => format!("{open}{value}{close}"),
+            None => value.to_string(),
+        }
+    };
+    let joined: Vec<String> = words
+        .iter()
+        .map(|word| {
+            if !word.is_empty() && !word.contains(char::is_whitespace) {
+                return word.to_string();
+            }
+            match key_at(word, 0) {
+                Some(key_end) => format!("{}={}", &word[..key_end], quote(&word[key_end + 1..])),
+                None => quote(word),
+            }
+        })
+        .collect();
+    joined.join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slot(name: &str, kind: SlotKind) -> Slot {
+        Slot { name: name.into(), kind, description: String::new(), default: None }
+    }
+
+    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter().map(|(name, value)| (name.to_string(), value.to_string())).collect()
+    }
+
+    #[test]
+    fn name_equals_value_is_an_argument() {
+        let message = [slot("message", SlotKind::Text)];
+        let reading = read("commit message=wip", &message);
+        assert_eq!(reading.named, pairs(&[("message", "wip")]));
+        assert_eq!(reading.phrase, "commit message=…");
+
+        let reading = read(r#"commit Message="delete the branch, then push" now"#, &message);
+        assert_eq!(reading.named, pairs(&[("message", "delete the branch, then push")]));
+        assert_eq!(reading.phrase, r#"commit Message="…" now"#);
+        assert!(reading.quoted.is_empty(), "a named value is not also a positional one");
+
+        assert_eq!(read("commit message='it's done'", &message).named, pairs(&[("message", "it's done")]));
+        assert_eq!(read("commit message=a=b", &message).named, pairs(&[("message", "a=b")]), "split on the first =");
+        assert!(read("commit message= now", &message).named.is_empty(), "an empty value is not given");
+        assert!(read("commit --message=wip -m=x", &message).named.is_empty(), "a flag is never an argument");
+        assert!(read("is a==b true", &message).unmatched.is_empty());
+        assert_eq!(read("commit message=one message=two", &message).named, pairs(&[("message", "one")]));
+    }
+
+    #[test]
+    fn an_argument_for_no_slot_is_reported() {
+        let reading = read("commit msg=wip", &[slot("message", SlotKind::Text)]);
+        assert!(reading.named.is_empty());
+        assert_eq!(reading.unmatched, ["msg"]);
+        let dashed = read("tag it tag-name=v1 count=three", &[slot("tag_name", SlotKind::Text), slot("count", SlotKind::Number)]);
+        assert_eq!(dashed.named, pairs(&[("tag_name", "v1"), ("count", "3")]));
+    }
+
+    #[test]
+    fn a_slot_name_labels_its_value() {
+        let message = [slot("message", SlotKind::Text)];
+        let reading = read("Commit this with a message: 'the message'", &message);
+        assert_eq!(reading.named, pairs(&[("message", "the message")]));
+        assert_eq!(reading.phrase, "Commit this with a message: '…'");
+
+        let reading = read("commit with message: fix the parser bug", &message);
+        assert_eq!(reading.named, pairs(&[("message", "fix the parser bug")]));
+        assert_eq!(reading.phrase, "commit with message: …");
+
+        assert_eq!(read("commit with the message \"wip\"", &message).named, pairs(&[("message", "wip")]));
+        assert!(read("commit with a nice message", &message).named.is_empty());
+        assert!(read("commit the messages: all", &message).named.is_empty(), "the name must be the whole word");
+
+        let two = [slot("pattern", SlotKind::Text), slot("replacement", SlotKind::Text), slot("count", SlotKind::Number)];
+        let reading = read("swap pattern: old name replacement: new name count: 2 times", &two);
+        assert_eq!(reading.named, pairs(&[("pattern", "old name"), ("replacement", "new name"), ("count", "2")]));
+        assert_eq!(reading.phrase, "swap pattern: … replacement: … count: … times");
+        let mixed = read("swap replacement: 'b' for pattern='a'", &two);
+        assert_eq!(mixed.named, pairs(&[("pattern", "a"), ("replacement", "b")]));
+    }
+
+    #[test]
+    fn quoted_strings_and_numbers_are_positional() {
+        let reading = read(r#"replace "foo" with “bar baz” in the 3 newest files, don't ask"#, &[]);
+        assert_eq!(reading.quoted, ["foo", "bar baz"]);
+        assert_eq!(reading.numbers, ["3"]);
+        assert_eq!(reading.phrase, r#"replace "…" with “…” in the 3 newest files, don't ask"#);
+
+        let reading = read("commit \"fix 3 bugs\" and show the last two commits", &[]);
+        assert_eq!(reading.numbers, ["2"], "a number inside a stated value is not a number argument");
+        assert_eq!(read("say `hi` or 'yo'", &[]).quoted, ["hi", "yo"]);
+        assert_eq!(read("abc123 and v2", &[]).numbers, Vec::<String>::new());
+        assert_eq!(read("an unclosed \"quote", &[]).quoted, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_request_that_is_only_a_value_is_routed_whole() {
+        assert_eq!(phrase("\"show me the files\"", &[]), "\"show me the files\"");
+        assert_eq!(phrase("commit \"wip\"", &[]), "commit \"…\"");
+        assert_eq!(stated("deploy env=prod region=\"eu west\" 'x'"), pairs(&[("env", "prod"), ("region", "eu west")]));
+    }
+
+    #[test]
+    fn command_line_words_get_their_quotes_back() {
+        assert_eq!(request_from(&["commit", "this", "with", "a", "message:", "the message"]), "commit this with a message: \"the message\"");
+        assert_eq!(request_from(&["commit", "message=fix the bug"]), "commit message=\"fix the bug\"");
+        assert_eq!(request_from(&["commit", "message=say \"hi\" now"]), "commit message='say \"hi\" now'");
+        assert_eq!(request_from(&["commit", "message=wip"]), "commit message=wip");
+        assert_eq!(request_from(&["commit with message 'x y'"]), "commit with message 'x y'", "one word is the whole request");
+        assert_eq!(request_from(&["echo", ""]), "echo \"\"");
+        let typed = "commit message=\"fix the bug\"";
+        let message = [slot("message", SlotKind::Text)];
+        assert_eq!(read(&request_from(&["commit", "message=fix the bug"]), &message), read(typed, &message));
+    }
+}

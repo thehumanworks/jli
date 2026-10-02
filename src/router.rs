@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::Serialize;
 
+use crate::args;
 use crate::context::{list_entries, read_context, Context};
 use crate::exec::{run, RunOptions};
 use crate::learn::{learn_phrase, LearnInput};
@@ -195,6 +196,9 @@ struct Route<'a> {
     ui: &'a Ui,
     options: &'a RouteOptions,
     query: &'a str,
+    /// The request with its stated values hidden. System 1 routes on this and it is what gets
+    /// learned, so the words of a value never steer the route.
+    phrase: String,
     context: Context,
     all_skills: Vec<Skill>,
     outcome: Outcome,
@@ -216,6 +220,7 @@ pub fn route(
         ui,
         options,
         query,
+        phrase: args::phrase(query, &[]),
         context: read_context(&options.cwd),
         all_skills: brain.skills()?,
         outcome: Outcome::new(query),
@@ -263,7 +268,7 @@ impl Route<'_> {
         };
 
         if !options.agent_only {
-            let decided = self.models.system1.decide(self.query, &self.context, &self.skills())?;
+            let decided = self.models.system1.decide(&self.phrase, &self.context, &self.skills())?;
             self.outcome.ms_system1 += decided.ms;
             ui.decision(&decided);
 
@@ -316,6 +321,7 @@ impl Route<'_> {
                     &self.models.llm,
                     &ProposeInput {
                         query: self.query,
+                        arguments: args::stated(self.query),
                         context: &self.context,
                         skills: &skills,
                         entries: &list_entries(&options.cwd),
@@ -389,6 +395,7 @@ impl Route<'_> {
 
         let template = Template { steps: &skill.steps, scenario: &skill.scenario, slots: &skill.slots };
         let filled = fill_slots(self.models, self.query, &template, &self.context, &plan.provided)?;
+        self.phrase = filled.phrase.clone();
         self.outcome.ms_system1 += filled.ms_system1;
         self.outcome.ms_system2 += filled.ms_system2;
         let mut unknown = filled.missing.clone();
@@ -399,6 +406,18 @@ impl Route<'_> {
             if *source != Source::Agent || !plan.is_new {
                 ui.note(format!("{{{name}}} = {} (from {source})", filled.values[name]));
             }
+        }
+        if !filled.unmatched.is_empty() {
+            let given: Vec<String> = filled.unmatched.iter().map(|name| format!("{name}=")).collect();
+            let takes: Vec<&str> = skill.slots.iter().map(|slot| slot.name.as_str()).collect();
+            let blocked = format!("{} does not take {}", skill.label, given.join(", "));
+            ui.warn(if takes.is_empty() {
+                format!("{blocked}: it takes no arguments.")
+            } else {
+                format!("{blocked}. Its arguments are: {}.", takes.join(", "))
+            });
+            self.outcome.blocked = Some(blocked);
+            return self.finish();
         }
         if !unknown.is_empty() {
             let names: Vec<String> = unknown.iter().map(|name| format!("{{{name}}}")).collect();
@@ -484,7 +503,7 @@ impl Route<'_> {
                     scenario: skill.scenario.clone(),
                     risk: skill.risk,
                     origin: Origin::Agent,
-                    examples: vec![self.query.to_string()],
+                    examples: vec![self.phrase.clone()],
                     slots: skill.slots.clone(),
                 })?;
                 self.brain.record_use(&skill.label)?;
@@ -499,9 +518,9 @@ impl Route<'_> {
             let vouched = plan.path == Path::System2 || !(options.yes || options.yolo) || result.exit_code == 0;
             let taught_something =
                 vouched && (plan.path == Path::System2 || plan.confidence.unwrap_or(1.0) < ALREADY_KNOWN_AT);
-            if taught_something && self.brain.add_example(&skill.label, self.query)? {
-                self.outcome.learned.push(format!("\"{}\" means {}", self.query, skill.label));
-                ui.learned(format!("\"{}\" means {}", self.query, c::bold(&skill.label)));
+            if taught_something && self.brain.add_example(&skill.label, &self.phrase)? {
+                self.outcome.learned.push(format!("\"{}\" means {}", self.phrase, skill.label));
+                ui.learned(format!("\"{}\" means {}", self.phrase, c::bold(&skill.label)));
             }
         }
         self.finish()
@@ -595,9 +614,9 @@ impl Route<'_> {
             Correction::Clarification(_) => unlearn,
         };
         if was_wrong && !plan.is_new {
-            self.brain.remove_example(&skill.label, self.query)?;
-            if self.brain.add_counter_example(&skill.label, self.query)? {
-                ui.learned(format!("\"{}\" does {} mean {}", self.query, c::bold("not"), skill.label));
+            self.brain.remove_example(&skill.label, &self.phrase)?;
+            if self.brain.add_counter_example(&skill.label, &self.phrase)? {
+                ui.learned(format!("\"{}\" does {} mean {}", self.phrase, c::bold("not"), skill.label));
             }
         }
         let steps = match choice {
@@ -615,7 +634,7 @@ impl Route<'_> {
             self.brain,
             self.models,
             &LearnInput {
-                phrase: self.query.to_string(),
+                phrase: self.phrase.clone(),
                 steps: steps.clone(),
                 risk: None,
                 mode: options.mode,
@@ -626,7 +645,7 @@ impl Route<'_> {
         )?;
         ui.learned(format!(
             "\"{}\" means {}{}",
-            self.query,
+            self.phrase,
             c::bold(&taught.label),
             if taught.created { " (new skill)" } else { "" }
         ));
@@ -644,7 +663,7 @@ impl Route<'_> {
         self.outcome.exit_code = Some(rerun.exit_code);
         self.outcome.blocked = None;
         self.outcome.output = rerun.output;
-        self.outcome.learned = vec![format!("\"{}\" means {}", self.query, taught.label)];
+        self.outcome.learned = vec![format!("\"{}\" means {}", self.phrase, taught.label)];
         self.finish().map(Some)
     }
 }

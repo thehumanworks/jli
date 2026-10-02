@@ -162,6 +162,105 @@ fn quoted_text_and_numbers_fill_slots_without_a_model() {
     assert_eq!(outcome.commands, ["git commit -m 'first draft'"]);
 }
 
+fn greeting_skill(scratch: &Scratch) {
+    let slot = |name: &str, kind: SlotKind, default: Option<&str>| Slot {
+        name: name.into(),
+        kind,
+        description: String::new(),
+        default: default.map(String::from),
+    };
+    scratch
+        .brain
+        .add_skill(&NewSkill {
+            label: "greet".into(),
+            steps: vec!["printf '%s %s x%s\\n' {greeting} {name} {count}".into()],
+            scenario: "the user wants someone greeted".into(),
+            risk: Risk::Safe,
+            origin: Origin::Taught,
+            examples: vec![],
+            slots: vec![
+                slot("name", SlotKind::Text, None),
+                slot("greeting", SlotKind::Text, None),
+                slot("count", SlotKind::Number, Some("1")),
+            ],
+        })
+        .unwrap();
+}
+
+#[test]
+fn stated_arguments_reach_their_slots_without_a_language_model() {
+    let scratch = Scratch::new("arguments");
+    greeting_skill(&scratch);
+    // Any language model call panics, so every value below is found by reading the request.
+    let (models, _) = models(|_| decision("greet", 0.9, 0.9, SAFE), no_language_model());
+    let options = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let command = |request: &str| go(&scratch, &models, request, &mut Script::default(), &options).commands.join(" && ");
+    assert_eq!(command("greet name=\"Ada L\" greeting=hello 3 times"), "printf '%s %s x%s\\n' hello 'Ada L' 3");
+    assert_eq!(command("greet name: Grace Hopper greeting: 'good day' count=two"), "printf '%s %s x%s\\n' 'good day' 'Grace Hopper' 2");
+    assert_eq!(command("greet \"hi\" and then \"Bob\""), "printf '%s %s x%s\\n' hi Bob 1", "unnamed values follow the template");
+    assert_eq!(command("greet \"Bob\" greeting=hey"), "printf '%s %s x%s\\n' hey Bob 1", "a named value leaves the unnamed one for the other slot");
+    assert_eq!(command("greet name='4 of us' greeting=yo"), "printf '%s %s x%s\\n' yo '4 of us' 1", "a number inside a value is not the count");
+}
+
+#[test]
+fn a_stated_value_cannot_steer_the_route() {
+    let scratch = Scratch::new("hidden");
+    let (models, _) = models(
+        |request| {
+            assert_eq!(request["state"]["request"], "commit message=\"…\"", "System 1 never sees the value");
+            decision("git-commit", 0.95, 0.9, [0.2, 0.8, 0.0])
+        },
+        no_language_model(),
+    );
+    let options = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let request = "commit message=\"delete the old branch and push to main\"";
+    let outcome = go(&scratch, &models, request, &mut Script::default(), &options);
+    assert_eq!(outcome.query, request);
+    assert_eq!((outcome.label.as_deref(), outcome.risk), (Some("git-commit"), Some(Risk::Modifies)));
+    assert_eq!(outcome.commands, ["git commit -m 'delete the old branch and push to main'"]);
+}
+
+#[test]
+fn an_argument_the_command_does_not_take_blocks_the_run() {
+    let scratch = Scratch::new("unmatched");
+    let (models, _) = models(|_| decision("git-commit", 0.9, 0.9, [0.2, 0.8, 0.0]), no_language_model());
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "commit \"wip\" msg=wip", &mut Script::default(), &options);
+    assert_eq!(outcome.blocked.as_deref(), Some("git-commit does not take msg="));
+    assert!(!outcome.ran);
+    assert_eq!(outcome.exit_code(), 3);
+}
+
+#[test]
+fn a_phrasing_is_learned_without_its_values() {
+    let scratch = Scratch::new("phrase");
+    greeting_skill(&scratch);
+    let (models, _) = models(|_| decision("greet", 0.6, 0.9, SAFE), no_language_model());
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "say greeting: good evening name=\"Ada L\"", &mut Script::default(), &options);
+    assert_eq!(outcome.output.as_deref(), Some("good evening Ada L x1\n"));
+    assert_eq!(outcome.learned, ["\"say greeting: … name=\"…\"\" means greet"]);
+    assert_eq!(scratch.brain.skill("greet").unwrap().unwrap().examples, ["say greeting: … name=\"…\""]);
+    assert_eq!(scratch.brain.events(1).unwrap()[0].query, "say greeting: good evening name=\"Ada L\"", "history keeps the request whole");
+}
+
+#[test]
+fn a_stated_argument_outranks_the_agent() {
+    let scratch = Scratch::new("outranks");
+    let proposal = json!({
+        "kind": "existing", "existingLabel": "git-commit", "label": null, "steps": [], "scenario": "",
+        "slots": [], "slotValues": [{ "name": "message", "value": "the agent's own idea" }],
+        "risk": "modifies", "explanation": "Commits.", "answer": null,
+    });
+    let (models, replies) = models(|_| decision(NONE, 0.8, 0.95, [0.2, 0.8, 0.0]), vec![("proposal", proposal)]);
+    let options = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "save my work message=mine", &mut Script::default(), &options);
+    assert_eq!(outcome.commands, ["git commit -m mine"]);
+    let seen = replies.seen.lock().unwrap();
+    let input: Value = serde_json::from_str(seen[0]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(input["arguments"], json!([{ "name": "message", "value": "mine" }]));
+}
+
 #[test]
 fn a_request_that_is_not_a_command_runs_nothing() {
     let scratch = Scratch::new("not-a-command");
@@ -279,7 +378,7 @@ fn the_same_command_with_another_value_is_not_a_counter_example() {
     assert_eq!(outcome.label.as_deref(), Some("git-commit"));
     let skill = scratch.brain.skill("git-commit").unwrap().unwrap();
     assert!(skill.counter_examples.is_empty());
-    assert_eq!(skill.examples, ["commit as \"wip\""]);
+    assert_eq!(skill.examples, ["commit as \"…\""], "the phrasing is learned without its value");
 }
 
 #[test]

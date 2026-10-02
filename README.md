@@ -126,9 +126,25 @@ The decision trace goes to stderr and the command's output to stdout, so `jli` c
 
 ## Slots
 
-Skills are templates such as `git log -n {count}` or `wc -l {file}`. Values are filled by the
-cheapest method that works: a number or quoted string found in the request, a System 1 `choice`
-among the real files or branches, the slot's default, and only then the agent.
+Skills are templates such as `git log -n {count}` or `git commit -m {message}`. A value you state
+is passed as written, by a parser and no model:
+
+```sh
+jli commit message="fix the parser"            # name=value, for the slot called message
+jli commit this with a message: 'fix the parser'   # the slot's name as a label
+jli commit with message: fix the parser        # unquoted, a label takes the rest of the request
+jli commit "fix the parser"                    # a quoted string goes to the next open text slot
+jli tag this name=v1.2.0 message="first cut"   # several arguments, each to its own slot
+```
+
+The trace shows `{message} = fix the parser (from request)`. A stated value is hidden from routing,
+so the words of a commit message cannot change which command is picked. `name=` for a slot the
+command does not have stops the run and lists the command's arguments; `jli skills` shows them as
+`{name}` in each command.
+
+Anything not stated is filled by the cheapest method that works: a number in the request, a System 1
+`choice` among the real files or branches, the agent, and last the slot's default. See
+[ADR 11](docs/adr/0011-stated-arguments.md).
 
 ## One brain for every host
 
@@ -158,6 +174,7 @@ The cloud modes are wired but have not been run against a live Turso database ye
 | `src/llm.rs` | the one HTTP call every language model request goes through |
 | `src/router.rs` | the loop: decide, escalate, confirm, run, write back |
 | `src/store.rs` | the brain: skills and events in libSQL, behind a runtime that never leaves the module |
+| `src/args.rs` | reads the arguments a request states: `name=value`, labels and quoted text |
 | `src/slots.rs` | fills and shell-quotes `{slot}` values |
 | `src/seed.rs` | the original hard-coded matrix, now only the seed for an empty brain |
 | `src/exec.rs` | runs the steps with `bash -c`, watching stderr in auto mode |

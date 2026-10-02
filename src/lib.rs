@@ -5,6 +5,7 @@
 //! translator (`translator`, `suggest`) turns what is taught, declined or failed into matrix rows.
 //! `router` is the loop that ties them together.
 
+pub mod args;
 pub mod cli;
 pub mod context;
 pub mod demo;

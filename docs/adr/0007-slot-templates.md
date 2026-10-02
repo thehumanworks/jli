@@ -25,6 +25,9 @@ found for each request, cheaply, and dropped into a shell command safely.
      branches, accepted at confidence 0.6 or more;
   4. the agent, for any text slot not quoted in the request and any slot without a default;
   5. the slot's default.
+  [ADR 11](0011-stated-arguments.md) puts a value the request states by name ahead of all of these,
+  and hands quoted strings and numbers to slots in template order instead of giving each slot the
+  first one.
 - **Every value is shell-quoted** unless it matches `^[A-Za-z0-9_\-.,/:=@%+]+$`. Quoting uses single
   quotes, with `'` written as `'\''`. Placeholders are never quoted inside a template; quoting is
   added when the template is rendered.
@@ -50,5 +53,5 @@ found for each request, cheaply, and dropped into a shell command safely.
 - **Known gap**, seen on 2026-10-02: a glob given as a slot value is quoted, so it does not expand.
   The agent proposed `rm -f -- {pattern}` with the value `*.log`, which rendered as
   `rm -f -- '*.log'`. The prototype quoted it the same way.
-- The number pattern takes the first number in the request. A request that contains two numbers
-  can get the wrong one.
+- Numbers go to number slots in template order. A request whose numbers come in another order can
+  get them swapped; `name=value` ([ADR 11](0011-stated-arguments.md)) is the exact way.
