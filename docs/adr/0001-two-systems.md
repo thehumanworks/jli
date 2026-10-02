@@ -18,7 +18,7 @@ Three models take part, and only the first is on the request path every time.
 | Role | Model | Latency | When it runs |
 | --- | --- | --- | --- |
 | System 1, the decision model | TypeSafe `jev-latest` | about 250 ms | every request |
-| System 2, the reasoning agent | `openai/gpt-5-mini` | 3 to 6 s | only when System 1 has no confident pick |
+| System 2, the reasoning agent | `inception/mercury-2.5` | about 2 s | only when System 1 has no confident pick |
 | Translator | `inception/mercury-2.5` | about 1 s | only when something is taught, declined, or fails |
 
 **The decision matrix is a database table.** Each row is a skill: the shell steps it runs, a

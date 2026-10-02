@@ -52,13 +52,12 @@ pub static TRANSLATOR_MODEL: LazyLock<String> = LazyLock::new(|| {
 });
 /// Reasoning agent: proposes commands for requests nothing in the matrix fits.
 pub static AGENT_MODEL: LazyLock<String> =
-    LazyLock::new(|| clean(std::env::var("JLI_AGENT_MODEL").ok()).unwrap_or_else(|| "openai/gpt-5-mini".into()));
+    LazyLock::new(|| clean(std::env::var("JLI_AGENT_MODEL").ok()).unwrap_or_else(|| "inception/mercury-2.5".into()));
 
-/// "Off" is fastest and steadiest; "Low" lets the model think briefly.
+/// Reasoning is off everywhere: Mercury stalls with it on, and every default model is Mercury.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reasoning {
     Off,
-    Low,
 }
 
 pub struct JsonRequest<'a> {
@@ -165,7 +164,6 @@ impl Llm {
         };
         let reasoning = match request.reasoning {
             Reasoning::Off => json!({ "enabled": false }),
-            Reasoning::Low => json!({ "effort": "low" }),
         };
         let body = serde_json::to_vec(&json!({
             "model": request.model,

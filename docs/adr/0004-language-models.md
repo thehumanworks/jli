@@ -42,7 +42,7 @@ X-Title: jli
 
 | Caller | Model | Reasoning | Timeout | Attempts |
 | --- | --- | --- | --- | --- |
-| Agent: `propose`, `extract` | `JLI_AGENT_MODEL`, default `openai/gpt-5-mini` | `{ "effort": "low" }` | 30 s | 2 |
+| Agent: `propose`, `extract` | `JLI_AGENT_MODEL`, default `inception/mercury-2.5` | `{ "enabled": false }` | 30 s | 2 |
 | Translator | `JLI_TRANSLATOR_MODEL`, default `inception/mercury-2.5` | `{ "enabled": false }` | 8 s | 2 |
 | Suggester | the translator's model | `{ "enabled": false }` | 10 s | 2 |
 
@@ -53,6 +53,11 @@ X-Title: jli
   policy, so the translator needs OpenRouter.
 - `gpt-5-mini` occasionally hangs on OpenRouter, hence the 30 second timeout and the retry. It
   happened again on 2026-10-02: one proposal took 33 s, because the first attempt timed out.
+- `gpt-5-mini` was discontinued, so on 2026-10-02 the agent moved to `inception/mercury-2.5` with
+  reasoning disabled, the same setting the translator runs with. The `Reasoning::Low` option went
+  with it: no default model can use it. The first live proposal took 2.0 s. The 30 s timeout
+  stays until the agent prompt, which is far larger than the translator's, has been timed on
+  Mercury more than once.
 
 ## Consequences
 

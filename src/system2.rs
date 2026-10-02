@@ -132,7 +132,7 @@ pub fn propose(llm: &Llm, input: &ProposeInput) -> Result<(Proposal, u64)> {
         name: "proposal",
         schema: proposal_schema(),
         timeout: Duration::from_secs(30),
-        reasoning: Reasoning::Low,
+        reasoning: Reasoning::Off,
         input: json!({
             "request": input.query,
             "arguments": input.arguments.iter().map(|(name, value)| json!({ "name": name, "value": value })).collect::<Vec<_>>(),
@@ -177,7 +177,7 @@ pub fn extract(llm: &Llm, query: &str, steps: &[String], scenario: &str, slots: 
         name: "slot_values",
         schema: values_schema(),
         timeout: Duration::from_secs(30),
-        reasoning: Reasoning::Low,
+        reasoning: Reasoning::Off,
         input: json!({ "request": query, "command": steps, "purpose": scenario, "placeholders": slots }),
     })?;
     let values = data

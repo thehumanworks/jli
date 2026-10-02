@@ -346,7 +346,7 @@ fn an_agent_proposal_that_runs_becomes_a_skill() {
     assert_eq!(skill.slots[0].kind, SlotKind::File);
 
     let body = &replies.seen.lock().unwrap()[0];
-    assert_eq!(body["reasoning"], json!({ "effort": "low" }));
+    assert_eq!(body["reasoning"], json!({ "enabled": false }), "Mercury stalls with reasoning on");
     let input: Value = serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
     assert_eq!(input["request"], "how many lines are in notes.txt");
     assert_eq!(input["directoryEntries"], json!(["notes.txt"]));

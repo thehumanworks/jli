@@ -16,8 +16,8 @@ Two models, the way people think about fast and slow thinking.
 - **System 1** is TypeSafe's `jev` decision model. One call, about 250 ms, answers three typed
   questions against the request: a `choice` over every known skill, a `noul` on whether a command is
   wanted at all, and a `score` on how risky the intent is.
-- **System 2** is an OpenAI model. It is slow (3 to 6 s) and is only called when System 1 has no
-  confident answer. It proposes a reusable skill, not a one-off command.
+- **System 2** is a reasoning agent, Mercury 2.5 by default (about 2 s). It is only called when
+  System 1 has no confident answer. It proposes a reusable skill, not a one-off command.
 - **The translator** is a fast model, Mercury 2.5 by default (under 1 s). It never sits on the
   request path. It rewrites what you teach into a general matrix row, and in auto mode it diagnoses
   failures and suggests alternatives.
@@ -198,7 +198,7 @@ The app makes two kinds of HTTP call and uses one database. It is synchronous th
 - **Storage:** libSQL through its first-party crate. It is async, so `store.rs` owns a
   current-thread Tokio runtime and blocks on it; nothing outside that module is async.
 
-Models are set with `JLI_AGENT_MODEL` (default `openai/gpt-5-mini`) and `JLI_TRANSLATOR_MODEL`
+Models are set with `JLI_AGENT_MODEL` (default `inception/mercury-2.5`) and `JLI_TRANSLATOR_MODEL`
 (default `inception/mercury-2.5`).
 
 ## Design decisions
