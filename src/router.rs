@@ -37,6 +37,8 @@ pub struct RouteOptions {
     pub mode: Mode,
     /// Approve confirmations automatically. Never covers destructive commands.
     pub yes: bool,
+    /// Approve every confirmation automatically, destructive commands included.
+    pub yolo: bool,
     pub dry_run: bool,
     /// Capture command output instead of streaming it.
     pub capture: bool,
@@ -55,6 +57,7 @@ impl RouteOptions {
             threshold,
             mode,
             yes: false,
+            yolo: false,
             dry_run: false,
             capture: false,
             agent_only: false,
@@ -410,15 +413,15 @@ impl Route<'_> {
             return Ok(self.outcome.clone());
         }
 
-        // ── Permission: one question, every time, unless --yes ───────────────────
+        // ── Permission: one question, every time, unless --yes or --yolo ───────────────────
         let destructive = plan.risk == Risk::Destructive;
-        let approved = if options.yes && !destructive { Some(true) } else { prompt.confirm("Run it?") };
+        let approved = if options.yolo || (options.yes && !destructive) { Some(true) } else { prompt.confirm("Run it?") };
         let Some(approved) = approved else {
             self.outcome.blocked = Some(
-                if destructive { "destructive commands need an interactive yes" } else { "needs confirmation" }.into(),
+                if destructive { "destructive commands need an interactive yes or --yolo" } else { "needs confirmation" }.into(),
             );
             ui.warn(if destructive {
-                "Not run: it is destructive, which always needs an interactive yes."
+                "Not run: it is destructive, which needs an interactive yes or --yolo."
             } else {
                 "Not run: nobody to confirm. Re-run with --yes to approve."
             });
@@ -492,8 +495,8 @@ impl Route<'_> {
             }
         } else {
             self.brain.record_use(&skill.label)?;
-            // A human yes vouches for the route even if the command itself failed; --yes needs a clean exit.
-            let vouched = plan.path == Path::System2 || !options.yes || result.exit_code == 0;
+            // A human yes vouches for the route even if the command itself failed; --yes and --yolo need a clean exit.
+            let vouched = plan.path == Path::System2 || !(options.yes || options.yolo) || result.exit_code == 0;
             let taught_something =
                 vouched && (plan.path == Path::System2 || plan.confidence.unwrap_or(1.0) < ALREADY_KNOWN_AT);
             if taught_something && self.brain.add_example(&skill.label, self.query)? {

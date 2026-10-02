@@ -23,6 +23,7 @@ fn help() -> String {
 {}
   -n, --dry-run    show what would run, execute nothing, learn nothing
   -y, --yes        run without asking (never approves destructive commands)
+  -Y, --yolo       run without asking, destructive commands included
       --confidence=N   use System 1's pick at or above N for this run (0 to 1)
       --mode=M         learning mode for this run: manual, semi or auto
   -q, --quiet      hide the decision trace
@@ -46,6 +47,9 @@ fn help() -> String {
   JLI_DB_URL     file:/path/brain.db (default ~/.jli/brain.db) or libsql://… for a cloud brain
   JLI_SYNC_URL   libsql://… keeps a local replica in sync with a cloud brain
   JLI_DB_TOKEN   auth token for the cloud brain
+  JLI_YES        1 or true: the same as --yes
+  JLI_YOLO       1 or true: the same as --yolo
+  JLI_THRESHOLD  0 to 1: the same as --confidence= (JLI_CONFIDENCE also works)
 ",
         c::bold("jli"),
         c::bold("Usage"),
@@ -59,6 +63,7 @@ fn help() -> String {
 struct Flags {
     dry_run: bool,
     yes: bool,
+    yolo: bool,
     quiet: bool,
     json: bool,
     agent: bool,
@@ -102,18 +107,23 @@ fn resolve_mode(brain: &Brain, flags: &Flags) -> Result<Mode> {
     }
 }
 
-/// Flag, then JLI_CONFIDENCE, then the brain's stored setting, then the default.
+/// Flag, then JLI_THRESHOLD (or its older name JLI_CONFIDENCE), then the brain's stored setting, then the default.
 fn resolve_threshold(brain: &Brain, flags: &Flags) -> Result<f64> {
     if let Some(threshold) = flags.threshold {
         return Ok(threshold);
     }
-    if let Some(from_env) = env("JLI_CONFIDENCE") {
+    if let Some(from_env) = env("JLI_THRESHOLD").or_else(|| env("JLI_CONFIDENCE")) {
         return parse_threshold(&from_env);
     }
     match brain.setting("confidence")?.filter(|stored| !stored.is_empty()) {
         Some(stored) => parse_threshold(&stored),
         None => Ok(DEFAULT_THRESHOLD),
     }
+}
+
+/// An on/off environment variable: 1 or true (any case) turns it on. Anything else is ignored.
+fn switched_on(lookup: impl Fn(&str) -> Option<String>, name: &str) -> bool {
+    lookup(name).is_some_and(|value| matches!(value.trim().to_lowercase().as_str(), "1" | "true"))
 }
 
 struct Parsed {
@@ -134,6 +144,7 @@ fn parse(argv: &[String]) -> Result<Parsed> {
         match arg.as_str() {
             "-n" | "--dry-run" => flags.dry_run = true,
             "-y" | "--yes" => flags.yes = true,
+            "-Y" | "--yolo" => flags.yolo = true,
             "-q" | "--quiet" => flags.quiet = true,
             "--json" => flags.json = true,
             "--agent" => flags.agent = true,
@@ -174,6 +185,7 @@ impl App {
         let ui = Ui::new(!flags.quiet && !flags.json);
         let options = RouteOptions {
             yes: flags.yes,
+            yolo: flags.yolo,
             dry_run: flags.dry_run,
             capture: flags.json,
             agent_only: flags.agent,
@@ -427,7 +439,7 @@ impl App {
                     resolve_mode(&self.brain, flags)?,
                     c::dim("manual: stored as taught · semi: a fast model generalises what you teach · auto: also learns from a no or a failed command")
                 ));
-                say(c::dim("\nSet with: jli config confidence 0.7 · jli config mode auto\nOr per shell with JLI_CONFIDENCE / JLI_MODE, or per run with --confidence= / --mode="));
+                say(c::dim("\nSet with: jli config confidence 0.7 · jli config mode auto\nOr per shell with JLI_THRESHOLD / JLI_MODE, or per run with --confidence= / --mode="));
             }
             _ => return Ok(None),
         }
@@ -494,7 +506,9 @@ fn path_tag(path: Path) -> String {
 }
 
 fn run(argv: &[String]) -> Result<i32> {
-    let Parsed { flags, words, rest } = parse(argv)?;
+    let Parsed { mut flags, words, rest } = parse(argv)?;
+    flags.yes |= switched_on(env, "JLI_YES");
+    flags.yolo |= switched_on(env, "JLI_YOLO");
     let first = words.first().map(String::as_str);
     if matches!(first, Some("help" | "--help" | "-h")) {
         say(help());
@@ -545,6 +559,25 @@ mod tests {
         assert_eq!(teach.rest, ["git", "log", "-y"], "flags after -- belong to the command");
         assert_eq!(teach.flags.risk, Some(Risk::Safe));
         assert!(!teach.flags.yes);
+    }
+
+    #[test]
+    fn yes_comes_from_the_flag_or_the_environment() {
+        for (flag, yes, yolo) in [("-y", true, false), ("--yes", true, false), ("-Y", false, true), ("--yolo", false, true)] {
+            let parsed = parse(&args(&[flag, "stage", "everything"])).unwrap();
+            assert_eq!((parsed.flags.yes, parsed.flags.yolo), (yes, yolo), "{flag}");
+            assert_eq!(parsed.words, ["stage", "everything"]);
+        }
+        let only_yolo = |name: &str| (name == "JLI_YOLO").then(|| "1".to_string());
+        assert!(switched_on(only_yolo, "JLI_YOLO") && !switched_on(only_yolo, "JLI_YES"), "each variable is its own switch");
+        let with = |value: Option<&str>| switched_on(|_| value.map(String::from), "JLI_YES");
+        for value in ["1", "true", " TRUE ", "True"] {
+            assert!(with(Some(value)), "{value} switches it on");
+        }
+        for value in ["0", "false", "yes", "", "2"] {
+            assert!(!with(Some(value)), "{value} does not switch it on");
+        }
+        assert!(!with(None));
     }
 
     #[test]

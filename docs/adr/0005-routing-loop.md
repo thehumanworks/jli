@@ -15,8 +15,9 @@
    - Otherwise ask System 2, passing the known skills, any rejected skills and any clarification.
      It may pick a known skill, propose a new one, or say that nothing should run.
 3. **Fill slots** ([ADR 7](0007-slot-templates.md)). A slot with no value blocks the run.
-4. **Confirm.** Always ask "Run it?" unless `--yes` is given. A destructive command asks even with
-   `--yes`. With no terminal and no `--yes`, nothing runs and the exit code is 3.
+4. **Confirm.** Always ask "Run it?" unless `--yes` (or `JLI_YES=1`) is given. A destructive command asks even with
+   `--yes`; only `--yolo` (or `-Y`, or `JLI_YOLO=1`) approves those too. With no terminal and neither
+   flag, nothing runs and the exit code is 3.
 5. **On no**, run the correction flow for the current mode ([ADR 8](0008-corrections.md)).
 6. **Run** each step with `bash -c`, stopping at the first failure.
 7. **In auto mode, on failure**, diagnose before learning anything ([ADR 8](0008-corrections.md)).
@@ -41,7 +42,7 @@ human yes vouches for it even if the command failed; `--yes` needs a clean exit.
 | Confidence to accept a picked file or branch | 0.6 |
 
 The threshold and the mode are each resolved in this order: the flag (`--confidence=`, `--mode=`),
-the environment (`JLI_CONFIDENCE`, `JLI_MODE`), the setting stored in the brain
+the environment (`JLI_THRESHOLD` or its older name `JLI_CONFIDENCE`, `JLI_MODE`), the setting stored in the brain
 (`jli config …`), then the default.
 
 **The CLI contract:**
@@ -58,7 +59,7 @@ jli sync
 jli demo
 jli help
 
--n, --dry-run   -y, --yes   -q, --quiet   --json   --agent
+-n, --dry-run   -y, --yes (or JLI_YES=1)   -Y, --yolo (or JLI_YOLO=1)   -q, --quiet   --json   --agent
 --confidence=N  --mode=M    --risk=R
 ```
 

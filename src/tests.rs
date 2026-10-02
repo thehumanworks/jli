@@ -197,9 +197,29 @@ fn a_destructive_command_is_never_approved_by_yes() {
     let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
     let outcome = go(&scratch, &models, "delete all the log files", &mut script, &options);
     assert_eq!(outcome.risk, Some(Risk::Destructive), "the intent risk outvotes the agent's");
-    assert_eq!(outcome.blocked.as_deref(), Some("destructive commands need an interactive yes"));
+    assert_eq!(outcome.blocked.as_deref(), Some("destructive commands need an interactive yes or --yolo"));
     assert_eq!(script.questions, ["Run it?"], "--yes still asks");
     assert_eq!(outcome.exit_code(), 3);
+}
+
+#[test]
+fn yolo_runs_a_destructive_command_without_asking() {
+    let scratch = Scratch::new("yolo");
+    let log = scratch.work.join("old.log");
+    std::fs::write(&log, "noise\n").unwrap();
+    let proposal = json!({
+        "kind": "new", "existingLabel": null, "label": "delete-log-files", "steps": ["rm -f *.log"],
+        "scenario": "the user wants every .log file in the directory deleted", "slots": [], "slotValues": [],
+        "risk": "destructive", "explanation": "Deletes the log files.", "answer": null,
+    });
+    let (models, _) = models(|_| decision(NONE, 0.8, 0.95, [0.1, 0.3, 0.6]), vec![("proposal", proposal)]);
+    let mut script = Script::default();
+    let options = RouteOptions { yolo: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "delete all the log files", &mut script, &options);
+    assert_eq!(outcome.risk, Some(Risk::Destructive));
+    assert!(script.questions.is_empty(), "--yolo never asks");
+    assert!(outcome.ran && outcome.exit_code == Some(0) && outcome.blocked.is_none());
+    assert!(!log.exists(), "the command really ran");
 }
 
 #[test]

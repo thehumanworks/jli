@@ -73,13 +73,17 @@ and a dozen translator calls. Earlier runs, including the TypeScript prototype's
 
 ## Confirmation
 
-There is one rule. `jli` shows the command and asks "Run it?" every time, unless you pass `-y`.
-Destructive commands ask even with `-y`. Answer no and it asks what it should have run: type the
-command, type `?` to ask the agent, or press enter to skip.
+`jli` shows the command and asks "Run it?" every time, unless you approve up front. There are two levels, each a flag or an environment variable set to `1` or `true`:
+
+- `-y`, `--yes` or `JLI_YES`: run without asking, except destructive commands, which still ask.
+- `-Y`, `--yolo` or `JLI_YOLO`: run without asking, destructive commands included.
+
+Answer no and it asks what it should have run: type the command, type `?` to ask the agent, or
+press enter to skip.
 
 System 1's pick is used when its confidence reaches the threshold, 0.5 by default. Below that the
 agent is asked. Set the threshold with `jli config confidence 0.7` (stored in the brain, so shared
-across hosts), `JLI_CONFIDENCE=0.7`, or `--confidence=0.7` for one run.
+across hosts), `JLI_THRESHOLD=0.7` (`JLI_CONFIDENCE` also works), or `--confidence=0.7` for one run.
 
 ## Try it
 
@@ -106,7 +110,8 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | --- | --- |
 | `jli <request>` | route, run, learn |
 | `jli -n <request>` | dry run: show the command, execute and learn nothing |
-| `jli -y <request>` | run without asking; never approves destructive commands |
+| `jli -y <request>` | run without asking; never approves destructive commands (also `--yes`, `JLI_YES=1`) |
+| `jli -Y <request>` | run without asking, destructive commands included (also `--yolo`, `JLI_YOLO=1`) |
 | `jli config confidence <0..1>` | set the confidence threshold |
 | `jli config mode <manual\|semi\|auto>` | set the learning mode |
 | `jli --json <request>` | machine-readable outcome with captured output, for agents |
