@@ -83,6 +83,9 @@ choosing the command, and the agent writes only what the request leaves unsaid.
 
 - A value the user states is passed as written, takes no model call, and cannot change the route or
   the risk reading.
+- A hidden value no longer adds to System 1's reading of the request's risk. A known skill is
+  unaffected, since its risk is stored with it. For a new proposal the value's words no longer vote;
+  the agent's own rating still does.
 - A request that uses `word=value` in passing, such as "show files where size=big", is blocked
   unless the chosen skill has a slot of that name. Quoting it, `"size=big"`, makes it a plain value.
 - An unquoted label value is not hidden from System 1, because labels are only known once a skill

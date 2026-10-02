@@ -30,7 +30,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 - [6](0006-learning-modes.md): auto mode cannot learn from success alone, and the benchmark's
   paraphrases were written by its author.
 - [7](0007-slot-templates.md): a glob given as a slot value is quoted and does not expand.
-- [11](0011-stated-arguments.md): a stated value has no escapes, and hidden requests were measured on a handful
-  of live cases, not on the benchmark.
 - [8](0008-corrections.md): a correction against a strongly matching seeded skill may not stick, and
   two correction flows have not been tested live.
+- [11](0011-stated-arguments.md): a stated value has no escapes, and hidden requests were measured on a handful
+  of live cases, not on the benchmark.
