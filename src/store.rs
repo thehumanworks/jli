@@ -919,14 +919,20 @@ impl Brain {
     /// global skills hold gets a scenario of the project's own, and the global row is not written: a
     /// rewrite measured in one project is that project's (ADR 22). Otherwise the row's own scenario
     /// changes. Returns false when there is no such skill or it already reads that way here.
+    ///
+    /// The global row's own scenario is never kept as the project's: that would stop a later rewrite
+    /// of the global row from reaching the project. Asked for it, the project drops its own instead.
     pub fn set_scenario(&self, label: &str, scenario: &str) -> Result<bool> {
         let Some(global) = self.global_row(label)? else {
             return self.edit_column_in(&self.scope, label, "scenario", |stored| {
                 Ok((text(stored) != scenario).then(|| scenario.to_string()))
             });
         };
+        if global.scenario == scenario {
+            return self.clear_project_scenario(label);
+        }
         let kept = self.scenarios_of(&self.scope)?.remove(&(global.label.clone(), global.created_at.clone()));
-        if kept.as_deref().unwrap_or(&global.scenario) == scenario {
+        if kept.as_deref() == Some(scenario) {
             return Ok(false);
         }
         self.execute(
@@ -2411,6 +2417,13 @@ mod tests {
         assert!(shop.clear_project_scenario("du-sh").unwrap());
         assert!(!shop.clear_project_scenario("du-sh").unwrap());
         assert_eq!(scenario(&shop), folder);
+
+        // Set to the global row's own text, the project keeps none: a later global rewrite still reaches it.
+        shop.set_scenario("du-sh", checkout).unwrap();
+        assert!(shop.set_scenario("du-sh", folder).unwrap());
+        assert_eq!(shop.project_scenario("du-sh").unwrap(), None);
+        global.set_scenario("du-sh", "the user wants a folder's size").unwrap();
+        assert_eq!(scenario(&shop), "the user wants a folder's size");
 
         // The scenario is about one row: forgotten everywhere and taught again, the global skill starts clean.
         shop.set_scenario("du-sh", checkout).unwrap();

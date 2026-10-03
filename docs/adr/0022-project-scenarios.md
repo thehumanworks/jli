@@ -74,9 +74,10 @@ CREATE TABLE IF NOT EXISTS project_scenarios (
   and taught again starts clean in every project.
 - It holds one value, written with an upsert (`ON CONFLICT … DO UPDATE SET scenario`) as a setting
   is. Of two writers the later one wins. There is no list in the row that a second writer could lose.
-- `Brain::set_scenario` writes nothing when the scenario already reads that way in the project. In
-  particular it never stores a copy of the global scenario, which would stop later global rewrites
-  from reaching the project.
+- `Brain::set_scenario` writes nothing when the scenario already reads that way in the project, and
+  it never stores a copy of the global row's scenario, which would stop later global rewrites from
+  reaching the project. Asked for the global row's own text, it removes the project's scenario
+  instead.
 
 ### Where it is seen
 
@@ -169,10 +170,44 @@ Offline, with the fakes in `src/tests.rs`:
 - `a_rewrite_is_measured_as_a_project_would_keep_it` (`src/eval.rs`): the gate's in-memory matrix,
   outside and inside a project.
 
-**Not measured live.** On 2026-10-03 the `TYPESAFE_API_KEY` in the environment was an unresolved
-1Password reference, and every System 1 call returned HTTP 401. So `jli eval --optimise` was not run
-inside a scratch project, and the acceptance checks of [ADR 9](0009-port-to-rust.md) were not
-re-run against this change.
+**Live, on 2026-10-03**, with this branch's release binary, a scratch brain and a scratch git
+repository. Outside every project, `du-sh` (`du -sh .`) was taught in manual mode with four
+phrasings, so its scenario was "the user wants: how big is this folder". `jli project init` made two
+projects in subdirectories, `shop-api` and `shop-web`. In `shop-api`, two `-y` requests routed to
+`du-sh` (at 0.83 and 1.00).
+
+| Step | What happened |
+| --- | --- |
+| in `shop-api`: `eval --optimise --max-skills=2` | 12 phrasings measured (10 held-out examples, 2 replays); `du-sh` ranked first at 0.12. Rewrite 1 was **kept**: score 0.933 → 0.962, 9 of 9 phrasings home before and after, scenario "the user wants to know how much disk space a folder or directory currently uses", and the counter-example "how much disk space this folder uses" on `git-status`. The trace said `kept for project shop-api`. 21 System 1 calls ($0.0012) and 1 System 2 call |
+| `skills` in `shop-api` | `du-sh … global, +1 −0 learned here, scenario rewritten here`, with the new scenario; `git-status … global, +0 −1 learned here`, with the counter-example |
+| `skills` in `shop-web`, and outside every project | `du-sh` with "the user wants: how big is this folder"; `git-status` with no counter-example |
+| `project` in `shop-api` | `its own scenario for 1 global skill, from jli eval --optimise` |
+| `eval undo -n` in `shop-api`, in `shop-web`, outside | `Would put back the scenario of du-sh in project shop-api: the user wants: how big is this folder`, and the counter-example; in `shop-web` and outside, `No optimisation to undo.`, exit 1 |
+| `eval undo` in `shop-api` | `du-sh` back on the global scenario there, without the tag; `git-status` without the counter-example |
+| in `shop-api` again: `eval --optimise --max-skills=1` | kept again, 0.928 → 0.969, with another scenario: "the user wants to know the total disk usage of a specific path or directory" ([ADR 16](0016-measuring-the-matrix.md): rewrites are not repeatable) |
+| a binary built earlier that day from the main checkout, without `project_scenarios`, reading the same brain | `skills` outside every project and in `shop-web` byte-identical to this binary's; in `shop-api` the same except the tag and `du-sh`'s scenario, where it shows the global one, as an older jli is expected to |
+
+The acceptance checks of [ADR 9](0009-port-to-rust.md), on a fresh brain in a scratch git repository:
+
+- **Held:** checks 1 to 6 and 9 to 12. Check 1 gave `ls -ltr`. Check 2 gave `git commit -m 'first
+  draft'`. Check 3 was not a command, exit 0. Check 4 gave `git add -A`, not run, exit 3. In check 5
+  the agent proposed `rm '*.log'`, destructive, refused with exit 3, and the files were untouched.
+  Check 6 printed valid `--json`, `path` `system1`, with the directory in `output`. Checks 9 to 11
+  were driven with `expect`. In check 9, auto mode outside a repository routed to `git-status` at
+  0.89; after the yes the command exited 128, the diagnosis was "the command fits the request; the
+  problem is where it ran", and there was no counter-example. In check 10, after a no, three numbered
+  options were shown; picking `ls -lt` learned it and ran it. Check 11 took two requests with
+  confirmations and left on ctrl-d. Check 12, `jli demo`, exited 0: answered instantly 2 of 5, then
+  5 of 5, and time spent deciding fell from 35.4 s to 1.5 s, because one agent call took 31.4 s (its
+  first attempt timed out).
+- **Run as a variant:** checks 7 and 8. The agent's sandbox refused any command line that named `git`,
+  even as text for `jli teach` to store, so the same mechanism was run with `tail`. `teach "show the 3
+  newest lines of the log" -- tail -n 3 app.log` became `tail -n {lineCount} {file}`, verified at 1.00.
+  An earlier phrasing was stored literally, because the translator's slots did not give back the
+  command, so it was forgotten and taught again. `teach "the final 10 lines of the log please" -- tail
+  -n 10 app.log` then joined the template with every API key unset. `-n give me the 7 newest lines of
+  app.log` rendered `tail -n 7 app.log`.
+- **Not run:** check 13, because the TypeScript version is not available.
 
 ## Consequences
 
@@ -195,4 +230,6 @@ re-run against this change.
   that competitor's examples, as a lesson does. If the project's lesson already lists the phrasing as
   one of the competitor's examples, the written view shows it in both lists, which the gate did not
   measure.
-- **Known gap:** none of this has run against the live System 1 or agent. It was verified offline only.
+- **Known gap:** live, a rewrite was kept in a project twice, on one skill of one scratch brain. The
+  drop that a project cannot make and `undo` over a project's earlier scenario were verified
+  offline only.

@@ -70,4 +70,5 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 - [22](0022-project-scenarios.md): a project's scenario has no path to the global row; a project
   with one does not see later global rewrites, and only `eval undo` or `forget --global` drops it; a
   rewrite in a project cannot drop a global row's phrasing; a counter-example already listed as an
-  example in the project's lesson is not measured as it is written; and none of it has run live.
+  example in the project's lesson is not measured as it is written; and it was run live on one skill
+  of one scratch brain.
