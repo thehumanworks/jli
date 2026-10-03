@@ -7,8 +7,10 @@ use anyhow::{anyhow, Result};
 use crate::args;
 use crate::demo::run_demo;
 use crate::eval;
+use crate::generalize::{generalize, GeneralizeOptions};
 use crate::learn::{learn_phrase, LearnInput};
 use crate::plan::{self, PlanRecord, RunFlags};
+use crate::project::{self, Found};
 use crate::router::{
     is_another_command, route, split_steps, teach_instead, unlearn_phrase, Outcome, RouteOptions, DEFAULT_THRESHOLD,
     DRY_RUN, DRY_RUN_CODE,
@@ -50,6 +52,7 @@ fn help() -> String {
   jli stats                            how much it has learned
   jli history                          recent requests and how they were routed
   jli teach \"<phrase>\" -- <command>    link a phrase to a command (repeat to add more phrasings)
+  jli teach --global \"<phrase>\" -- …  the same, for every project, from inside one
   jli config                           show settings
   jli config confidence <0..1>         confidence System 1 needs before its pick is used (default 0.5)
   jli config mode <manual|semi|auto>   who does the teaching (default semi)
@@ -60,7 +63,7 @@ fn help() -> String {
                                        (add --run to either to run the correction instead)
   jli run <planId> [<planId> …]        run plans (planId in --json) exactly as shown, in order, with no
                                        model call; stops at the first that fails. name=value fills a gap
-  jli forget <label>                   delete a skill
+  jli forget <label>                   delete a skill (inside a project, one of the project's: --global for the user's)
   jli eval [<label>] [--limit N]       route every stored example with itself held out, and replay accepted
                                        requests: how often each skill comes home (System 1 calls, priced first)
   jli eval --optimise                  the agent rewrites the weakest rows; a rewrite is kept only if the
@@ -69,6 +72,10 @@ fn help() -> String {
                                        no summary is stored and no rewrite is applied
   jli eval undo [<label>]              put back what the last optimisation changed
   jli share <label> --to <user>        give another user a copy of one of your skills
+  jli project                          the project this directory is in, from the nearest .jlirc
+  jli project init [<id>]              make this directory a project: what is learned here stays here
+  jli generalize [<label>]             propose making project skills global; each is written only once you approve
+      --all-projects   every project's skills · --approve-all  write what passes the checks unasked · -n  only show
   jli sync                             sync the local replica with the cloud brain
   jli shell-init [zsh|bash|fish]       the shell function that lets jli cd and export in your shell:
                                        eval \"$(jli shell-init zsh)\" in ~/.zshrc
@@ -306,6 +313,8 @@ pub(crate) struct App {
     pub(crate) brain: Brain,
     pub(crate) models: Models,
     pub(crate) terminal: Terminal,
+    /// The `.jlirc` the brain was opened for, if any.
+    pub(crate) project: Option<Found>,
 }
 
 impl App {
@@ -345,6 +354,9 @@ impl App {
     fn show_skills(&self) -> Result<()> {
         let skills = self.brain.skills()?;
         let shared_from = self.brain.shared_from()?;
+        // Inside a project each skill says whose it is (ADR 17); outside one the listing is as it was.
+        let own: Vec<String> = self.brain.project_skills()?.into_iter().map(|skill| skill.label).collect();
+        let lessons = self.brain.project_lessons()?;
         say(format!(
             "{} {}\n",
             c::bold(format!("{} skills", skills.len())),
@@ -357,8 +369,17 @@ impl App {
                 crate::types::Origin::Taught => c::cyan("taught"),
             };
             let shared = shared_from.get(&skill.label).map(|from| format!("  {}", c::dim(format!("shared by {from}"))));
+            let scope = match self.brain.project() {
+                Some(project) if own.contains(&skill.label) => format!("  {}", c::cyan(format!("project {project}"))),
+                Some(_) => {
+                    let learned = lessons.iter().find(|(label, _, _)| *label == skill.label);
+                    let learned = learned.map(|(_, added, removed)| format!(", +{added} −{removed} learned here"));
+                    format!("  {}", c::dim(format!("global{}", learned.unwrap_or_default())))
+                }
+                None => String::new(),
+            };
             say(format!(
-                "{}  {}  {origin}{}  {}",
+                "{}  {}  {origin}{}{scope}  {}",
                 c::bold(&skill.label),
                 risk_tag(skill.risk),
                 shared.unwrap_or_default(),
@@ -378,6 +399,14 @@ impl App {
                 say(format!("  {} \"{example}\"", c::red("−")));
             }
             say("");
+        }
+        if self.brain.project().is_some() {
+            let global = self.brain.global_skills()?;
+            let hidden: Vec<&str> =
+                global.iter().map(|skill| skill.label.as_str()).filter(|label| own.iter().any(|own| own == label)).collect();
+            if !hidden.is_empty() {
+                say(c::dim(format!("Hidden here by a project skill of the same name: the global {}", hidden.join(", "))));
+            }
         }
         Ok(())
     }
@@ -511,22 +540,29 @@ impl App {
         Ok(())
     }
 
-    fn teach(&self, phrase: &str, command: &[String], flags: &Flags) -> Result<()> {
+    /// Inside a project what is taught is the project's, unless `global` says it is for every project.
+    fn teach(&mut self, phrase: &str, command: &[String], flags: &Flags, global: bool) -> Result<()> {
         let steps = split_steps(&command.join(" "));
-        let learned = learn_phrase(
-            &self.brain,
-            &self.models,
-            &LearnInput {
-                phrase: phrase.to_string(),
-                steps,
-                risk: flags.risk,
-                mode: resolve_mode(&self.brain, flags)?,
-                threshold: resolve_threshold(&self.brain, flags)?,
-                cwd: cwd()?,
-            },
-            &Ui::new(!flags.quiet),
-        )?;
-        let skill = self.brain.skill(&learned.label)?;
+        let input = LearnInput {
+            phrase: phrase.to_string(),
+            steps,
+            risk: flags.risk,
+            mode: resolve_mode(&self.brain, flags)?,
+            threshold: resolve_threshold(&self.brain, flags)?,
+            cwd: cwd()?,
+        };
+        let (models, ui) = (&self.models, Ui::new(!flags.quiet));
+        let teach = |brain: &Brain| -> Result<_> {
+            let learned = learn_phrase(brain, models, &input, &ui)?;
+            let skill = brain.skill(&learned.label)?;
+            Ok((learned, skill))
+        };
+        let scope = match self.brain.project() {
+            Some(_) if global => "  · global, for every project".to_string(),
+            Some(project) => format!("  · kept for project {project}"),
+            None => String::new(),
+        };
+        let (learned, skill) = if global { self.brain.globally(teach)? } else { teach(&self.brain)? };
         let runs = skill.as_ref().map(|skill| skill.steps.join(" && ")).unwrap_or_else(|| "undefined".into());
         say(format!(
             "{} \"{phrase}\" means {} {}",
@@ -535,19 +571,130 @@ impl App {
             c::dim(format!("({runs})"))
         ));
         say(c::dim(if learned.created {
-            "  new skill".to_string()
+            format!("  new skill{scope}")
         } else {
             let count = skill.map_or(1, |skill| skill.examples.len());
-            format!("  added to an existing skill, which now has {count} phrasings")
+            format!("  added to an existing skill, which now has {count} phrasings{scope}")
         }));
         Ok(())
+    }
+
+    /// Inside a project only the project's own skills are forgotten, unless `global` says otherwise:
+    /// a global skill is every project's.
+    fn forget(&mut self, label: &str, global: bool) -> Result<i32> {
+        let Some(project) = self.brain.project().map(String::from) else {
+            say(if self.brain.forget(label)? { format!("Forgot {label}.") } else { format!("No skill called {label}.") });
+            return Ok(0);
+        };
+        if global {
+            let forgotten = self.brain.globally(|brain| brain.forget(label))?;
+            say(if forgotten {
+                format!("Forgot the global {label}, in every project.")
+            } else {
+                format!("No global skill called {label}.")
+            });
+            return Ok(0);
+        }
+        if self.brain.forget(label)? {
+            let back = self.brain.global_skills()?.iter().any(|skill| skill.label == label);
+            let back = if back { format!(" The global {label} is used here again.") } else { String::new() };
+            say(format!("Forgot {label} in project {project}.{back}"));
+            return Ok(0);
+        }
+        if self.brain.global_skills()?.iter().any(|skill| skill.label == label) {
+            say(format!(
+                "{label} is a global skill, used in every project, so it was not forgotten. To forget it everywhere: jli forget --global {label}"
+            ));
+            return Ok(1);
+        }
+        say(format!("No skill called {label}."));
+        Ok(0)
+    }
+
+    fn show_project(&self) -> Result<i32> {
+        let Some(found) = &self.project else {
+            say("No project here: there is no .jlirc in this directory or any above it. What is learned here is global.");
+            say(c::dim("Make this directory a project with: jli project init"));
+            return Ok(0);
+        };
+        let own = self.brain.project_skills()?.len();
+        let lessons = self.brain.project_lessons()?.len();
+        say(format!("{} {}", c::bold("Project"), c::bold(&found.id)));
+        say(format!("  from {}", found.path.display()));
+        say(format!(
+            "  {own} skill{} scoped to it, and lessons about {lessons} global skill{}",
+            if own == 1 { "" } else { "s" },
+            if lessons == 1 { "" } else { "s" }
+        ));
+        say(c::dim("  What is learned here stays with this project; your global skills are used here too. See jli skills."));
+        Ok(0)
+    }
+
+    fn init_project(&self, id: Option<&str>) -> Result<i32> {
+        let here = cwd()?;
+        let path = here.join(project::FILE);
+        if path.exists() {
+            let current = std::fs::read_to_string(&path).ok().and_then(|text| project::parse(&text).ok());
+            say(match current {
+                Some(id) => format!("There is already a {} here, for project {id}. Nothing was changed.", project::FILE),
+                None => format!("There is already a {} here. Nothing was changed.", project::FILE),
+            });
+            return Ok(1);
+        }
+        let made = project::init(&here, id)?;
+        say(format!(
+            "Created {} for project {}. What jli learns here from now on stays with this project.",
+            made.path.display(),
+            c::bold(&made.id)
+        ));
+        if let Some(outer) = &self.project {
+            say(c::dim(format!(
+                "  This directory was in project {} ({}); from now on it is its own project.",
+                outer.id,
+                outer.path.display()
+            )));
+        }
+        say(c::dim("  The file holds only the id, so it is safe to commit: every checkout is then the same project."));
+        Ok(0)
+    }
+
+    fn generalize(&mut self, others: &[String], flags: &Flags) -> Result<i32> {
+        let mut options = GeneralizeOptions {
+            label: None,
+            all_projects: false,
+            dry_run: flags.dry_run,
+            approve_all: false,
+            threshold: resolve_threshold(&self.brain, flags)?,
+            cwd: cwd()?,
+        };
+        for word in others {
+            match word.as_str() {
+                "--all-projects" => options.all_projects = true,
+                "--approve-all" => options.approve_all = true,
+                label if options.label.is_none() && !label.starts_with('-') => options.label = Some(label.to_string()),
+                _ => {
+                    say("Usage: jli generalize [<label>] [--all-projects] [--approve-all] [-n]");
+                    return Ok(1);
+                }
+            }
+        }
+        let ui = Ui::new(!flags.quiet);
+        let done = generalize(&self.brain, &self.models, &options, &ui, &mut self.terminal)?;
+        Ok(if done.nothing { 1 } else { 0 })
     }
 
     fn share(&self, label: &str, to: &str) -> Result<i32> {
         let to = user_id(to)?;
         let (message, code) = match self.brain.share(label, &to)? {
             Shared::Copied => {
-                (format!("Shared {label} with {to}. It is a copy: what either of you teaches it from now on stays yours."), 0)
+                // A project skill goes to the other user's copy of the same project (ADR 17).
+                let into = match self.brain.project() {
+                    Some(project) if self.brain.project_skills()?.iter().any(|skill| skill.label == label) => {
+                        format!(", in project {project}")
+                    }
+                    _ => String::new(),
+                };
+                (format!("Shared {label} with {to}{into}. It is a copy: what either of you teaches it from now on stays yours."), 0)
             }
             Shared::NoSuchSkill => (format!("No skill called {label}."), 1),
             Shared::SameUser => (format!("{label} is already yours: you are {to}."), 1),
@@ -929,10 +1076,11 @@ impl App {
                 return self.fix(flags, fix);
             }
         }
-        if first == "forget" && others.len() == 1 {
-            let label = &others[0];
-            say(if self.brain.forget(label)? { format!("Forgot {label}.") } else { format!("No skill called {label}.") });
-            return Ok(0);
+        // `--global` reaches the user's global skills from inside a project (ADR 17).
+        let global = others.iter().any(|word| word == "--global");
+        let plain: Vec<String> = others.iter().filter(|word| *word != "--global").cloned().collect();
+        if first == "forget" && plain.len() == 1 {
+            return self.forget(&plain[0], global);
         }
         if first == "eval" && rest.is_empty() {
             if let Some(code) = self.measure(others, flags)? {
@@ -940,12 +1088,23 @@ impl App {
             }
         }
         if first == "teach" {
-            if others.is_empty() || rest.is_empty() {
-                say("Usage: jli teach \"<phrase>\" [--risk=safe|modifies|destructive] -- <command>");
+            if plain.is_empty() || rest.is_empty() {
+                say("Usage: jli teach [--global] \"<phrase>\" [--risk=safe|modifies|destructive] -- <command>");
                 return Ok(1);
             }
-            self.teach(&others.join(" "), rest, flags)?;
+            self.teach(&plain.join(" "), rest, flags, global)?;
             return Ok(0);
+        }
+        if first == "project" && rest.is_empty() && !global {
+            match plain.as_slice() {
+                [] => return self.show_project(),
+                [init] if init == "init" => return self.init_project(None),
+                [init, id] if init == "init" => return self.init_project(Some(id)),
+                _ => {}
+            }
+        }
+        if first == "generalize" && rest.is_empty() && !global && plain.len() <= 3 {
+            return self.generalize(&plain, flags);
         }
         let query: Vec<&str> = words.iter().chain(rest).map(String::as_str).collect();
         Ok(self.ask(&args::request_from(&query), flags, vec![])?.exit_code())
@@ -994,10 +1153,13 @@ fn run(argv: &[String]) -> Result<i32> {
         return shell_init(words.get(1).map(String::as_str));
     }
 
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let project = project::find(&cwd()?, home.as_deref())?;
     let mut app = App {
-        brain: Brain::open_as(BrainConfig::from_env(), &user)?,
+        brain: Brain::open_in(BrainConfig::from_env(), &user, project.as_ref().map(|found| found.id.as_str()))?,
         models: Models::from_env(),
         terminal: Terminal::new(),
+        project,
     };
     let code = app.dispatch(&flags, &words, &rest);
     let _ = app.brain.sync();
@@ -1127,6 +1289,7 @@ mod tests {
             brain: Brain::open(BrainConfig::file(&dir.join("brain.db"))).unwrap(),
             models: Models::default(),
             terminal: Terminal::not_a_terminal(),
+            project: None,
         };
         let flags = Flags { dry_run: true, quiet: true, ..Flags::default() };
         assert_eq!(app.dispatch(&flags, &args(&["run", "1"]), &[]).unwrap(), 1, "a usage refusal, not plan_not_found's 3");

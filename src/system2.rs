@@ -366,3 +366,137 @@ pub fn rewrite_row(llm: &Llm, input: &RewriteInput) -> Result<(Rewrite, u64)> {
         }),
     })
 }
+
+/// What `jli generalize` should do with one project skill (ADR 17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Generality {
+    /// Global as it is.
+    Promote,
+    /// Global once the values that belong to this project are slots.
+    Parameterize,
+    /// A global skill already runs it: the project's phrasings join that skill.
+    Merge,
+    /// It only makes sense in this project.
+    Keep,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Generalization {
+    pub decision: Generality,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub merge_into: Option<String>,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub steps: Vec<String>,
+    #[serde(default)]
+    pub scenario: String,
+    #[serde(default)]
+    pub slots: Vec<SlotDraft>,
+    pub risk: Risk,
+}
+
+fn generalization_schema() -> Value {
+    object(json!({
+        "decision": {
+            "type": "string",
+            "enum": ["promote", "parameterize", "merge", "keep"],
+            "description": "promote: global as it is. parameterize: global once project-specific values are slots. merge: a global skill already runs it. keep: it belongs to this project only.",
+        },
+        "reason": { "type": "string", "description": "one or two sentences the user reads before approving" },
+        "mergeInto": nullable_string("for merge: the label of the global skill that already runs this command"),
+        "label": { "type": "string", "description": "short kebab-case name for the global skill" },
+        "steps": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "the global skill's commands, with {slot} placeholders for every project-specific value",
+        },
+        "scenario": { "type": "string", "description": "when the global skill applies, phrased like 'the user wants ...'" },
+        "slots": slots_schema(),
+        "risk": risk_schema(),
+    }))
+}
+
+const GENERALIZE_INSTRUCTIONS: &str = r#"You decide whether a skill a user taught inside one project should become global, so that it is
+offered in every project they work in. A skill is a shell command template. A fast classifier
+routes plain-language requests to skills by their scenario and example phrasings, and it knows
+nothing about a project's language or tooling: only the directory name and whether it is a git
+repository. A global skill therefore competes for requests in every project.
+
+decision
+- "promote": the command does the same useful thing in any project, as it is. Return its steps unchanged.
+- "parameterize": the command is general except for values that belong to this project (a package,
+  a path, a service, a port, a branch). Replace each with a {slot}. Filling the slots with this
+  project's values must give back exactly the project's command. Flags and subcommands are part of
+  the skill, never slots.
+- "merge": a global skill already runs this command, or the same template with other values. Set
+  mergeInto to its label and return its steps.
+- "keep": the command only makes sense with this project's tooling, files or scripts, or the user's
+  other projects mean a different command by the same request (see sameIntentElsewhere). A global
+  "run the tests" that runs cargo would be offered in a Node project too. Say why in reason.
+- When unsure, keep: a wrong global skill misroutes requests everywhere.
+
+scenario, label, slots
+- The scenario must be true in every project it would apply to, and say what sets it apart from the
+  known global skills.
+- Name each slot with the plain, full word for its value. In aliases, list up to four other names a
+  person might type for it as name=value; none that could mean another slot.
+- For "keep", return the project skill's own label, steps, scenario and slots unchanged."#;
+
+/// One skill and what surrounds it, for `generalize`.
+pub struct GeneralizeInput<'a> {
+    pub project: &'a str,
+    pub skill: &'a Skill,
+    /// Skills in the user's other projects that look like the same request, with their project.
+    pub elsewhere: &'a [(String, Skill)],
+    /// The user's global skills.
+    pub global: &'a [Skill],
+}
+
+/// Ask the reasoning agent how to make a project skill global, or why it should stay.
+pub fn generalize(llm: &Llm, input: &GeneralizeInput) -> Result<(Generalization, u64)> {
+    let slots = |skill: &Skill| -> Vec<Value> {
+        skill
+            .slots
+            .iter()
+            .map(|slot| json!({ "name": slot.name, "kind": slot.kind, "description": slot.description, "aliases": slot.aliases }))
+            .collect()
+    };
+    let skill = input.skill;
+    llm.complete_json(&JsonRequest {
+        model: &AGENT_MODEL,
+        system: GENERALIZE_INSTRUCTIONS,
+        name: "generalization",
+        schema: generalization_schema(),
+        timeout: Duration::from_secs(30),
+        reasoning: Reasoning::Off,
+        input: json!({
+            "project": input.project,
+            "projectSkill": {
+                "label": skill.label,
+                "steps": skill.steps,
+                "scenario": skill.scenario,
+                "slots": slots(skill),
+                "examples": skill.examples,
+                "risk": skill.risk,
+            },
+            "sameIntentElsewhere": input.elsewhere.iter().map(|(project, other)| json!({
+                "project": project,
+                "label": other.label,
+                "steps": other.steps,
+                "scenario": other.scenario,
+                "examples": other.examples,
+            })).collect::<Vec<_>>(),
+            "globalSkills": input.global.iter().map(|known| json!({
+                "label": known.label,
+                "steps": known.steps,
+                "scenario": known.scenario,
+                "slots": slots(known),
+            })).collect::<Vec<_>>(),
+        }),
+    })
+}
