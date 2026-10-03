@@ -1283,9 +1283,14 @@ fn path_tag(path: Path) -> String {
 }
 
 /// `jli login`, `jli login --codex`, `jli logout` and `jli models`: the ChatGPT plan on this host.
-/// They need no brain (ADR 25). `None` when the words are not one of them.
+/// They need no brain (ADR 28). `None` when the words are not one of them.
 fn account(words: &[String], flags: &Flags) -> Result<Option<i32>> {
     let shape: Vec<&str> = words.iter().map(String::as_str).collect();
+    // `jli models` only reads, so -n changes nothing there; signing in or out cannot be previewed.
+    if flags.dry_run && account_shape(&shape) && shape != ["models"] {
+        let why = format!("jli {} signs in or out, so -n cannot apply: run it without -n", shape.join(" "));
+        return Ok(Some(refuse(flags, USAGE, &why)));
+    }
     match shape.as_slice() {
         ["login"] | ["login", "--new"] => {
             let trace = Ui::new(!flags.quiet && !flags.json);
@@ -1318,6 +1323,11 @@ fn account(words: &[String], flags: &Flags) -> Result<Option<i32>> {
         _ => return Ok(None),
     }
     Ok(Some(0))
+}
+
+/// Whether the words are exactly one of the account commands.
+fn account_shape(shape: &[&str]) -> bool {
+    matches!(shape, ["login"] | ["login", "--new" | "--codex"] | ["logout"] | ["models"])
 }
 
 fn say_signed_in(signed_in: &SignedIn, flags: &Flags) {
@@ -1486,6 +1496,12 @@ mod tests {
         ] {
             assert_eq!(account(&args(words), &Flags::quiet()).unwrap(), None, "{words:?}");
         }
+        // -n would show nothing and change everything: signing in or out refuses it before any account is read.
+        let dry = Flags { dry_run: true, ..Flags::quiet() };
+        for words in [&["login"][..], &["login", "--new"], &["login", "--codex"], &["logout"]] {
+            assert_eq!(account(&args(words), &dry).unwrap(), Some(1), "{words:?}");
+        }
+        assert_eq!(account(&args(&["login", "to", "the", "server"]), &dry).unwrap(), None, "a request stays a request");
     }
 
     #[test]

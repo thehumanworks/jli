@@ -323,7 +323,8 @@ impl ResponseError {
             ResponseError::Failed { code, .. } | ResponseError::Stream { code, .. } => {
                 code.as_deref().and_then(recovery_for_code).unwrap_or(Recovery::None)
             }
-            ResponseError::Incomplete { .. } => Recovery::FixRequest,
+            // The plan routes take no output limit to raise: there is nothing to change but to report it.
+            ResponseError::Incomplete { .. } => Recovery::None,
             ResponseError::EndedEarly { .. } => Recovery::RetryLater,
         }
     }

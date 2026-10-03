@@ -121,17 +121,13 @@ impl Credentials {
             other => other,
         })?;
         let access_token = tokens.access_token.ok_or(SignInError::MissingAccessToken)?;
+        // The server has already spent the old refresh token, so nothing after this point may stop
+        // the new ones from being returned. A refreshed ID token only serves as the next sign-in's
+        // hint: it replaces the old one when it verifies as the same account, and is dropped
+        // otherwise, as when the key set cannot be fetched.
         let id_token = match tokens.id_token {
-            Some(id_token) => {
-                // A refreshed ID token has no nonce, but it must be valid and the same account.
-                let jwks = Jwks::fetch(http, &config.jwks_uri)?;
-                let claims = verify_id_token(&id_token, &jwks, &Validation::new(&config.issuer, &self.client_id))?;
-                if claims.sub != self.subject {
-                    return Err(SignInError::AccountMismatch.into());
-                }
-                Some(id_token)
-            }
-            None => self.id_token.clone(),
+            Some(id_token) if self.is_same_account(http, config, &id_token) => Some(id_token),
+            _ => self.id_token.clone(),
         };
         Ok(Credentials {
             id_token,
@@ -143,6 +139,14 @@ impl Credentials {
             saved_at: Utc::now(),
             ..self.clone()
         })
+    }
+
+    /// Whether `id_token` verifies, without a nonce, as this registration's account.
+    fn is_same_account(&self, http: &dyn HttpClient, config: &OAuthConfig, id_token: &str) -> bool {
+        Jwks::fetch(http, &config.jwks_uri)
+            .ok()
+            .and_then(|jwks| verify_id_token(id_token, &jwks, &Validation::new(&config.issuer, &self.client_id)).ok())
+            .is_some_and(|claims| claims.sub == self.subject)
     }
 }
 
@@ -206,6 +210,29 @@ mod tests {
         assert_eq!((refreshed.expires_in, refreshed.scopes.len()), (1800, 6), "scopes stay when none are returned");
         assert_eq!(refreshed.id_token.as_deref(), Some("id.token.x"));
         assert!(refreshed.saved_at > credentials.saved_at);
+
+        // A new ID token that cannot be checked never costs the rotated tokens.
+        let unverifiable = |request: crate::HttpRequest| {
+            Ok(match request.url.ends_with("/jwks.json") {
+                true => crate::HttpResponse::new(503, "down"),
+                false => {
+                    crate::HttpResponse::new(200, r#"{"access_token":"at-3","refresh_token":"rt-3","id_token":"a.b.c"}"#)
+                }
+            })
+        };
+        let kept = credentials.refreshed(&unverifiable, &OAuthConfig::default()).unwrap();
+        assert_eq!((kept.refresh_token.as_deref(), kept.id_token.as_deref()), (Some("rt-3"), Some("id.token.x")));
+        let key = crate::auth::id_token::tests::TestKey::load();
+        let now = Utc::now().timestamp();
+        let same = key.token(
+            &json!({ "iss": "https://auth.openai.com", "sub": "user-1", "aud": "oaiapp_1", "iat": now, "exp": now + 60 }),
+        );
+        let reply = json!({ "access_token": "at-4", "refresh_token": "rt-4", "id_token": same }).to_string();
+        let jwks = key.jwks_value().to_string();
+        let verifiable = move |request: crate::HttpRequest| {
+            Ok(crate::HttpResponse::new(200, if request.url.ends_with("/jwks.json") { jwks.clone() } else { reply.clone() }))
+        };
+        assert_eq!(credentials.refreshed(&verifiable, &OAuthConfig::default()).unwrap().id_token, Some(same));
 
         let reused = |_: crate::HttpRequest| Ok(crate::HttpResponse::new(400, r#"{"error":"refresh_token_reused"}"#));
         let error = credentials.refreshed(&reused, &OAuthConfig::default()).unwrap_err();

@@ -7,5 +7,5 @@ rule:
   regex: ^ureq
 ignores:
   - src/llm.rs
-  # chatgpt-sdk is a library of its own, with its own HTTP seam (ADR 25).
+  # chatgpt-sdk is a library of its own, with its own HTTP seam (ADR 28).
   - crates/**

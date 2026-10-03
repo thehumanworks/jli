@@ -1,7 +1,7 @@
 id: chatgpt-stays-in-llm-and-account
 language: rust
 severity: error
-message: Only src/llm.rs (requests) and src/account.rs (sign-in, sign-out, models) use chatgpt-sdk (ADR 25). Add a function there instead.
+message: Only src/llm.rs (requests) and src/account.rs (sign-in, sign-out, models) use chatgpt-sdk (ADR 28). Add a function there instead.
 rule:
   kind: use_declaration
   regex: chatgpt_sdk

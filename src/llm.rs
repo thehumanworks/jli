@@ -6,13 +6,13 @@
 //!   OPENROUTER_API_KEY (+ OPENROUTER_BASE_URL)   OpenRouter
 //!   AI_GATEWAY_API_KEY                           Vercel AI Gateway
 //!
-//! `JLI_PROVIDER` (chatgpt, openrouter, gateway or custom) picks one of them instead (ADR 25).
+//! `JLI_PROVIDER` (chatgpt, openrouter, gateway or custom) picks one of them instead (ADR 28).
 
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
-use chatgpt_sdk::{InputItem, ReasoningEffort, Recovery, ResponseRequest, MANAGE_USAGE_URL};
+use chatgpt_sdk::{InputItem, ReasoningEffort, Recovery, ResponseError, ResponseRequest, MANAGE_USAGE_URL};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -234,8 +234,12 @@ impl Llm {
 
     /// The ChatGPT plan requests go to, if they go to one.
     pub fn chatgpt(&self) -> Option<&ChatGpt> {
-        match (&self.fake, self.provider()) {
-            (None, Ok(Provider::ChatGpt(chatgpt))) => Some(chatgpt),
+        // A fake transport never looks for a sign-in: tests must not read this host's account.
+        if self.fake.is_some() {
+            return None;
+        }
+        match self.provider() {
+            Ok(Provider::ChatGpt(chatgpt)) => Some(chatgpt),
             _ => None,
         }
     }
@@ -381,7 +385,8 @@ fn complete_on_plan<T: DeserializeOwned>(chatgpt: &ChatGpt, request: &JsonReques
             },
             Err(error) => {
                 let (code, message) = plan_failure(chatgpt, request.model, &error);
-                if error.recovery() != Recovery::RetryLater {
+                // What the plan says is final stops at once; a temporary or unknown failure gets the second attempt.
+                if !matches!(error.recovery(), Recovery::RetryLater | Recovery::None) {
                     return Err(coded(code, message));
                 }
                 last_error = message;
@@ -405,7 +410,13 @@ fn plan_failure(chatgpt: &ChatGpt, model: &str, error: &chatgpt_sdk::Error) -> (
         Recovery::FixRequest => {
             (MODEL, format!("{model} refused the request: {error}. `jli models` lists the models your plan has."))
         }
-        _ => (MODEL, format!("{model} failed on your ChatGPT plan: {error}")),
+        Recovery::CheckConfiguration => (CONFIGURATION, format!("Your ChatGPT plan cannot be used from here: {error}")),
+        _ => match error {
+            chatgpt_sdk::Error::Response(failure) if matches!(**failure, ResponseError::Incomplete { .. }) => {
+                (MODEL, format!("{model} stopped before it finished: {error}"))
+            }
+            _ => (MODEL, format!("{model} failed on your ChatGPT plan: {error}")),
+        },
     }
 }
 
@@ -693,6 +704,10 @@ mod tests {
         fake.script(FakeReply::Status(503, r#"{"detail":"busy"}"#.into()));
         fake.reply("{\"value\": \"second\"}");
         assert_eq!(llm.complete_json::<Thing>(&request(schema.clone())).unwrap().0.value, "second");
+        fake.script(FakeReply::Failed("overloaded".into()));
+        fake.reply("{\"value\": \"third\"}");
+        let (thing, _) = llm.complete_json::<Thing>(&request(schema.clone())).unwrap();
+        assert_eq!(thing.value, "third", "a failure with a code nobody documented gets the second attempt");
 
         let before = fake.requests().len();
         fake.script(FakeReply::Failed("subscription_sharing_usage_limit_exceeded".into()));
@@ -720,8 +735,10 @@ mod tests {
         }
         assert_eq!(llm.describe(), "ChatGPT plan (user@example.com)");
         let offline = Llm::with_transport(|_| Err("connection refused".into()));
-        assert!(offline.chatgpt().is_none(), "a fake transport never looks for a sign-in");
+        assert!(offline.chatgpt().is_none());
         assert!(!offline.agent_label().contains("ChatGPT"));
+        offline.translator_model();
+        assert!(offline.provider.get().is_none(), "a fake transport never looks for a sign-in on this host");
     }
 
     fn signed_in() -> Result<Option<ChatGpt>> {

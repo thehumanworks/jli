@@ -89,7 +89,9 @@ impl CredentialStore {
         serde_json::from_str(&text).map(Some).map_err(|error| Error::json(format!("reading {}", path.display()), error))
     }
 
-    /// Every saved registration, signed in or not, by email then client id.
+    /// Every saved registration, signed in or not, by email then client id. A record that cannot
+    /// be read is left out, so one damaged file does not hide the others; [`CredentialStore::load`]
+    /// reports what is wrong with it.
     pub fn accounts(&self) -> Result<Vec<Credentials>> {
         let dir = self.dir.join("accounts");
         let entries = fs::read_dir(&dir).map_err(|error| Error::io(format!("listing {}", dir.display()), error))?;
@@ -98,7 +100,7 @@ impl CredentialStore {
             let path = entry.map_err(|error| Error::io(format!("listing {}", dir.display()), error))?.path();
             let client_id = path.file_stem().and_then(|stem| stem.to_str()).map(str::to_string);
             if let (Some(client_id), Some("json")) = (client_id, path.extension().and_then(|ext| ext.to_str())) {
-                if let Some(credentials) = self.load(&client_id)? {
+                if let Ok(Some(credentials)) = self.load(&client_id) {
                     accounts.push(credentials);
                 }
             }
@@ -303,8 +305,10 @@ mod tests {
         store.save(&Credentials { email: Some("a@example.com".into()), ..credentials("oaiapp_a", 3600) }).unwrap();
         store.set_active(Some("oaiapp_b")).unwrap();
         assert_eq!(store.active().unwrap().unwrap().client_id, "oaiapp_b");
+        fs::write(dir.join("accounts/oaiapp_broken.json"), "{ truncated").unwrap();
         let ids: Vec<String> = store.accounts().unwrap().into_iter().map(|account| account.client_id).collect();
-        assert_eq!(ids, ["oaiapp_a", "oaiapp_b"]);
+        assert_eq!(ids, ["oaiapp_a", "oaiapp_b"], "a damaged record does not hide the others");
+        assert!(store.load("oaiapp_broken").is_err(), "but loading it says what is wrong");
         assert!(store.save(&credentials("../escape", 1)).is_err());
         assert!(store.set_active(Some("a/b")).is_err());
         store.set_active(None).unwrap();

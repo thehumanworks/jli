@@ -100,17 +100,23 @@ pub fn process_table() -> Option<String> {
     done.status.success().then(|| String::from_utf8_lossy(&done.stdout).into_owned())
 }
 
-/// Open `url` in the system browser, for `jli login` (ADR 25): `open` on macOS, `xdg-open`
+/// Open `url` in the system browser, for `jli login` (ADR 28): `open` on macOS, `xdg-open`
 /// elsewhere. False when there is none, or no display to open it on.
 pub fn open_in_browser(url: &str) -> bool {
     let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-    Command::new(opener)
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    let started = Command::new(opener).arg(url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    let Ok(mut child) = started else { return false };
+    // `open` returns at once, but `xdg-open` can stay with a browser it ran in the terminal: wait
+    // briefly for a failure, then leave it running, so the sign-in's wait starts on time.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 /// Run shell steps in order with `bash -c`, stopping at the first failure.

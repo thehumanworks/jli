@@ -1,5 +1,5 @@
 //! The ChatGPT account jli uses, if any: `jli login`, `jli logout`, `jli models`, and which model
-//! runs. Requests themselves go through `llm.rs` (ADR 25).
+//! runs. Requests themselves go through `llm.rs` (ADR 28).
 //!
 //! Everything is kept on this host, in `~/.jli/chatgpt` (`JLI_CHATGPT_DIR`), never in the brain:
 //! a sign-in is a credential, and another host may have no account at all.
@@ -121,22 +121,41 @@ impl Accounts {
     }
 
     pub fn choice(&self) -> Result<Choice> {
-        match std::fs::read_to_string(self.choice_path()) {
-            Ok(text) => {
-                serde_json::from_str(&text).map_err(|error| anyhow!("reading {}: {error}", self.choice_path().display()))
-            }
+        let path = self.choice_path();
+        let damaged = |error: String| {
+            coded(
+                CONFIGURATION,
+                format!("{} cannot be read ({error}). Run `jli logout` or `jli login` to write it again.", path.display()),
+            )
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text).map_err(|error| damaged(error.to_string())),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Choice::default()),
-            Err(error) => Err(anyhow!("reading {}: {error}", self.choice_path().display())),
+            Err(error) => Err(damaged(error.to_string())),
         }
+    }
+
+    /// The choice that `jli login` and `jli logout` are about to replace: a damaged file is read as
+    /// none, so that they can always put things right.
+    fn choice_to_rewrite(&self) -> Choice {
+        self.choice().unwrap_or_default()
     }
 
     fn save_choice(&self, choice: &Choice) -> Result<()> {
         // Opening the store makes the directory first, readable by its owner only.
         self.store()?;
-        let temporary = self.dir.join(format!(".jli.json.{}.tmp", std::process::id()));
-        std::fs::write(&temporary, serde_json::to_vec_pretty(choice)?)?;
-        std::fs::rename(&temporary, self.choice_path())?;
-        Ok(())
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_nanos());
+        let temporary = self.dir.join(format!(".jli.json.{}.{nanos}.tmp", std::process::id()));
+        let written = (|| -> std::io::Result<()> {
+            let mut file = std::fs::File::create(&temporary)?;
+            std::io::Write::write_all(&mut file, &serde_json::to_vec_pretty(choice)?)?;
+            file.sync_all()?;
+            std::fs::rename(&temporary, self.choice_path())
+        })();
+        if written.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        written.map_err(|error| anyhow!("writing {}: {error}", self.choice_path().display()))
     }
 
     /// The HTTP client every request shares, as chatgpt-sdk takes it.
@@ -226,7 +245,7 @@ impl Accounts {
         store.save(&credentials)?;
         store.set_active(Some(&credentials.client_id))?;
 
-        let mut choice = self.choice()?;
+        let mut choice = self.choice_to_rewrite();
         let plan_usage = credentials.plan_usage_enabled();
         let welcome = plan_usage && !choice.welcomed;
         if plan_usage {
@@ -244,12 +263,12 @@ impl Accounts {
         })
     }
 
-    /// Use the ChatGPT account the Codex CLI is signed in with. Codex's file is read, never
-    /// changed here.
+    /// Use the ChatGPT account the Codex CLI is signed in with. Codex's file is only read here;
+    /// it is written later only to refresh a token that has expired, as Codex itself would.
     pub fn login_codex(&self) -> Result<SignedIn> {
         let auth = self.codex_auth().map_err(|error| coded(CONFIGURATION, format!("{error:#}")))?;
         let account = auth.account()?;
-        let mut choice = self.choice()?;
+        let mut choice = self.choice_to_rewrite();
         let welcome = !choice.welcomed;
         choice.source = Some(Source::Codex);
         choice.welcomed = true;
@@ -267,7 +286,7 @@ impl Accounts {
     /// Stop using the ChatGPT plan. jli's own session is revoked and its tokens cleared; the
     /// registration and host id stay for the next `jli login`. Codex's sign-in is left as it is.
     pub fn logout(&self) -> Result<SignedOut> {
-        let mut choice = self.choice()?;
+        let mut choice = self.choice_to_rewrite();
         let source = choice.source.take();
         let outcome = match source {
             Some(Source::Codex) => {
@@ -411,6 +430,22 @@ mod tests {
             url.contains("client_id=oaiapp_fake&") && !url.contains("agent_name_hint"),
             "the saved client is reused: {url}"
         );
+    }
+
+    #[test]
+    fn a_damaged_choice_says_how_to_mend_it_and_logout_mends_it() {
+        let scratch = Scratch::new("damaged");
+        let fake = FakeChatGpt::new();
+        let accounts = Accounts::fake(scratch.0.clone(), &fake, None);
+        accounts.login(&quiet(), &browser(&fake), &never_shown, false).unwrap();
+        std::fs::write(scratch.0.join("jli.json"), "{ \"source\": ").unwrap();
+        let error = accounts.provider().err().unwrap();
+        assert_eq!(crate::types::error_code(&error), CONFIGURATION);
+        assert!(error.to_string().contains("jli logout"), "{error}");
+        assert_eq!(accounts.logout().unwrap().source, Some(Source::SignIn), "the session is still found and ended");
+        assert_eq!(accounts.choice().unwrap(), Choice::default());
+        let leftovers = std::fs::read_dir(&scratch.0).unwrap().filter_map(Result::ok);
+        assert!(leftovers.filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp")).count() == 0);
     }
 
     #[test]

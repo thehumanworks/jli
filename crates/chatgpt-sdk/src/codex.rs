@@ -231,7 +231,12 @@ impl CodexAuth {
         }
         let pretty =
             serde_json::to_vec_pretty(&file).map_err(|error| Error::json("serialising the Codex sign-in", error))?;
-        write_private(&self.path, &pretty)?;
+        // Through a symlink to the file it names, so a link kept by a dotfile manager stays a link.
+        let target = std::fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone());
+        write_private(&target, &pretty).map_err(|error| {
+            // The server has already spent the old refresh token, so the file on disk is no longer usable.
+            self.not_signed_in(&format!("Codex's refreshed sign-in could not be saved ({error})"))
+        })?;
         self.read()
     }
 }
@@ -377,6 +382,24 @@ mod tests {
         assert!(matches!(CodexAuth::open(dir.join("auth.json")).unwrap_err(), Error::SignInRequired { .. }));
         std::fs::write(dir.join("auth.json"), r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-x","tokens":null}"#).unwrap();
         assert!(matches!(CodexAuth::open(dir.join("auth.json")).unwrap_err(), Error::SignInRequired { .. }));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refresh_through_a_symlink_writes_the_file_it_names() {
+        let dir = scratch_dir("codex-symlink");
+        let key = TestKey::load();
+        let real = write_auth(&dir, &access_token(&key, Utc::now().timestamp() - 10));
+        let link = dir.join("linked-auth.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let fresh = access_token(&key, Utc::now().timestamp() + 3600);
+        let reply = json!({ "access_token": fresh, "refresh_token": "rt-2" }).to_string();
+        let http = move |_: HttpRequest| Ok(HttpResponse::new(200, reply.clone()));
+        assert_eq!(CodexAuth::open(&link).unwrap().bearer(&http).unwrap().access_token, fresh);
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link stays a link");
+        let written: Value = serde_json::from_str(&std::fs::read_to_string(&real).unwrap()).unwrap();
+        assert_eq!(written["tokens"]["refresh_token"], "rt-2");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -236,13 +236,17 @@ pub(crate) mod tests {
             TestKey { pair: RsaKeyPair::from_pkcs8(der).unwrap(), kid: "test-key".into() }
         }
 
-        pub(crate) fn jwks(&self) -> Jwks {
+        /// The key set as an issuer serves it.
+        pub(crate) fn jwks_value(&self) -> Value {
             let public: ring::rsa::PublicKeyComponents<Vec<u8>> = self.pair.public_key().into();
-            serde_json::from_value(json!({ "keys": [{
+            json!({ "keys": [{
                 "kid": self.kid, "kty": "RSA", "alg": "RS256", "use": "sig",
                 "n": URL_SAFE_NO_PAD.encode(&public.n), "e": URL_SAFE_NO_PAD.encode(&public.e),
-            }] }))
-            .unwrap()
+            }] })
+        }
+
+        pub(crate) fn jwks(&self) -> Jwks {
+            serde_json::from_value(self.jwks_value()).unwrap()
         }
 
         pub(crate) fn sign(&self, header: &Value, claims: &Value) -> String {

@@ -1,4 +1,4 @@
-# 25. The agent and the translator can run on the user's ChatGPT plan, through a crate of jli's own
+# 28. The agent and the translator can run on the user's ChatGPT plan, through a crate of jli's own
 
 - Status: accepted
 - Date: 2026-10-03
@@ -49,9 +49,9 @@ hooks and `mise run check` lint and test the whole of it. It is blocking, like t
 
 | Part | What it does |
 | --- | --- |
-| `auth` | the authorization URL (a new registration, or a returning one with `id_token_hint`), a fresh state, nonce and S256 PKCE, the loopback listener on `127.0.0.1:1455` (any free port when that is taken), the code exchange, and the ID token checked against the published keys: RS256, issuer, audience, expiry, nonce |
+| `auth` | the authorization URL (a new registration, or a returning one with `id_token_hint`), a fresh state, nonce and S256 PKCE, the loopback listener on `127.0.0.1:1455` (any free port when that is taken), which turns away a callback with another state and keeps waiting, the code exchange, and the ID token checked against the published keys: RS256, issuer, audience, expiry, nonce |
 | `CredentialStore` | one record per registration in the documented format, written atomically with mode 0600 in a 0700 directory; a `urn:uuid:` host id made once; the account in use; sign-out that revokes the refresh token, three tries on a temporary failure, and keeps the client id |
-| `Session` | a saved sign-in as a credential: refreshed five minutes before expiry and after a 401, under a lock file and with the record read again once the lock is held, so a rotating refresh token is spent once; an unusable refresh token clears the tokens |
+| `Session` | a saved sign-in as a credential: refreshed five minutes before expiry and after a 401, under a lock file and with the record read again once the lock is held, so a rotating refresh token is spent once; once the server has rotated it, the new tokens are kept even when the refreshed ID token cannot be checked, since that token is only the next sign-in's hint; an unusable refresh token clears the tokens |
 | `CodexAuth` | Codex's sign-in as a credential for the Codex backend (below) |
 | `Client` | `models()`, and `stream()` and `create()` for Responses requests, always `store: false` and `stream: true` |
 | `Error::recovery` | the documented action for each failure: retry later, sign in again, manage usage, not eligible, enable plan usage, fix the request, check the configuration |
@@ -98,11 +98,12 @@ The same prompts, the same user message and the same strict schemas, in the Resp
 | | `store: false`, `stream: true` |
 
 Timeouts and attempts are ADR 4's: 30 s and two attempts for the agent, 8 s for the translator, 10 s
-for the suggester. Only a failure the crate calls temporary gets the second attempt: a transport
-failure, a stream that ended early, and HTTP 408, 409, 429, 500, 502, 503 and 504 unless the reply's
-code says otherwise; and, as before, a reply that does not parse. A usage limit (a 429 with
-`subscription_sharing_usage_limit_exceeded`, or a `response.failed` with it), an ineligible plan, an
-unknown model and an ended sign-in stop at once, with what to do:
+for the suggester. A failure the documentation calls final stops at once, with what to do: a usage
+limit (a 429 with `subscription_sharing_usage_limit_exceeded`, or a `response.failed` with it), an
+ineligible plan, a request the route refuses (such as an unknown model), a policy that refuses jli,
+and an ended sign-in. Anything else gets the second attempt, as before: a transport failure, a stream
+that ended early or incomplete, HTTP 408, 409, 429, 500, 502, 503 and 504, a `response.failed` with a
+code nobody documented, and a reply that does not parse. What the person is told:
 
 - "Usage limit reached on your ChatGPT plan (…). Manage usage at https://chatgpt.com/settings/usage"
   (`model`, as `--json`'s `error`);
@@ -133,7 +134,10 @@ statics, so a fake transport never looks for a sign-in and the trace can say whe
 | `jli models` | the plan's listed models, the one in use marked (`--json`: slug, name, current) |
 | `jli config model <slug>` | the model the agent and the translator run on the plan |
 
-None of them opens the brain. After the first sign-in that allows plan usage, and only then, jli says
+None of them opens the brain. `jli login` and `jli logout` refuse `-n` (exit 1, `usage`): there is no
+way to show a sign-in without making it. A damaged `jli.json` stops the commands that read it with
+how to mend it, and `jli login` and `jli logout` write it again. After the first sign-in that allows
+plan usage, and only then, jli says
 "You're using your ChatGPT plan", that requests count toward its usage, and where to manage it.
 `jli config` says where requests go: `model  gpt-6-luna  on ChatGPT plan (user@example.com)`.
 
@@ -144,7 +148,8 @@ It is read on every request, so a refresh Codex makes is picked up. It is writte
 token has expired (Codex's last for ten days): the refresh is made as the Codex binary makes it, a
 JSON body with `client_id`, `grant_type` and `refresh_token` to `https://auth.openai.com/oauth/token`
 (`CODEX_REFRESH_TOKEN_URL_OVERRIDE` overrides it, as for Codex), and the new tokens are written back
-atomically, with every other field kept. Codex reloads the file before it refreshes and skips its own
+atomically, with every other field kept, to the file a symlink names rather than over the link. If
+that write fails, the run stops with "run `codex login`": the old refresh token is already spent. Codex reloads the file before it refreshes and skips its own
 refresh when the file changed ("Skipping token refresh because auth changed after guarded reload", in
 its binary). A 401 for a token that has not expired is not refreshed: the file is read again, and if
 it holds the same token the run stops with "run `codex login`". `jli logout` never touches the file.
@@ -224,5 +229,8 @@ port requests (`lsof -i :3000` kept as taught).
   about twenty agent requests have run; `jli eval --optimise` and `jli generalize` have not.
 - The model is chosen per host and per ChatGPT plan, not per user or project, and `jli stats` does not
   say which model answered.
-- Without a browser, the printed sign-in URL carries the saved ID token as a hint.
+- A returning sign-in's URL carries the saved ID token as a hint: printed when no browser opens, and
+  in the process list while `open` or `xdg-open` runs.
+- A Codex refresh is serialised with other jli processes by a lock on the file, not with Codex, which
+  takes no lock; Codex's guarded reload is what keeps the two from spending one token twice.
 - An older jli ignores the sign-in and keeps using its API key.

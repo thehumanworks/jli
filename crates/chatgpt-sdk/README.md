@@ -57,7 +57,7 @@ an answer with the Codex CLI's sign-in.
 | Part | What it does |
 | --- | --- |
 | `auth::AuthorizationRequest` | the authorization URL for a new registration (`dynamic_agent_client`, `agent_name_hint`) or a returning one (`id_token_hint`, `login_hint`), with a fresh state, nonce and S256 challenge; `complete` checks the callback, exchanges the code, verifies the ID token and returns the credentials |
-| `auth::LoopbackListener` | the `http://127.0.0.1:<port>/auth/callback` listener, on port 1455 or any free one, which answers the browser with a page |
+| `auth::LoopbackListener` | the `http://127.0.0.1:<port>/auth/callback` listener, on port 1455 or any free one, which answers the browser with a page and turns away a callback that belongs to another attempt |
 | `auth::verify_id_token` | RS256 against the published key set, then issuer, audience, expiry and nonce |
 | `CredentialStore` | one record per registration in the documented format, written atomically with mode 0600; the host id (`urn:uuid:…`) made once; the active account; sign-out that revokes the refresh token and keeps the client id |
 | `Session` | the saved sign-in as a credential: refreshed five minutes before expiry and after a 401, serialised across processes with a lock file, signed out when the refresh token is unusable |

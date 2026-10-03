@@ -132,5 +132,6 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   and whose model list depends on an aging `client_version`; refreshing Codex's sign-in has run
   offline only; the prompts were measured on Mercury, and on `gpt-6-luna` only the acceptance checks,
   the benchmark and about twenty agent requests ran; the model is chosen per host, not per user or
-  project; a printed sign-in URL carries the saved ID token as a hint; and an older jli ignores the
-  sign-in.
+  project; a returning sign-in's URL carries the saved ID token as a hint, printed without a browser
+  and in the process list while the opener runs; a Codex refresh is locked against other jli
+  processes, not against Codex; and an older jli ignores the sign-in.

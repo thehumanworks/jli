@@ -470,7 +470,7 @@ The app makes two kinds of HTTP call and uses one database. It is synchronous th
   through the `chatgpt-sdk` crate in `crates/`. After `jli login` it goes to
   `https://api.openai.com/v1/responses`; after `jli login --codex`, with the Codex CLI's sign-in, to
   the Codex backend. The trace says `using ChatGPT plan`, and a usage limit stops the run with a link
-  to <https://chatgpt.com/settings/usage>. See [ADR 25](docs/adr/0025-chatgpt-plan.md).
+  to <https://chatgpt.com/settings/usage>. See [ADR 28](docs/adr/0028-chatgpt-plan.md).
 - **System 1:** `POST https://api.typesafe.ai/v1/systemone` with `{ model, state, questions }`,
   through the `typesafe-jev` crate, with a 10 second timeout and two retries.
 - **Storage:** libSQL through its first-party crate. It is async, so `store.rs` owns a

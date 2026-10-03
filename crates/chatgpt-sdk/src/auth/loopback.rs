@@ -108,9 +108,10 @@ impl LoopbackListener {
         format!("http://127.0.0.1:{}{}", self.port, LoopbackListener::CALLBACK_PATH)
     }
 
-    /// Wait for the browser to return, and answer it with a page. Requests for other paths are
-    /// answered 404 and ignored. The callback is returned whatever it says; check it with
-    /// [`super::AuthorizationRequest::complete`].
+    /// Wait for the browser to return, and answer it with a page. A request for another path is
+    /// answered 404, and a callback with another state 400, and both are ignored: a stray or forged
+    /// request from another page cannot end the sign-in. The callback with this attempt's state is
+    /// returned whatever else it says; check it with [`super::AuthorizationRequest::complete`].
     pub fn wait(&self, expected_state: &str, timeout: Duration) -> Result<Callback> {
         let deadline = Instant::now() + timeout;
         self.listener.set_nonblocking(true).map_err(|error| Error::io("waiting for the sign-in callback", error))?;
@@ -155,8 +156,9 @@ impl LoopbackListener {
         let callback = Callback::from_query(query);
         let app = escape(&self.app_name);
         if callback.state.as_deref() != Some(expected_state) {
-            let text = format!("This sign-in does not belong to the one {app} started. Close this tab and sign in again.");
+            let text = format!("This sign-in does not belong to the one {app} is waiting for. Close this tab.");
             respond(&mut stream, "400 Bad Request", "Sign-in not recognised", &text);
+            return None;
         } else if let Some(error) = &callback.error {
             let text = format!("Sign-in did not complete ({}). You can close this tab and return to {app}.", escape(error));
             respond(&mut stream, "200 OK", "Sign-in did not complete", &text);
@@ -220,13 +222,17 @@ mod tests {
     }
 
     #[test]
-    fn a_stranger_or_an_error_gets_its_own_page() {
+    fn a_stranger_is_turned_away_and_an_error_gets_its_own_page() {
         let listener = LoopbackListener::bind_port(0).unwrap();
         let port = listener.port();
-        let browser = std::thread::spawn(move || browse(port, "/auth/callback?state=forged&code=x"));
+        let browser = std::thread::spawn(move || {
+            let forged = browse(port, "/auth/callback?state=forged&code=x");
+            (forged, browse(port, "/auth/callback?state=s-1&code=real"))
+        });
         let callback = listener.wait("s-1", Duration::from_secs(10)).unwrap();
-        assert!(browser.join().unwrap().starts_with("HTTP/1.1 400"));
-        assert_eq!(callback.state.as_deref(), Some("forged"));
+        let (forged, real) = browser.join().unwrap();
+        assert!(forged.starts_with("HTTP/1.1 400") && real.starts_with("HTTP/1.1 200"));
+        assert_eq!(callback.code.as_deref(), Some("real"), "the forged callback did not end the wait");
 
         let browser = std::thread::spawn(move || browse(port, "/auth/callback?state=s-1&error=access_denied"));
         let callback = listener.wait("s-1", Duration::from_secs(10)).unwrap();
