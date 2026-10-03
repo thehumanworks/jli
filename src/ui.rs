@@ -93,6 +93,18 @@ pub fn risk_tag(risk: Risk) -> String {
     }
 }
 
+/// `→ ls -ltr  risk: safe`: the commands as the trace shows them, the risk on the first.
+pub fn command_lines(commands: &[String], risk: Risk) -> Vec<String> {
+    commands
+        .iter()
+        .enumerate()
+        .map(|(index, command)| {
+            let tag = if index == 0 { format!("  {} {}", c::dim("risk:"), risk_tag(risk)) } else { String::new() };
+            format!("{} {}{tag}", c::bold("→"), c::bold(command))
+        })
+        .collect()
+}
+
 /// The decision trace. Everything goes to stderr so stdout stays the command's own output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ui {
@@ -159,9 +171,18 @@ impl Ui {
     }
 
     pub fn command(&self, commands: &[String], risk: Risk) {
-        for (index, command) in commands.iter().enumerate() {
-            let tag = if index == 0 { format!("  {} {}", c::dim("risk:"), risk_tag(risk)) } else { String::new() };
-            self.line(format!("{} {}{tag}", c::bold("→"), c::bold(command)));
+        for line in command_lines(commands, risk) {
+            self.line(line);
+        }
+    }
+
+    /// What a question asks about, for the prompt to show before it: nothing when the trace has
+    /// shown it already.
+    pub fn about(&self, lines: Vec<String>) -> Vec<String> {
+        if self.enabled {
+            Vec::new()
+        } else {
+            lines
         }
     }
 
@@ -185,10 +206,10 @@ impl Ui {
 pub trait Prompt {
     /// One line of input, or None at end of input.
     fn read_line(&mut self) -> Option<String>;
-    /// Ask a yes/no question. None when nobody is there to answer.
-    fn confirm(&mut self, question: &str) -> Option<bool>;
-    /// Ask a free-text question. None when nobody is there to answer.
-    fn ask(&mut self, question: &str) -> Option<String>;
+    /// Ask a yes/no question, after the lines it is about. None when nobody is there to answer.
+    fn confirm(&mut self, about: &[String], question: &str) -> Option<bool>;
+    /// Ask a free-text question, after the lines it is about. None when nobody is there to answer.
+    fn ask(&mut self, about: &[String], question: &str) -> Option<String>;
 }
 
 /// The real terminal.
@@ -221,8 +242,12 @@ impl Default for Terminal {
     }
 }
 
-fn prompt(text: &str) {
+/// A question, after what it is about: printed only once someone is there to answer it.
+fn prompt(about: &[String], text: &str) {
     let mut stderr = io::stderr();
+    for line in about {
+        let _ = writeln!(stderr, "{line}");
+    }
     let _ = write!(stderr, "{text}");
     let _ = stderr.flush();
 }
@@ -239,20 +264,20 @@ impl Prompt for Terminal {
         }
     }
 
-    fn confirm(&mut self, question: &str) -> Option<bool> {
+    fn confirm(&mut self, about: &[String], question: &str) -> Option<bool> {
         if !self.interactive {
             return None;
         }
-        prompt(&format!("{} {question} {} ", c::yellow("?"), c::dim("[Y/n]")));
+        prompt(about, &format!("{} {question} {} ", c::yellow("?"), c::dim("[Y/n]")));
         let answer = self.read_line()?.trim().to_lowercase();
         Some(answer.is_empty() || answer == "y" || answer == "yes")
     }
 
-    fn ask(&mut self, question: &str) -> Option<String> {
+    fn ask(&mut self, about: &[String], question: &str) -> Option<String> {
         if !self.interactive {
             return None;
         }
-        prompt(&format!("{} {question}\n{} ", c::yellow("?"), c::yellow("›")));
+        prompt(about, &format!("{} {question}\n{} ", c::yellow("?"), c::yellow("›")));
         self.read_line()
     }
 }
@@ -282,6 +307,17 @@ mod tests {
         assert_eq!(ui(true, true), (false, false));
         assert_eq!(Ui::new(true), Ui::of(false, false));
         assert_eq!(Ui::new(false), Ui::of(false, true));
+    }
+
+    #[test]
+    fn a_question_is_about_what_the_trace_did_not_show() {
+        let lines = command_lines(&["git add -A".into(), "git status".into()], Risk::Modifies);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("git add -A") && lines[0].contains("risk:") && lines[0].contains("modifies"));
+        assert!(lines[1].contains("git status") && !lines[1].contains("risk:"), "the risk is said once");
+        assert_eq!(Ui::of(true, false).about(lines.clone()), lines, "--quiet");
+        assert_eq!(Ui::of(false, true).about(lines.clone()), lines, "--json");
+        assert!(Ui::new(true).about(lines).is_empty(), "the trace showed it already");
     }
 
     #[test]

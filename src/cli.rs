@@ -125,6 +125,11 @@ pub(crate) struct Flags {
 }
 
 impl Flags {
+    /// The trace of a route: `--quiet` keeps its warnings, `--json` hides them too.
+    pub(crate) fn ui(&self) -> Ui {
+        Ui::of(self.quiet, self.json)
+    }
+
     /// No flags but `--quiet`, for tests that drive a subcommand.
     #[cfg(test)]
     pub(crate) fn quiet() -> Flags {
@@ -200,7 +205,7 @@ fn switched_on(lookup: impl Fn(&str) -> Option<String>, name: &str) -> bool {
 }
 
 /// `JLI_YES`, `JLI_YOLO` and `JLI_QUIET` turn on their flags. The environment never turns a flag off.
-fn switches_from(mut flags: Flags, lookup: impl Fn(&str) -> Option<String>) -> Flags {
+pub(crate) fn switches_from(mut flags: Flags, lookup: impl Fn(&str) -> Option<String>) -> Flags {
     flags.yes |= switched_on(&lookup, "JLI_YES");
     flags.yolo |= switched_on(&lookup, "JLI_YOLO");
     flags.quiet |= switched_on(&lookup, "JLI_QUIET");
@@ -353,7 +358,7 @@ impl App {
         clarification: Option<String>,
         cwd: PathBuf,
     ) -> Result<Outcome> {
-        let ui = Ui::of(flags.quiet, flags.json);
+        let ui = flags.ui();
         let threshold = resolve_threshold(&self.brain, flags).map_err(configuration)?;
         let options = RouteOptions {
             yes: flags.yes,
@@ -852,7 +857,7 @@ impl App {
             }
             return Ok(0);
         }
-        let ui = Ui::of(flags.quiet, flags.json);
+        let ui = flags.ui();
         let options = RouteOptions::new(
             at.clone(),
             resolve_threshold(&self.brain, flags).map_err(configuration)?,
@@ -930,7 +935,7 @@ impl App {
 
     /// `jli run <planId> …`: each plan as stored, in order, until one fails or is refused.
     fn run_plans(&mut self, ids: &[i64], values: &[(String, String)], flags: &Flags) -> Result<i32> {
-        let ui = Ui::of(flags.quiet, flags.json);
+        let ui = flags.ui();
         let outcomes = plan::run_plans(
             &self.brain,
             &self.models,
