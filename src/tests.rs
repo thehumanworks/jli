@@ -25,6 +25,11 @@ struct Scratch {
 
 impl Scratch {
     fn new(name: &str) -> Scratch {
+        // A git hook exports where the repository is, and in a worktree that path is absolute, so
+        // `git` run in the scratch directory would find this repository. The tests expect no repository.
+        for variable in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
+            std::env::remove_var(variable);
+        }
         let root = std::env::temp_dir().join(format!(
             "jli-test-{name}-{}-{}",
             std::process::id(),
