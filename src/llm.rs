@@ -263,6 +263,11 @@ pub fn slots_schema() -> Value {
             },
             "description": { "type": "string", "description": "what the value is, e.g. 'the file to count lines in'" },
             "default": nullable("string", "value to use when the request does not give one"),
+            "aliases": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "up to four other names a person might type for this value as name=value, such as dir and path for directory; none that could mean another slot",
+            },
         })),
     })
 }
@@ -282,6 +287,8 @@ pub struct SlotDraft {
     pub description: String,
     #[serde(default)]
     pub default: Option<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

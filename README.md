@@ -32,6 +32,7 @@ Learning is writing to that database:
 | You said yes to "Run it?" | the phrasing, as an example of that skill | that phrasing becomes more confident |
 | You said no and typed the right command | a counter-example on the wrong skill, and the phrasing on the right one | it routes to your command next time |
 | You ran `jli teach` or `jli fix` | a phrasing, or a counter-example | same as above, by hand |
+| You wrote `dir=src` for a slot called `directory` | `dir` as another name for that slot | `dir=` is read with no model next time |
 
 One command can hold many phrasings. Teaching a phrase for a command that a skill already runs adds
 the phrase to that skill.
@@ -138,9 +139,15 @@ jli tag this name=v1.2.0 message="first cut"   # several arguments, each to its 
 ```
 
 The trace shows `{message} = fix the parser (from request)`. A stated value is hidden from routing,
-so the words of a commit message cannot change which command is picked. `name=` for a slot the
-command does not have stops the run and lists the command's arguments; `jli skills` shows them as
-`{name}` in each command.
+so the words of a commit message cannot change which command is picked.
+
+You do not have to remember what a slot is called. Each slot answers to other names as well, such
+as `dir` and `path` for `{directory}`. The model that writes a skill suggests some. When you use a
+name the skill does not know, `msg=wip` for `{message}`, the agent is asked once which slot it
+means; the value stays yours, and after the run the name is kept, so next time the parser reads it.
+A name that fits no slot stops the run and lists the command's arguments. `jli skills` shows each
+slot as `{name}` in the command, with its other names below it. See
+[ADR 12](docs/adr/0012-slot-aliases.md).
 
 Anything not stated is filled by the cheapest method that works: a number in the request, a System 1
 `choice` among the real files or branches, the agent, and last the slot's default. See
@@ -167,7 +174,7 @@ The cloud modes are wired but have not been run against a live Turso database ye
 | File | Role |
 | --- | --- |
 | `src/system1.rs` | builds the matrix from the database and asks Jev; the only module that uses `typesafe-jev` |
-| `src/system2.rs` | the agent: structured proposals and free-text slot filling |
+| `src/system2.rs` | the agent: structured proposals, free-text slot filling, and naming an unknown argument's slot |
 | `src/translator.rs` | turns a taught phrase and command into a general matrix row |
 | `src/learn.rs` | writes a row and verifies it against System 1, one thread per check |
 | `src/suggest.rs` | auto mode: diagnoses a failure and offers alternatives |

@@ -168,6 +168,7 @@ fn greeting_skill(scratch: &Scratch) {
         kind,
         description: String::new(),
         default: default.map(String::from),
+        aliases: vec![],
     };
     scratch
         .brain
@@ -223,12 +224,104 @@ fn a_stated_value_cannot_steer_the_route() {
 #[test]
 fn an_argument_the_command_does_not_take_blocks_the_run() {
     let scratch = Scratch::new("unmatched");
-    let (models, _) = models(|_| decision("git-commit", 0.9, 0.9, [0.2, 0.8, 0.0]), no_language_model());
+    // The agent is asked whether the name means one of the slots, and here it says no.
+    let no_slot = json!({ "arguments": [{ "name": "branch", "placeholder": null }] });
+    let (models, _) = models(|_| decision("git-commit", 0.9, 0.9, [0.2, 0.8, 0.0]), vec![("argument_names", no_slot)]);
     let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
-    let outcome = go(&scratch, &models, "commit \"wip\" msg=wip", &mut Script::default(), &options);
-    assert_eq!(outcome.blocked.as_deref(), Some("git-commit does not take msg="));
+    let outcome = go(&scratch, &models, "commit \"wip\" branch=main", &mut Script::default(), &options);
+    assert_eq!(outcome.blocked.as_deref(), Some("git-commit does not take branch="));
     assert!(!outcome.ran);
     assert_eq!(outcome.exit_code(), 3);
+    assert!(scratch.brain.skill("git-commit").unwrap().unwrap().slots[0].aliases.is_empty());
+
+    // With every slot already stated by name there is nothing the name could mean, so nobody is asked.
+    let (silent, _) = self::models(|_| decision("git-commit", 0.9, 0.9, [0.2, 0.8, 0.0]), no_language_model());
+    let outcome = go(&scratch, &silent, "commit message=wip msg=other", &mut Script::default(), &options);
+    assert_eq!(outcome.blocked.as_deref(), Some("git-commit does not take msg="));
+
+    // An unreachable agent leaves the argument unknown.
+    let offline = Models { llm: Llm::with_transport(|_| Err("connection refused".into())), ..silent };
+    let outcome = go(&scratch, &offline, "commit msg=wip", &mut Script::default(), &options);
+    assert_eq!(outcome.blocked.as_deref(), Some("git-commit does not take msg="));
+}
+
+#[test]
+fn another_name_for_a_slot_is_worked_out_once_and_kept() {
+    let scratch = Scratch::new("alias");
+    greeting_skill(&scratch);
+    let named = json!({ "arguments": [{ "name": "who", "placeholder": "name" }] });
+    let (models, replies) = models(|_| decision("greet", 0.97, 0.9, SAFE), vec![("argument_names", named.clone())]);
+
+    // A dry run uses the name and keeps nothing.
+    let dry = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "greet who=\"Ada L\" greeting=hello", &mut Script::default(), &dry);
+    assert_eq!(outcome.commands, ["printf '%s %s x%s\\n' hello 'Ada L' 1"]);
+    assert!(scratch.brain.skill("greet").unwrap().unwrap().slots[0].aliases.is_empty());
+    {
+        let seen = replies.seen.lock().unwrap();
+        let input: Value = serde_json::from_str(seen[0]["messages"][1]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(input["arguments"], json!([{ "name": "who", "value": "Ada L" }]));
+        let offered: Vec<&str> = input["placeholders"].as_array().unwrap().iter().map(|slot| slot["name"].as_str().unwrap()).collect();
+        assert_eq!(offered, ["name", "count"], "a slot the request already names is not on offer");
+    }
+
+    let (asked, _) = self::models(|_| decision("greet", 0.97, 0.9, SAFE), vec![("argument_names", named)]);
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &asked, "greet who=\"Ada L\" greeting=hello", &mut Script::default(), &options);
+    assert_eq!(outcome.output.as_deref(), Some("hello Ada L x1\n"));
+    assert_eq!(outcome.learned, ["who= means {name} in greet"]);
+    assert_eq!(scratch.brain.skill("greet").unwrap().unwrap().slots[0].aliases, ["who"]);
+
+    // From now on the name is read by the parser: any language model call would panic.
+    let (silent, _) = self::models(|_| decision("greet", 0.97, 0.9, SAFE), no_language_model());
+    let outcome = go(&scratch, &silent, "greet WHO=Bob greeting=hey 2 times", &mut Script::default(), &options);
+    assert_eq!(outcome.output.as_deref(), Some("hey Bob x2\n"));
+    assert!(outcome.learned.is_empty());
+    let outcome = go(&scratch, &silent, "say greeting: 'good day' to who: Grace Hopper", &mut Script::default(), &options);
+    assert_eq!(outcome.output.as_deref(), Some("good day Grace Hopper x1\n"), "an alias works as a label too");
+}
+
+#[test]
+fn the_agent_cannot_put_a_value_where_the_request_already_put_one() {
+    let scratch = Scratch::new("alias-refused");
+    greeting_skill(&scratch);
+    // Two names for one slot, a slot that is not on offer, and a name the user never typed.
+    let greedy = json!({ "arguments": [
+        { "name": "who", "placeholder": "name" },
+        { "name": "person", "placeholder": "name" },
+        { "name": "who", "placeholder": "greeting" },
+        { "name": "times", "placeholder": "count" },
+    ] });
+    let (models, _) = models(|_| decision("greet", 0.97, 0.9, SAFE), vec![("argument_names", greedy)]);
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "greet who=Ada person=Bob greeting=hi", &mut Script::default(), &options);
+    assert_eq!(outcome.blocked.as_deref(), Some("greet does not take person="));
+    assert!(!outcome.ran);
+    let slots = scratch.brain.skill("greet").unwrap().unwrap().slots;
+    assert!(slots.iter().all(|slot| slot.aliases.is_empty()), "a blocked run keeps nothing");
+}
+
+#[test]
+fn a_proposed_skill_keeps_only_the_aliases_that_hold_up() {
+    let scratch = Scratch::new("alias-proposed");
+    std::fs::create_dir(scratch.work.join("src")).unwrap();
+    let proposal = json!({
+        "kind": "new", "existingLabel": null, "label": "list-directory", "steps": ["ls {directory} | head -n {count}"],
+        "scenario": "the user wants the first entries of a directory",
+        "slots": [
+            { "name": "directory", "kind": "file", "description": "the directory", "default": null, "aliases": ["dir", "Path", "count", "-d", ""] },
+            { "name": "count", "kind": "number", "description": "how many", "default": "5", "aliases": ["n", "dir", "directory"] },
+        ],
+        "slotValues": [{ "name": "count", "value": "5" }],
+        "risk": "safe", "explanation": "Lists.", "answer": null,
+    });
+    let (models, _) = models(|_| decision(NONE, 0.7, 0.95, SAFE), vec![("proposal", proposal)]);
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "first entries of dir=src", &mut Script::default(), &options);
+    assert_eq!(outcome.commands, ["ls src | head -n 5"], "the user's own name reaches the slot the agent named properly");
+    let slots = scratch.brain.skill("list-directory").unwrap().unwrap().slots;
+    assert_eq!(slots[0].aliases, ["dir", "path"]);
+    assert_eq!(slots[1].aliases, ["n"]);
 }
 
 #[test]
@@ -454,7 +547,7 @@ fn teaching_a_template_variant_needs_no_model() {
             risk: Risk::Safe,
             origin: Origin::Taught,
             examples: vec!["show the last 3 commits".into()],
-            slots: vec![Slot { name: "count".into(), kind: SlotKind::Number, description: "how many".into(), default: None }],
+            slots: vec![Slot { name: "count".into(), kind: SlotKind::Number, description: "how many".into(), default: None, aliases: vec![] }],
         })
         .unwrap();
     let (models, _) = models(|_| panic!("System 1 must not be asked"), no_language_model());

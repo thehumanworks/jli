@@ -5,6 +5,9 @@
 //!   `name: "some words"` or `name: rest`  the same in plainer words, once the skill is known
 //!   `"some words"`                        a value with no name, given to text slots in order
 //!
+//! A slot answers to its name and to its aliases, so `dir=src` reaches `{directory}` once `dir` is
+//! known as another name for it. See docs/adr/0012-slot-aliases.md.
+//!
 //! Stated values are hidden from routing: System 1 sees `commit message=…`, so the words of a
 //! commit message cannot change which command is picked or how risky it looks.
 
@@ -113,12 +116,11 @@ fn scan(text: &str) -> Vec<Stated> {
     out
 }
 
-/// Slot names and argument keys compare without case, and `-` is the same as `_`.
-fn normal(name: &str) -> String {
-    name.to_ascii_lowercase().replace('-', "_")
-}
+/// An alias shorter than this is only read as `key=value`. As a label, `d:` or `n "…"` is too
+/// easily ordinary prose.
+const SHORTEST_LABEL: usize = 3;
 
-fn as_number(value: &str) -> String {
+pub(crate) fn as_number(value: &str) -> String {
     let lower = value.to_lowercase();
     NUMBER_WORDS.iter().find(|(word, _)| *word == lower).map_or_else(|| value.to_string(), |(_, digits)| digits.to_string())
 }
@@ -137,7 +139,7 @@ fn numbers_in(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// A slot's name used as a label in the request: `message: …` or `message "…"`.
+/// A slot's name or alias used as a label in the request: `message: …` or `message "…"`.
 struct Label {
     slot: usize,
     start: usize,
@@ -154,28 +156,36 @@ fn labels(text: &str, items: &[Stated], slots: &[Slot], skip: &[bool]) -> Vec<La
         if skip[slot] {
             continue;
         }
-        let name = wanted.name.to_ascii_lowercase();
-        let mut from = 0;
-        while let Some(offset) = lower[from..].find(&name) {
-            let start = from + offset;
-            let end = start + name.len();
-            from = end;
-            let boundary = !lower[..start].chars().next_back().is_some_and(|ch| ch.is_alphanumeric() || ch == '_');
-            if !boundary || inside(start) {
-                continue;
-            }
-            let rest = &text[end..];
-            let after_name = rest.trim_start();
-            let colon = after_name.starts_with(':');
-            let value = if colon { after_name[1..].trim_start() } else { after_name };
-            let value_at = text.len() - value.len();
-            // Without a colon, only a quoted string right after the name counts.
-            let quoted_next = items.iter().any(|item| item.key.is_none() && item.span.start == value_at);
-            if colon || (quoted_next && value_at > end) {
-                found.push(Label { slot, start, value_at, colon });
-                break;
+        let aliases = wanted.aliases.iter().filter(|alias| alias.len() >= SHORTEST_LABEL);
+        // The slot's label is the first place any of its names is used as one.
+        let mut first: Option<Label> = None;
+        for name in std::iter::once(&wanted.name).chain(aliases).filter(|name| !name.is_empty()) {
+            let name = name.to_ascii_lowercase();
+            let mut from = 0;
+            while let Some(offset) = lower[from..].find(&name) {
+                let start = from + offset;
+                let end = start + name.len();
+                from = end;
+                let boundary = !lower[..start].chars().next_back().is_some_and(|ch| ch.is_alphanumeric() || ch == '_');
+                if !boundary || inside(start) {
+                    continue;
+                }
+                let rest = &text[end..];
+                let after_name = rest.trim_start();
+                let colon = after_name.starts_with(':');
+                let value = if colon { after_name[1..].trim_start() } else { after_name };
+                let value_at = text.len() - value.len();
+                // Without a colon, only a quoted string right after the name counts.
+                let quoted_next = items.iter().any(|item| item.key.is_none() && item.span.start == value_at);
+                if colon || (quoted_next && value_at > end) {
+                    if first.as_ref().is_none_or(|label| start < label.start) {
+                        first = Some(Label { slot, start, value_at, colon });
+                    }
+                    break;
+                }
             }
         }
+        found.extend(first);
     }
     found.sort_by_key(|label| label.start);
     found
@@ -190,8 +200,8 @@ pub struct Reading {
     pub quoted: Vec<String>,
     /// Numbers outside any stated value, in order.
     pub numbers: Vec<String>,
-    /// `key=value` arguments whose key is not a slot of the skill.
-    pub unmatched: Vec<String>,
+    /// `key=value` arguments whose key is no slot's name or alias, as (key, value).
+    pub unmatched: Vec<(String, String)>,
     /// The request with every stated value hidden. This is what gets routed and learned.
     pub phrase: String,
 }
@@ -209,10 +219,10 @@ pub fn read(query: &str, slots: &[Slot]) -> Reading {
     for (index, item) in items.iter().enumerate() {
         let Some(key) = &item.key else { continue };
         used[index] = true;
-        match slots.iter().position(|slot| normal(&slot.name) == normal(key)) {
+        match slots.iter().position(|slot| slot.answers_to(key)) {
             Some(slot) if value_of[slot].is_none() => value_of[slot] = Some(item.value.clone()),
             Some(_) => {}
-            None => reading.unmatched.push(key.clone()),
+            None => reading.unmatched.push((key.clone(), item.value.clone())),
         }
     }
 
@@ -325,7 +335,7 @@ mod tests {
     use super::*;
 
     fn slot(name: &str, kind: SlotKind) -> Slot {
-        Slot { name: name.into(), kind, description: String::new(), default: None }
+        Slot { name: name.into(), kind, description: String::new(), default: None, aliases: vec![] }
     }
 
     fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -356,7 +366,7 @@ mod tests {
     fn an_argument_for_no_slot_is_reported() {
         let reading = read("commit msg=wip", &[slot("message", SlotKind::Text)]);
         assert!(reading.named.is_empty());
-        assert_eq!(reading.unmatched, ["msg"]);
+        assert_eq!(reading.unmatched, pairs(&[("msg", "wip")]));
         let dashed = read("tag it tag-name=v1 count=three", &[slot("tag_name", SlotKind::Text), slot("count", SlotKind::Number)]);
         assert_eq!(dashed.named, pairs(&[("tag_name", "v1"), ("count", "3")]));
     }
@@ -382,6 +392,26 @@ mod tests {
         assert_eq!(reading.phrase, "swap pattern: … replacement: … count: … times");
         let mixed = read("swap replacement: 'b' for pattern='a'", &two);
         assert_eq!(mixed.named, pairs(&[("pattern", "a"), ("replacement", "b")]));
+    }
+
+    #[test]
+    fn a_slot_answers_to_its_aliases() {
+        let mut directory = slot("directory", SlotKind::File);
+        directory.aliases = vec!["dir".into(), "d".into(), "target_path".into()];
+        let slots = [directory, slot("count", SlotKind::Number)];
+        for request in ["go dir=src", "go D=src", "go target-path=src", "go directory=src"] {
+            let reading = read(request, &slots);
+            assert_eq!(reading.named, pairs(&[("directory", "src")]), "{request}");
+            assert!(reading.unmatched.is_empty(), "{request}");
+        }
+        assert_eq!(read("go dir=src", &slots).phrase, "go dir=…");
+        assert_eq!(read("go dir=a directory=b", &slots).named, pairs(&[("directory", "a")]), "the first one stated wins");
+        assert_eq!(read("go folder=src", &slots).unmatched, pairs(&[("folder", "src")]));
+
+        assert_eq!(read("go to dir: src please", &slots).named, pairs(&[("directory", "src")]));
+        assert_eq!(read("go to dir \"my files\"", &slots).named, pairs(&[("directory", "my files")]));
+        assert_eq!(read("open dir: a, not directory: b", &slots).named, pairs(&[("directory", "a,")]), "the first label wins");
+        assert!(read("plan d: go home", &slots).named.is_empty(), "a short alias is not read as a label");
     }
 
     #[test]
