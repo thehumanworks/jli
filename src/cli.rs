@@ -10,7 +10,7 @@ use crate::learn::{learn_phrase, LearnInput};
 use crate::router::{route, split_steps, Outcome, RouteOptions, DEFAULT_THRESHOLD};
 use crate::shell::{init_script, HandOff, Shell};
 use crate::slots::learned_phrase;
-use crate::store::{Brain, BrainConfig};
+use crate::store::{user_id, Brain, BrainConfig, Shared, DEFAULT_USER};
 use crate::types::{BrainEvent, Mode, Path, Risk, DEFAULT_MODE};
 use crate::ui::{bar, c, duration, risk_tag, sparkline, Prompt, Terminal, Ui};
 use crate::Models;
@@ -32,6 +32,7 @@ fn help() -> String {
   -q, --quiet      hide the decision trace
       --json       print the outcome as JSON (for agents); command output is captured
       --agent      skip the decision model and ask the reasoning agent directly
+      --user-id=ID     whose skills, history and settings to use (default \"default\")
 
 {}
   jli commit message=\"fix the parser\"  name=value goes straight to the command's {{message}} slot
@@ -49,6 +50,7 @@ fn help() -> String {
   jli config mode <manual|semi|auto>   who does the teaching (default semi)
   jli fix                              the last command run here was wrong: unlearn it and try again
   jli forget <label>                   delete a skill
+  jli share <label> --to <user>        give another user a copy of one of your skills
   jli sync                             sync the local replica with the cloud brain
   jli shell-init [zsh|bash|fish]       the shell function that lets jli cd and export in your shell:
                                        eval \"$(jli shell-init zsh)\" in ~/.zshrc
@@ -58,6 +60,7 @@ fn help() -> String {
   JLI_DB_URL     file:/path/brain.db (default ~/.jli/brain.db) or libsql://… for a cloud brain
   JLI_SYNC_URL   libsql://… keeps a local replica in sync with a cloud brain
   JLI_DB_TOKEN   auth token for the cloud brain
+  JLI_USER_ID    the same as --user-id= (the flag wins)
   JLI_YES        1 or true: the same as --yes
   JLI_YOLO       1 or true: the same as --yolo
   JLI_THRESHOLD  0 to 1: the same as --confidence= (JLI_CONFIDENCE also works)
@@ -84,6 +87,8 @@ struct Flags {
     threshold: Option<f64>,
     /// From --mode.
     mode: Option<Mode>,
+    /// From --user-id; resolved against JLI_USER_ID and the default user.
+    user_id: Option<String>,
 }
 
 fn parse_threshold(text: &str) -> Result<f64> {
@@ -133,6 +138,15 @@ fn resolve_threshold(brain: &Brain, flags: &Flags) -> Result<f64> {
     }
 }
 
+/// Flag, then JLI_USER_ID, then the default user.
+fn resolve_user(flags: &Flags, lookup: impl Fn(&str) -> Option<String>) -> Result<String> {
+    match (&flags.user_id, lookup("JLI_USER_ID")) {
+        (Some(user), _) => Ok(user.clone()),
+        (None, Some(from_env)) => user_id(&from_env),
+        (None, None) => Ok(DEFAULT_USER.to_string()),
+    }
+}
+
 /// An on/off environment variable: 1 or true (any case) turns it on. Anything else is ignored.
 fn switched_on(lookup: impl Fn(&str) -> Option<String>, name: &str) -> bool {
     lookup(name).is_some_and(|value| matches!(value.trim().to_lowercase().as_str(), "1" | "true"))
@@ -165,6 +179,10 @@ fn parse(argv: &[String]) -> Result<Parsed> {
                     flags.threshold = Some(parse_threshold(value)?);
                 } else if let Some(value) = arg.strip_prefix("--mode=") {
                     flags.mode = Some(parse_mode(value)?);
+                } else if let Some(value) = arg.strip_prefix("--user-id=") {
+                    flags.user_id = Some(user_id(value)?);
+                } else if arg == "--user-id" {
+                    return Err(anyhow!("--user-id needs a value: --user-id=<id>"));
                 } else if let Some(risk) = arg.strip_prefix("--risk=").and_then(Risk::parse) {
                     flags.risk = Some(risk);
                 } else {
@@ -214,6 +232,7 @@ impl App {
 
     fn show_skills(&self) -> Result<()> {
         let skills = self.brain.skills()?;
+        let shared_from = self.brain.shared_from()?;
         say(format!(
             "{} {}\n",
             c::bold(format!("{} skills", skills.len())),
@@ -225,10 +244,12 @@ impl App {
                 crate::types::Origin::Agent => c::magenta("learned from agent"),
                 crate::types::Origin::Taught => c::cyan("taught"),
             };
+            let shared = shared_from.get(&skill.label).map(|from| format!("  {}", c::dim(format!("shared by {from}"))));
             say(format!(
-                "{}  {}  {origin}  {}",
+                "{}  {}  {origin}{}  {}",
                 c::bold(&skill.label),
                 risk_tag(skill.risk),
+                shared.unwrap_or_default(),
                 c::dim(format!("used {}×", skill.uses))
             ));
             for step in &skill.steps {
@@ -377,6 +398,26 @@ impl App {
         Ok(())
     }
 
+    fn share(&self, label: &str, to: &str) -> Result<i32> {
+        let to = user_id(to)?;
+        let (message, code) = match self.brain.share(label, &to)? {
+            Shared::Copied => {
+                (format!("Shared {label} with {to}. It is a copy: what either of you teaches it from now on stays yours."), 0)
+            }
+            Shared::NoSuchSkill => (format!("No skill called {label}."), 1),
+            Shared::SameUser => (format!("{label} is already yours: you are {to}."), 1),
+            Shared::LabelTaken => (
+                format!("{to} already has a skill called {label}, so nothing was shared. They can drop theirs with: jli --user-id={to} forget {label}"),
+                1,
+            ),
+            Shared::AlreadyRuns(theirs) => {
+                (format!("{to} already runs the same command as {theirs}, so nothing was shared."), 1)
+            }
+        };
+        say(message);
+        Ok(code)
+    }
+
     fn fix(&mut self, flags: &Flags) -> Result<i32> {
         // The same text the router logs, so this directory's own events are the ones found.
         let last = self.brain.last_executed(&cwd()?.to_string_lossy())?;
@@ -493,6 +534,18 @@ impl App {
                 return Ok(code);
             }
         }
+        if first == "share" && rest.is_empty() && others.iter().any(|word| word == "--to" || word.starts_with("--to=")) {
+            let target = match others {
+                [label, to, user] if to == "--to" => Some((label, user.clone())),
+                [label, to] => to.strip_prefix("--to=").map(|user| (label, user.to_string())),
+                _ => None,
+            };
+            let Some((label, to)) = target else {
+                say("Usage: jli share <label> --to <user>");
+                return Ok(1);
+            };
+            return self.share(label, &to);
+        }
         if first == "forget" && others.len() == 1 {
             let label = &others[0];
             say(if self.brain.forget(label)? { format!("Forgot {label}.") } else { format!("No skill called {label}.") });
@@ -545,15 +598,19 @@ fn run(argv: &[String]) -> Result<i32> {
         say(help());
         return Ok(0);
     }
+    let user = resolve_user(&flags, env)?;
     if first == Some("demo") && words.len() == 1 {
-        return run_demo();
+        return run_demo(&user);
     }
     if first == Some("shell-init") && words.len() <= 2 && rest.is_empty() {
         return shell_init(words.get(1).map(String::as_str));
     }
 
-    let mut app =
-        App { brain: Brain::open(BrainConfig::from_env())?, models: Models::from_env(), terminal: Terminal::new() };
+    let mut app = App {
+        brain: Brain::open_as(BrainConfig::from_env(), &user)?,
+        models: Models::from_env(),
+        terminal: Terminal::new(),
+    };
     let code = app.dispatch(&flags, &words, &rest);
     let _ = app.brain.sync();
     code
@@ -615,6 +672,25 @@ mod tests {
             assert!(!with(Some(value)), "{value} does not switch it on");
         }
         assert!(!with(None));
+    }
+
+    #[test]
+    fn the_user_comes_from_the_flag_then_the_environment() {
+        let parsed = parse(&args(&["--user-id=agent", "teach", "x", "--", "ls", "--user-id=other"])).unwrap();
+        assert_eq!(parsed.flags.user_id.as_deref(), Some("agent"));
+        assert_eq!(parsed.words, ["teach", "x"]);
+        assert_eq!(parsed.rest, ["ls", "--user-id=other"], "after -- it belongs to the command");
+        assert!(parse(&args(&["--user-id=Agent", "skills"])).is_err());
+        assert!(parse(&args(&["--user-id=", "skills"])).is_err());
+        assert!(parse(&args(&["--user-id", "agent", "skills"])).is_err(), "never read as part of the request");
+
+        let from_env = |name: &str| (name == "JLI_USER_ID").then(|| "ci".to_string());
+        let nothing = |_: &str| None;
+        let flagged = Flags { user_id: Some("agent".into()), ..Flags::default() };
+        assert_eq!(resolve_user(&flagged, from_env).unwrap(), "agent", "the flag wins");
+        assert_eq!(resolve_user(&Flags::default(), from_env).unwrap(), "ci");
+        assert_eq!(resolve_user(&Flags::default(), nothing).unwrap(), DEFAULT_USER);
+        assert!(resolve_user(&Flags::default(), |_| Some("two words".into())).is_err());
     }
 
     #[test]

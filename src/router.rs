@@ -593,7 +593,8 @@ impl Route<'_> {
                 ui.note(format!("The command did not exit 0, but {reason}, so the proposal is learned."));
             }
             if result.exit_code == 0 || blameless.is_some() {
-                self.brain.add_skill(&NewSkill {
+                // Another writer may have taken the label since it was shown; the skill then gets the next free one.
+                let label = self.brain.add_new_skill(&NewSkill {
                     label: skill.label.clone(),
                     steps: skill.steps.clone(),
                     scenario: skill.scenario.clone(),
@@ -602,12 +603,10 @@ impl Route<'_> {
                     examples: vec![self.phrase.clone()],
                     slots: skill.slots.clone(),
                 })?;
-                self.brain.record_use(&skill.label)?;
-                self.outcome.learned.push(format!("new skill {}", skill.label));
-                ui.learned(format!(
-                    "new skill {}. Next time System 1 handles this without the agent.",
-                    c::bold(&skill.label)
-                ));
+                self.outcome.label = Some(label.clone());
+                self.brain.record_use(&label)?;
+                self.outcome.learned.push(format!("new skill {label}"));
+                ui.learned(format!("new skill {}. Next time System 1 handles this without the agent.", c::bold(&label)));
             } else {
                 ui.note("The command failed, so the proposal was not learned.");
             }

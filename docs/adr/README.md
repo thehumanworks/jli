@@ -25,6 +25,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [12](0012-slot-aliases.md) | A slot answers to several names, and a new name is worked out once and kept |
 | [13](0013-learning-fixes.md) | One row per command, the shape of a request, this host's own fix, and failures that are not the command's fault |
 | [14](0014-shell-integration.md) | Steps such as `cd` are handed to the calling shell, and paths are expanded before they are quoted |
+| [15](0015-user-scope.md) | What is learned belongs to a user, a skill is shared by copy, and parallel writers lose nothing |
 
 ## Known gaps, by record
 
@@ -45,3 +46,6 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 - [14](0014-shell-integration.md): handed-over steps that are not tried first count as a clean
   exit, the trial runs in bash whatever the calling shell is, fish has only been tested offline,
   jli's own session hands its steps over only when it ends, and `~user` is not expanded.
+- [15](0015-user-scope.md): an older jli ignores `--user-id` and `JLI_USER_ID` (and routes the flag
+  as words of a request), two writers teaching the same new command at once get two skills, a share
+  cannot be undone except by `forget`, and the safe writes have not run against a live remote.
