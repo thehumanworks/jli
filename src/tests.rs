@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
-use crate::cli::{App, Fix, FixHow, Flags};
+use crate::cli::{parse, App, Fix, FixHow, Flags, Parsed};
 use crate::learn::{learn_phrase, LearnInput};
 use crate::llm::Llm;
 use crate::plan::{run_plans, RunFlags, SlotValue};
@@ -1839,6 +1839,143 @@ fn a_skill_learned_in_a_project_stays_there_unless_taught_globally() {
 
 fn models_without_calls() -> (Models, Arc<Replies>) {
     self::models(|_| panic!("System 1 must not be asked"), no_language_model())
+}
+
+// ── --project (ADR 26) ──────────────────────────────────────────────────────────
+
+/// `jli <argv>` from `cwd`, opened on the scratch brain as `run` opens it, with nobody at the keyboard.
+/// The search for a `.jlirc` stops at the scratch directory.
+fn opened(scratch: &Scratch, argv: &[&str], cwd: &std::path::Path, models: Models) -> anyhow::Result<(App, Parsed)> {
+    let parsed = parse(&argv.iter().map(|arg| arg.to_string()).collect::<Vec<_>>())?;
+    let config = BrainConfig::file(&scratch.root.join("brain.db"));
+    let terminal = crate::ui::Terminal::not_a_terminal();
+    Ok((App::open(config, "default", &parsed.flags, cwd, Some(&scratch.root), models, terminal)?, parsed))
+}
+
+fn run_opened(scratch: &Scratch, argv: &[&str], cwd: &std::path::Path, models: Models) -> i32 {
+    let (mut app, parsed) = opened(scratch, argv, cwd, models).unwrap();
+    app.dispatch(&parsed.flags, &parsed.words, &parsed.rest).unwrap()
+}
+
+fn listing(scratch: &Scratch, argv: &[&str], cwd: &std::path::Path) -> String {
+    let (app, parsed) = opened(scratch, argv, cwd, models_without_calls().0).unwrap();
+    app.skills_listing(&parsed.flags).unwrap().join("\n")
+}
+
+#[test]
+fn taught_with_the_project_flag_from_outside_every_project_it_is_that_projects() {
+    let scratch = Scratch::new("project-flag-teach");
+    let teach = ["teach", "-q", "--mode=manual", "--project=demo-app", "run the tests", "--", "echo", "tests"];
+    let (app, _) = opened(&scratch, &teach, &scratch.work, models_without_calls().0).unwrap();
+    assert_eq!((app.project.as_ref(), app.brain.project()), (None, Some("demo-app")), "no .jlirc, and still the project");
+    drop(app);
+    assert_eq!(run_opened(&scratch, &teach, &scratch.work, models_without_calls().0), 0);
+
+    let demo = in_project(&scratch, "demo-app");
+    let own = demo.project_skills().unwrap();
+    assert_eq!((own.len(), own[0].steps.as_slice()), (1, ["echo tests".to_string()].as_slice()));
+    let label = own[0].label.clone();
+    assert!(scratch.brain.skill(&label).unwrap().is_none(), "not one of the global skills");
+
+    // `jli skills --project=demo-app` lists the project's own skills and none of the global ones.
+    let only = listing(&scratch, &["skills", "--project=demo-app"], &scratch.work);
+    assert!(only.contains(&label) && only.contains("project demo-app") && only.contains("1 project skills"), "{only}");
+    assert!(!only.contains("git-status") && !only.contains("list-files"), "{only}");
+    // Without it, outside every project, the listing is the global skills, as before.
+    let global = listing(&scratch, &["skills"], &scratch.work);
+    assert!(global.contains("git-status") && !global.contains(&label), "{global}");
+}
+
+#[test]
+fn a_request_with_the_project_flag_routes_against_that_projects_matrix() {
+    let scratch = Scratch::new("project-flag-route");
+    directory_size(&in_project(&scratch, "demo-app"), "directory-size");
+    let seen = Arc::new(Mutex::new(Value::Null));
+    let recorder = seen.clone();
+    let (models, _) = self::models(
+        move |sent| {
+            *recorder.lock().unwrap() = sent["questions"]["skill"]["criteria"].clone();
+            decision(NONE, 0.9, 0.05, SAFE)
+        },
+        no_language_model(),
+    );
+    run_opened(&scratch, &["-q", "-n", "--project", "demo-app", "how", "big", "is", "src"], &scratch.work, models);
+    let criteria = seen.lock().unwrap().clone();
+    assert!(criteria.get("directory-size").is_some(), "System 1 sees the project's skill: {criteria}");
+    assert!(criteria.get("git-status").is_some(), "and the global ones beside it");
+    assert!(self::criteria(&scratch, &scratch.brain, "how big is src").get("directory-size").is_none(), "not outside it");
+}
+
+#[test]
+fn a_bare_project_flag_means_this_directorys_project_and_outside_one_it_is_a_usage_error() {
+    let scratch = Scratch::new("project-flag-bare");
+    let outside = opened(&scratch, &["skills", "--project"], &scratch.work, models_without_calls().0).err().unwrap();
+    assert_eq!(error_code(&outside), "usage");
+    assert!(format!("{outside:#}").starts_with("Not inside a project"), "{outside:#}");
+
+    let repo = scratch.work.join("shop");
+    let deep = repo.join("src");
+    std::fs::create_dir_all(&deep).unwrap();
+    crate::project::init(&repo, Some("shop")).unwrap();
+    directory_size(&in_project(&scratch, "shop"), "directory-size");
+    let (app, _) = opened(&scratch, &["skills", "--project"], &deep, models_without_calls().0).unwrap();
+    assert_eq!(app.brain.project(), Some("shop"));
+    let only = listing(&scratch, &["skills", "--project"], &deep);
+    assert!(only.contains("directory-size") && !only.contains("git-status"), "{only}");
+    let union = listing(&scratch, &["skills"], &deep);
+    assert!(union.contains("directory-size") && union.contains("git-status"), "without the flag, as before: {union}");
+
+    // `jli project init` names its own project, so --project is refused and nothing is written.
+    for init in [&["project", "init", "--project=other", "-q"][..], &["project", "init", "other", "--project"]] {
+        assert_eq!(run_opened(&scratch, init, &deep, models_without_calls().0), 1, "{init:?}");
+    }
+    assert!(!deep.join(".jlirc").exists());
+}
+
+#[test]
+fn a_named_project_jli_has_nothing_for_gets_a_note_and_carries_on() {
+    let scratch = Scratch::new("project-flag-unknown");
+    let note = |argv: &[&str], cwd: &std::path::Path| {
+        let (app, parsed) = opened(&scratch, argv, cwd, models_without_calls().0).unwrap();
+        app.unknown_project(&parsed.flags).unwrap()
+    };
+    assert_eq!(
+        note(&["--project=demo-ap", "history"], &scratch.work).as_deref(),
+        Some("jli has nothing for project demo-ap yet.")
+    );
+    assert_eq!(
+        listing(&scratch, &["skills", "--project=demo-ap"], &scratch.work),
+        "Project demo-ap has no skills of its own, and no project has any yet."
+    );
+
+    directory_size(&in_project(&scratch, "demo-app"), "directory-size");
+    assert_eq!(
+        note(&["--project=demo-ap", "history"], &scratch.work).as_deref(),
+        Some("jli has nothing for project demo-ap yet. Projects with skills of their own: demo-app.")
+    );
+    assert_eq!(note(&["--project=demo-app", "history"], &scratch.work), None);
+    assert_eq!(note(&["history"], &scratch.work), None, "only a project named with the flag");
+
+    // A lesson about a global skill, or a request, is something too.
+    in_project(&scratch, "lessons").add_counter_example("git-status", "run the tests").unwrap();
+    assert_eq!(note(&["--project=lessons", "history"], &scratch.work), None);
+    let (mut app, parsed) =
+        opened(&scratch, &["--project=asked", "-q", "history"], &scratch.work, models_without_calls().0).unwrap();
+    assert!(app.unknown_project(&parsed.flags).unwrap().is_some());
+    assert_eq!(app.dispatch(&parsed.flags, &parsed.words, &parsed.rest).unwrap(), 0, "a note, not a gate");
+    let (models, _) = self::models(|_| decision(NONE, 0.9, 0.05, SAFE), no_language_model());
+    run_opened(&scratch, &["--project=asked", "-q", "hello", "there"], &scratch.work, models);
+    assert_eq!(note(&["--project=asked", "history"], &scratch.work), None);
+    let lessons = listing(&scratch, &["skills", "--project=lessons"], &scratch.work);
+    let (first, not_listed) = lessons.split_once('\n').unwrap();
+    assert_eq!(first, "Project lessons has no skills of its own. Projects with skills of their own: demo-app.");
+    assert!(not_listed.contains("Not listed: what project lessons learned about the global git-status."), "{lessons}");
+
+    // The project of this directory's .jlirc is not a typo, even before it has anything.
+    let fresh = scratch.work.join("fresh");
+    std::fs::create_dir_all(&fresh).unwrap();
+    crate::project::init(&fresh, Some("fresh")).unwrap();
+    assert_eq!(note(&["--project=fresh", "history"], &fresh), None);
 }
 
 // ── jli generalize ──────────────────────────────────────────────────────────────

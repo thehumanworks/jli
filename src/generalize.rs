@@ -70,7 +70,7 @@ pub fn generalize(
         all
     } else {
         let Some(project) = brain.project() else {
-            ui.warn("Not inside a project: there is no .jlirc here or above. Run it in a project, or add --all-projects.");
+            ui.warn("Not inside a project: there is no .jlirc here or above. Run it in a project, name one with --project=<id>, or add --all-projects.");
             done.nothing = true;
             return Ok(done);
         };
