@@ -61,7 +61,9 @@ project = shop-api-4k2x9q
 - **A file that is there but cannot be read stops every command** that opens the brain, with the
   file's path and the reason: `…/.jlirc is not a valid .jlirc: it has no project = <id> line`.
   Ignoring it would write the project's lessons as global ones, which is the defect this record
-  exists to fix. `jli help` still works.
+  exists to fix. `--json` reports it as `"error": "configuration"`. `jli help`, `jli demo` and
+  `jli shell-init` open no brain and still work, so a broken file does not break a shell's startup;
+  `jli project init` does open it, so under a broken parent file that file must be fixed first.
 - **It should be committed.** It holds only the id, no secret and no path, and committing it is
   what makes every checkout, and every collaborator on a shared brain, the same project.
 - **No `.jlirc`, no project**: every command behaves exactly as before. This was checked
@@ -95,6 +97,7 @@ the learning loop, `jli fix` and the translator are scoped without knowing it:
 | `mode` and `confidence` | the user's: a project is not a new user |
 | the seed skills | the user's global skills only; a project gets no copy |
 | requests (`history`, `stats`, `jli fix`) | the project's own events |
+| plans and corrections ([ADR 18](0018-agent-contract.md)) | the project's: ADR 18 keys them by user and project, so `jli run <planId>` and `jli fix <eventId>` find a plan or an event made in a project from inside that project |
 | `jli eval` records | the project's (they are kept in its `scoped_meta`) |
 
 **The ping-pong.** A lesson about a global row holds a list of phrasings and a list of
@@ -233,6 +236,11 @@ The harder case, a global skill corrected in one project, on another fresh brain
 | `-n run the tests` in each | `api`: `cargo test` at 0.98. `web`: `npm test` at 1.00 |
 | `skills` in `web` | `run-tests … global, +0 −1 learned here` with `− "run the tests"`; `run-web-tests … project shop-web` |
 | the `dev` binary, `-n run the tests` in `web` | `cargo test`: an older jli does not read `.jlirc` (a known gap below) |
+
+Repeated after rebasing on `dev` with ADR 18 merged (`fa42b27`), on a fresh brain: `run-tests` at
+0.88 in `web` ran `cargo test`; `-y fix` kept the counter-example in `shop-web` and learned
+`npm test` as `run-tests-x` there; then `api` routed `cargo test` at 0.95 and `web` `npm test` at
+0.98, and outside both projects `skills` listed the user's 10 global skills only.
 
 **`examples/bench-context.rs`**, run twice. Five phrases ("run the tests", "build the project",
 "start the app", "lint the code", "format the code"), each taught to a cargo command in a Rust

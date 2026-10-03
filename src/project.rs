@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context as _, Result};
 
 use crate::store::slug;
+use crate::types::{coded, CONFIGURATION};
 
 pub const FILE: &str = ".jlirc";
 
@@ -78,7 +79,9 @@ pub fn find(cwd: &Path, home: Option<&Path>) -> Result<Option<Found>> {
         let path = dir.join(FILE);
         if path.is_file() {
             let text = std::fs::read_to_string(&path).with_context(|| format!("could not read {}", path.display()))?;
-            let id = parse(&text).with_context(|| format!("{} is not a valid {FILE}", path.display()))?;
+            // A configuration error for `--json` callers: the fix is in the file, not in jli.
+            let id = parse(&text)
+                .map_err(|error| coded(CONFIGURATION, format!("{} is not a valid {FILE}: {error:#}", path.display())))?;
             return Ok(Some(Found { id, path }));
         }
         if home.is_some_and(|home| home == dir) {
@@ -192,6 +195,7 @@ mod tests {
             let failed = find(&scratch.0, None).unwrap_err();
             let message = format!("{failed:#}");
             assert!(message.contains("is not a valid .jlirc") && message.contains(error), "{text:?}: {message}");
+            assert_eq!(crate::types::error_code(&failed), CONFIGURATION, "--json reports it as configuration");
         }
         std::fs::write(scratch.0.join(".jlirc"), "colour = blue\nproject = 'shop'\n").unwrap();
         assert_eq!(find(&scratch.0, None).unwrap().unwrap().id, "shop", "an unknown key is ignored");
