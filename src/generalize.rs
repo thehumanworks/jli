@@ -164,9 +164,9 @@ fn consider(
             };
             show(ui, "after   global, new skill", &row);
             let what = format!(
-                "{} becomes a global skill with the {} phrasings of {}",
+                "{} becomes a global skill, with the {} of {}",
                 c::bold(&row.label),
-                skill.examples.len(),
+                count(skill.examples.len(), "phrasing", "phrasings"),
                 skill.label
             );
             (row, what)
@@ -175,7 +175,12 @@ fn consider(
             let mut row = into.clone();
             merge_phrasings(&mut row, &skill.examples);
             show(ui, "after   global, existing skill", &row);
-            let what = format!("its {} phrasings join the global skill {}", skill.examples.len(), c::bold(&into.label));
+            let what = format!(
+                "the {} of {} join the global skill {}",
+                count(skill.examples.len(), "phrasing", "phrasings"),
+                skill.label,
+                c::bold(&into.label)
+            );
             (row, what)
         }
     };
@@ -183,7 +188,8 @@ fn consider(
     let kept = if skill.counter_examples.is_empty() {
         String::new()
     } else {
-        format!(", and its {} counter-examples stay with {project} as lessons about it", skill.counter_examples.len())
+        let counters = count(skill.counter_examples.len(), "counter-example stays", "counter-examples stay");
+        format!(", and its {counters} with {project} as a lesson about the global skill")
     };
     ui.line(format!(
         "   {} {after}. The project skill {} is then removed from {project}{kept}.",
@@ -337,6 +343,11 @@ fn kind(slot: &Slot) -> &'static str {
         crate::types::SlotKind::Number => "number",
         crate::types::SlotKind::Text => "text",
     }
+}
+
+/// "1 phrasing", "3 phrasings".
+fn count(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 fn same_phrase(a: &str, b: &str) -> bool {

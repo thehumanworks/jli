@@ -558,8 +558,8 @@ impl App {
             Ok((learned, skill))
         };
         let scope = match self.brain.project() {
-            Some(_) if global => "  · global, for every project".to_string(),
-            Some(project) => format!("  · kept for project {project}"),
+            Some(_) if global => " · global, for every project".to_string(),
+            Some(project) => format!(" · kept for project {project}"),
             None => String::new(),
         };
         let (learned, skill) = if global { self.brain.globally(teach)? } else { teach(&self.brain)? };
