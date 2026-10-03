@@ -265,7 +265,8 @@ Check 10 was driven with `expect`. Checks 9 and 11 were not re-run.
 ## Consequences
 
 - The brain now has a measure of whether it is right as well as fast, from its own evidence and
-  at about $0.00006 a phrasing. An optimisation run on a brain of 16 skills cost under a cent.
+  at about $0.00006 a phrasing. An optimisation run on a brain of 16 skills cost half a cent in System 1 calls; its six System 2
+  calls are not priced.
 - `--optimise` changes the brain without asking anyone, and that is deliberate. What limits the
   harm: only the scenario, at most three of the skill's own examples, and at most three
   counter-examples on its competitors can change; every change must win on the measurement and
@@ -287,6 +288,8 @@ Check 10 was driven with `expect`. Checks 9 and 11 were not re-run.
   importance counts only the person's verdicts.
 - **Known gap:** a stored example carries no context, and a replay whose directory is gone runs in
   an inferred one (above). Neither was measured for how much it moves a route.
+- **Known gap:** a "no" followed by the same command with another value is marked `corrected`, so
+  it counts against the skill's share of right routes, though the skill was right.
 - **Known gap:** a request is grouped by host and words. A `jli fix` made after other requests is
   counted as a request of its own.
 - **Known gap:** for a command that finishes faster than the check, an agent-proposed skill delays

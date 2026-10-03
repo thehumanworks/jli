@@ -97,7 +97,8 @@ competitors rises and no other skill loses a phrasing. Nobody is asked: the meas
 approval. Each kept change is recorded, and `jli eval undo` puts it back. With `-n` nothing at all
 is written. On a scratch brain of 16 skills on 2026-10-03, a measurement took 22 System 1 calls
 ($0.0014). An optimisation run took 80 System 1 and 6 System 2 calls, kept one rewrite of six, and
-cut the steal rate from 9% to 5%. See [ADR 16](docs/adr/0016-measuring-the-matrix.md).
+cut the steal rate from 9% to 5%: the phrasing it freed
+now escalates to the agent instead, so the share that came home stayed at 91%. See [ADR 16](docs/adr/0016-measuring-the-matrix.md).
 
 ## Confirmation
 
@@ -221,6 +222,7 @@ The cloud modes are wired but have not been run against a live Turso database ye
 | `src/ui.rs` | the trace on stderr, and the one owner of stdin |
 | `src/demo.rs` | the two-pass learning demo |
 | `src/tests.rs` | the router and learning loop, offline, against fake models and a scripted prompt |
+| `src/tests/eval_tests.rs` | `jli eval`, the optimiser, undo, and the check a new row gets, offline |
 | `examples/bench-translator.rs` | manual versus semi on held-out paraphrases, and with `--forgetting` the forgetting rate |
 | `docs/adr/` | the design decisions, and the lessons and known gaps behind them |
 
