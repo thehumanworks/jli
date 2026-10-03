@@ -125,18 +125,35 @@ pub(crate) fn as_number(value: &str) -> String {
     NUMBER_WORDS.iter().find(|(word, _)| *word == lower).map_or_else(|| value.to_string(), |(_, digits)| digits.to_string())
 }
 
-/// Every number in the text, in order: digits standing alone, or a word from one to ten.
+/// Whether the characters, read away from a word, start with a `-` and then another word.
+fn hyphen_then_word(mut side: impl Iterator<Item = char>) -> bool {
+    side.next() == Some('-') && side.next().is_some_and(char::is_alphanumeric)
+}
+
+/// Every number in the text, in order: digits standing alone, or a word from one to ten that is
+/// not joined by `-` to another word. The "one" of "one-line" is part of an adjective, not a count.
 fn numbers_in(text: &str) -> Vec<String> {
-    text.split(|ch: char| !ch.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .filter_map(|word| {
-            if word.bytes().all(|byte| byte.is_ascii_digit()) {
-                return Some(word.to_string());
-            }
-            let lower = word.to_lowercase();
-            NUMBER_WORDS.iter().find(|(name, _)| *name == lower).map(|(_, value)| value.to_string())
-        })
-        .collect()
+    let mut found = Vec::new();
+    let mut at = 0;
+    for word in text.split(|ch: char| !ch.is_alphanumeric()) {
+        let (start, end) = (at, at + word.len());
+        at = end + text[end..].chars().next().map_or(0, char::len_utf8);
+        if word.is_empty() {
+            continue;
+        }
+        if word.bytes().all(|byte| byte.is_ascii_digit()) {
+            found.push(word.to_string());
+            continue;
+        }
+        if hyphen_then_word(text[..start].chars().rev()) || hyphen_then_word(text[end..].chars()) {
+            continue;
+        }
+        let lower = word.to_lowercase();
+        if let Some((_, value)) = NUMBER_WORDS.iter().find(|(name, _)| *name == lower) {
+            found.push(value.to_string());
+        }
+    }
+    found
 }
 
 /// A slot's name or alias used as a label in the request: `message: …` or `message "…"`.
@@ -488,6 +505,19 @@ mod tests {
         assert_eq!(read("say `hi` or 'yo'", &[]).quoted, ["hi", "yo"]);
         assert_eq!(read("abc123 and v2", &[]).numbers, Vec::<String>::new());
         assert_eq!(read("an unclosed \"quote", &[]).quoted, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_number_word_joined_by_a_hyphen_is_not_a_number() {
+        // Issue #14: "one" in "one-line" filled the count ahead of 4.
+        assert_eq!(read("one-line log of the newest 4 commits", &[]).numbers, ["4"]);
+        assert_eq!(read("show a two-column, three-way diff", &[]).numbers, Vec::<String>::new());
+        assert_eq!(read("twenty-one files", &[]).numbers, Vec::<String>::new());
+        assert_eq!(read("one line log of the newest four commits", &[]).numbers, ["1", "4"]);
+        assert_eq!(read("- one commit, then two - three", &[]).numbers, ["1", "2", "3"], "a dash alone joins nothing");
+        assert_eq!(read("the newest five: one-liners", &[]).numbers, ["5"]);
+        // Digits are left as they were: a date or a range still gives its numbers.
+        assert_eq!(read("the last 5-10 commits", &[]).numbers, ["5", "10"]);
     }
 
     #[test]
