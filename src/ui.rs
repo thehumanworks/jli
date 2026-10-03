@@ -94,14 +94,24 @@ pub fn risk_tag(risk: Risk) -> String {
 }
 
 /// The decision trace. Everything goes to stderr so stdout stays the command's own output.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ui {
+    /// System 1's table, the agent's lines, notes and what was learned.
     pub enabled: bool,
+    /// Why nothing ran, or that a command failed.
+    pub warnings: bool,
 }
 
 impl Ui {
+    /// The trace and its warnings, both on or both off.
     pub fn new(enabled: bool) -> Ui {
-        Ui { enabled }
+        Ui { enabled, warnings: enabled }
+    }
+
+    /// As the flags ask: `--quiet` hides the trace but keeps the warnings, so a run that does nothing
+    /// still says why; `--json` hides both, since its outcome says the same.
+    pub fn of(quiet: bool, json: bool) -> Ui {
+        Ui { enabled: !quiet && !json, warnings: !json }
     }
 
     pub fn line(&self, text: impl Display) {
@@ -164,7 +174,9 @@ impl Ui {
     }
 
     pub fn warn(&self, text: impl Display) {
-        self.line(format!("{} {text}", c::yellow("!")));
+        if self.warnings {
+            eprintln!("{} {text}", c::yellow("!"));
+        }
     }
 }
 
@@ -256,6 +268,20 @@ mod tests {
         assert_eq!(fixed(1.0, 2), "1.00");
         assert_eq!(duration(289), "289 ms");
         assert_eq!(duration(16_400), "16.4 s");
+    }
+
+    #[test]
+    fn quiet_keeps_the_warnings_and_json_hides_them() {
+        let ui = |quiet, json| {
+            let ui = Ui::of(quiet, json);
+            (ui.enabled, ui.warnings)
+        };
+        assert_eq!(ui(false, false), (true, true), "no flag: the trace and its warnings");
+        assert_eq!(ui(true, false), (false, true), "--quiet: the warnings only");
+        assert_eq!(ui(false, true), (false, false), "--json: the outcome says it");
+        assert_eq!(ui(true, true), (false, false));
+        assert_eq!(Ui::new(true), Ui::of(false, false));
+        assert_eq!(Ui::new(false), Ui::of(false, true));
     }
 
     #[test]

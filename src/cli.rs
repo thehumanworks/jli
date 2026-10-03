@@ -353,7 +353,7 @@ impl App {
         clarification: Option<String>,
         cwd: PathBuf,
     ) -> Result<Outcome> {
-        let ui = Ui::new(!flags.quiet && !flags.json);
+        let ui = Ui::of(flags.quiet, flags.json);
         let threshold = resolve_threshold(&self.brain, flags).map_err(configuration)?;
         let options = RouteOptions {
             yes: flags.yes,
@@ -581,7 +581,8 @@ impl App {
             threshold: resolve_threshold(&self.brain, flags)?,
             cwd: cwd()?,
         };
-        let (models, ui) = (&self.models, Ui::new(!flags.quiet));
+        // Teaching has no JSON outcome, so --json leaves its trace on.
+        let (models, ui) = (&self.models, Ui::of(flags.quiet, false));
         let teach = |brain: &Brain| -> Result<_> {
             let learned = learn_phrase(brain, models, &input, &ui)?;
             let skill = brain.skill(&learned.label)?;
@@ -721,7 +722,8 @@ impl App {
                 }
             }
         }
-        let ui = Ui::new(!flags.quiet);
+        // generalize has no JSON outcome, so --json leaves its trace on.
+        let ui = Ui::of(flags.quiet, false);
         let done = generalize(&self.brain, &self.models, &options, &ui, &mut self.terminal)?;
         Ok(if done.nothing { 1 } else { 0 })
     }
@@ -850,7 +852,7 @@ impl App {
             }
             return Ok(0);
         }
-        let ui = Ui::new(!flags.quiet && !flags.json);
+        let ui = Ui::of(flags.quiet, flags.json);
         let options = RouteOptions::new(
             at.clone(),
             resolve_threshold(&self.brain, flags).map_err(configuration)?,
@@ -928,7 +930,7 @@ impl App {
 
     /// `jli run <planId> …`: each plan as stored, in order, until one fails or is refused.
     fn run_plans(&mut self, ids: &[i64], values: &[(String, String)], flags: &Flags) -> Result<i32> {
-        let ui = Ui::new(!flags.quiet && !flags.json);
+        let ui = Ui::of(flags.quiet, flags.json);
         let outcomes = plan::run_plans(
             &self.brain,
             &self.models,
@@ -952,7 +954,7 @@ impl App {
     /// `jli eval …`. Returns None when the words do not fit its shape, so they are a request instead.
     fn measure(&self, args: &[String], flags: &Flags) -> Result<Option<i32>> {
         // The trace and the price go to stderr even with --json: stdout is the report alone.
-        let ui = Ui::new(!flags.quiet);
+        let ui = Ui::of(flags.quiet, false);
         if args.first().map(String::as_str) == Some("undo") {
             let label = match args {
                 [_] => None,
