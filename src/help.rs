@@ -67,7 +67,7 @@ const COMMANDS: &[Command] = &[
         lines: &[
             ("jli teach \"<phrase>\" -- <command>", "link a phrase to a command (repeat to add more phrasings)"),
             ("jli teach --global \"<phrase>\" -- …", "the same, for every project, from inside one"),
-            ("    --risk=R", "safe, modifies or destructive: how much harm the command can do, instead of jli's guess"),
+            ("    --risk=R", "the command's risk, safe, modifies or destructive, instead of jli's guess"),
         ],
         options: &[MODE],
     },
