@@ -35,6 +35,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [22](0022-project-scenarios.md) | A scenario rewritten inside a project is kept for that project, and the global row is left as it was |
 | [23](0023-shell-fixes-and-number-words.md) | The install line follows the running shell, the function cleans up after ctrl-c, and a hyphenated number word is not a count |
 | [24](0024-optional-slots.md) | A slot can be left out with its flag, a person can give it a default, and choices say how each value is written |
+| [26](0026-project-flag.md) | `--project` names the project a command acts on, from any directory |
 
 ## Known gaps, by record
 
@@ -107,3 +108,9 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   it; nothing checks a value left out by hand or a choice's text; the translator's scenario can still
   be narrower than an optional value makes the skill; a plan's left-out slot cannot be given to `jli
   run`; and `jli slot` inside a project ran live once.
+- [26](0026-project-flag.md): the space form takes the next word as the id, so `jli --project deploy
+  the app` scopes into a project called `deploy`, and the note on stderr is the only guard; a mistyped
+  id that names another real project gets no note; `jli skills --project=<id>` names but does not show
+  the global skills the project learned about; the projects named are those with skills of their own;
+  `jli project --project=<id>` cannot say where the checkouts are; and an older jli reads the flag as
+  words of the request, so its `teach` puts it in a global phrasing.

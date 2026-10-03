@@ -360,9 +360,9 @@ jli generalize                       # the agent proposes which project skills c
 ```
 
 A project is named by the id in the nearest `.jlirc` at or above the working directory (up to
-`$HOME`), never by a path, so every checkout is the same project. Inside one, System 1 sees the
-project's skills and your global ones together, and a project skill wins a label both hold. A new
-skill is the project's; a phrasing or a counter-example for a global skill is kept as the project's
+`$HOME`), or by `--project`, never by a path, so every checkout is the same project. Inside one,
+System 1 sees the project's skills and your global ones together, and a project skill wins a label
+both hold. A new skill is the project's; a phrasing or a counter-example for a global skill is kept as the project's
 own lesson about it, so correcting `cargo test` to `npm test` in one project never reaches another.
 A scenario `jli eval --optimise` rewrites there for a global skill is kept as the project's own too,
 and `jli skills` tags it `scenario rewritten here`.
@@ -370,8 +370,25 @@ and `jli skills` tags it `scenario rewritten here`.
 yours; history, stats, and the event and plan ids that `jli fix` and `jli run` take are the
 project's. `jli generalize` checks each proposal with System 1 in
 the project, among the global skills and against your other projects, and writes it only when you
-say yes. Without a `.jlirc` nothing changes. See [ADR 17](docs/adr/0017-project-scope.md) and
+say yes. Without a `.jlirc` or `--project` nothing changes. See [ADR 17](docs/adr/0017-project-scope.md) and
 [ADR 22](docs/adr/0022-project-scenarios.md).
+
+`--project=<id>`, or `--project <id>`, runs any command as if from a directory of that project,
+wherever you are, so a project can be reached without a checkout of it:
+
+```sh
+jli skills --project=shop-api              # only that project's own skills, no global ones
+jli teach --project=shop-api "run the tests" -- cargo test   # kept for shop-api
+jli --project=shop-api -n start the app    # routed against shop-api's skills and your global ones
+jli skills --project                       # on its own: this directory's project, from its .jlirc
+```
+
+`--project` on its own outside a project is an error, and so is an id that breaks the `.jlirc` rule.
+In the space form the id is the next word unless it starts with `-`, so `jli --project deploy the
+app` means a project called `deploy`: put `--project` last, or write `--project=<id>`. A project jli
+has nothing for yet gets one line on stderr, `jli has nothing for project shop-ap yet.`, with the
+projects it does know, in case the id was mistyped; the command still runs. `jli project init` takes
+no `--project`. See [ADR 26](docs/adr/0026-project-flag.md).
 
 ## Layout
 
