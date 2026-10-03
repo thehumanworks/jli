@@ -9,6 +9,7 @@ pub mod args;
 pub mod cli;
 pub mod context;
 pub mod demo;
+pub mod eval;
 pub mod exec;
 pub mod learn;
 pub mod llm;

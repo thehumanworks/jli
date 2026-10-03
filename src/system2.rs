@@ -254,3 +254,115 @@ pub fn name_arguments(
     let names = data.arguments.into_iter().filter_map(|argument| Some((argument.name, argument.placeholder?))).collect();
     Ok((names, ms))
 }
+
+/// A counter-example the agent proposes for a competing skill: a phrasing it does not apply to.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CounterExample {
+    pub label: String,
+    pub phrase: String,
+}
+
+/// What the agent would change in one row so that System 1 routes its phrasings home with more confidence.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Rewrite {
+    pub scenario: String,
+    #[serde(default)]
+    pub drop_examples: Vec<String>,
+    #[serde(default)]
+    pub counter_examples: Vec<CounterExample>,
+    #[serde(default)]
+    pub explanation: String,
+}
+
+fn rewrite_schema() -> Value {
+    object(json!({
+        "scenario": { "type": "string", "description": "the new scenario: one sentence starting with 'the user wants'" },
+        "dropExamples": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "stored examples of this skill, copied exactly, that ask for something this command does not do; usually none",
+        },
+        "counterExamples": {
+            "type": "array",
+            "description": "at most three, only for a competing skill that takes this skill's phrasings",
+            "items": object(json!({
+                "label": { "type": "string", "description": "the competing skill's label" },
+                "phrase": { "type": "string", "description": "a short general phrasing of THIS skill's intent that the competing skill does not apply to" },
+            })),
+        },
+        "explanation": { "type": "string", "description": "one short sentence on what changed and why" },
+    }))
+}
+
+const REWRITE_INSTRUCTIONS: &str = r#"You improve one row of a decision matrix.
+
+A fast classifier reads a user's plain-language request and picks the row whose scenario, examples and
+doesNotApplyTo fit it best. Its pick is used only when its confidence reaches the threshold; below it a
+slower agent is asked. You are shown one skill, the phrasings of it that the classifier routes with low
+confidence or sends to another skill, and the competing skills it confuses them with.
+
+scenario
+- Rewrite it so the weak phrasings of this skill route to it with high confidence.
+- One sentence starting with "the user wants". Describe the outcome the command produces, in general terms.
+- Be exactly as broad as the command in "runs". Everything the scenario covers must be something the command
+  does, and nothing a competing skill does. Name what sets it apart from each competing skill: the form of
+  the output, the scope, the ordering, the target.
+- Do not copy the wording of one phrasing, and do not name specific files, numbers or messages.
+
+dropExamples
+- Only stored examples that ask for something this command does not do, so they were taught by mistake.
+  Copy them exactly. Usually return none.
+
+counterExamples
+- Only when a competing skill takes this skill's phrasings. Write a short general phrasing of this skill's
+  intent, for the competing skill's doesNotApplyTo. Never copy a phrasing you were shown word for word.
+
+previousAttemptProblem, when present, is what was measured when your last rewrite was tried. Fix that."#;
+
+/// A phrasing of the skill and where System 1 sent it, as the agent is shown it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WeakPhrasing {
+    pub phrase: String,
+    pub routed_to: Option<String>,
+    pub confidence: f64,
+}
+
+pub struct RewriteInput<'a> {
+    pub skill: &'a Skill,
+    pub threshold: f64,
+    pub weak: &'a [WeakPhrasing],
+    pub competitors: &'a [&'a Skill],
+    /// What was measured when the previous rewrite was tried.
+    pub feedback: Option<&'a str>,
+}
+
+/// Ask the agent to rewrite what System 1 is shown for one skill. Only the row's data changes;
+/// the questions System 1 is asked stay as they are (docs/adr/0003-system-1.md).
+pub fn rewrite_row(llm: &Llm, input: &RewriteInput) -> Result<(Rewrite, u64)> {
+    let row = |skill: &Skill| {
+        json!({
+            "label": skill.label,
+            "runs": skill.steps.join(" && "),
+            "scenario": skill.scenario,
+            "examples": skill.examples,
+            "doesNotApplyTo": skill.counter_examples,
+        })
+    };
+    llm.complete_json(&JsonRequest {
+        model: &AGENT_MODEL,
+        system: REWRITE_INSTRUCTIONS,
+        name: "matrix_rewrite",
+        schema: rewrite_schema(),
+        timeout: Duration::from_secs(30),
+        reasoning: Reasoning::Off,
+        input: json!({
+            "skill": row(input.skill),
+            "threshold": input.threshold,
+            "weakPhrasings": input.weak,
+            "competingSkills": input.competitors.iter().map(|skill| row(skill)).collect::<Vec<_>>(),
+            "previousAttemptProblem": input.feedback,
+        }),
+    })
+}

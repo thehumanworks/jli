@@ -26,6 +26,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [13](0013-learning-fixes.md) | One row per command, the shape of a request, this host's own fix, and failures that are not the command's fault |
 | [14](0014-shell-integration.md) | Steps such as `cd` are handed to the calling shell, and paths are expanded before they are quoted |
 | [15](0015-user-scope.md) | What is learned belongs to a user, a skill is shared by copy, and parallel writers lose nothing |
+| [16](0016-measuring-the-matrix.md) | The matrix is measured against the brain's own evidence, optimised only where the measurement improves, and every new row is checked against its closest skills |
 
 ## Known gaps, by record
 
@@ -49,3 +50,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 - [15](0015-user-scope.md): an older jli ignores `--user-id` and `JLI_USER_ID` (and routes the flag
   as words of a request), two writers teaching the same new command at once get two skills, a share
   cannot be undone except by `forget`, and the safe writes have not run against a live remote.
+- [16](0016-measuring-the-matrix.md): a stored example is ground truth, so one taught by mistake cannot
+  be dropped through the gate; the gate checks a skill's competitors, not the whole matrix; rewrites are
+  not repeatable; examples carry no context, and a replay in a directory that is gone runs in an
+  inferred one; a `jli fix` made after other requests counts as a request of its own.

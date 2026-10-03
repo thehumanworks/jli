@@ -17,6 +17,9 @@ use crate::types::{Mode, Origin, Path, Risk, Slot, SlotKind};
 use crate::ui::{Prompt, Ui};
 use crate::Models;
 
+/// Measuring the matrix, optimising it, and checking a row before it is written.
+mod eval_tests;
+
 /// A temp directory with a brain in it and an empty working directory.
 struct Scratch {
     root: PathBuf,
@@ -74,6 +77,23 @@ fn decision(choice: &str, confidence: f64, is_command: f64, risk: [f64; 3]) -> V
 }
 
 const SAFE: [f64; 3] = [0.9, 0.1, 0.0];
+
+/// System 1 that answers `before` until the matrix holds `label`, and routes there once it does:
+/// a proposed skill passes the check it gets before it is stored.
+fn once_known(label: &'static str, before: Value) -> impl Fn(&Value) -> Value + Send + Sync + 'static {
+    move |request| {
+        let criteria = &request["questions"]["skill"]["criteria"];
+        // A stored example of another skill still goes home, as the check expects of a neighbour.
+        let owner = criteria.as_object().and_then(|rows| {
+            rows.iter().find(|(_, row)| row["examples"].as_array().is_some_and(|e| e.contains(&request["state"]["request"])))
+        });
+        match owner {
+            Some((owner, _)) if owner != label => decision(owner, 0.9, 0.95, SAFE),
+            _ if criteria.get(label).is_some() => decision(label, 0.9, 0.95, SAFE),
+            _ => before.clone(),
+        }
+    }
+}
 
 /// Language model replies by schema name, in order. Any other call fails the test.
 struct Replies {
@@ -337,7 +357,7 @@ fn a_proposed_skill_keeps_only_the_aliases_that_hold_up() {
         "slotValues": [{ "name": "count", "value": "5" }],
         "risk": "safe", "explanation": "Lists.", "answer": null,
     });
-    let (models, _) = models(|_| decision(NONE, 0.7, 0.95, SAFE), vec![("proposal", proposal)]);
+    let (models, _) = models(once_known("list-directory", decision(NONE, 0.7, 0.95, SAFE)), vec![("proposal", proposal)]);
     let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
     let outcome = go(&scratch, &models, "first entries of dir=src", &mut Script::default(), &options);
     assert_eq!(outcome.commands, ["ls src | head -n 5"], "the user's own name reaches the slot the agent named properly");
@@ -430,7 +450,8 @@ fn yolo_runs_a_destructive_command_without_asking() {
         "scenario": "the user wants every .log file in the directory deleted", "slots": [], "slotValues": [],
         "risk": "destructive", "explanation": "Deletes the log files.", "answer": null,
     });
-    let (models, _) = models(|_| decision(NONE, 0.8, 0.95, [0.1, 0.3, 0.6]), vec![("proposal", proposal)]);
+    let (models, _) =
+        models(once_known("delete-log-files", decision(NONE, 0.8, 0.95, [0.1, 0.3, 0.6])), vec![("proposal", proposal)]);
     let mut script = Script::default();
     let options = RouteOptions { yolo: true, ..scratch.options(Mode::Semi) };
     let outcome = go(&scratch, &models, "delete all the log files", &mut script, &options);
@@ -451,7 +472,7 @@ fn an_agent_proposal_that_runs_becomes_a_skill() {
         "slotValues": [{ "name": "file", "value": "notes.txt" }],
         "risk": "safe", "explanation": "Counts lines.", "answer": null,
     });
-    let (models, replies) = models(|_| decision(NONE, 0.7, 0.95, SAFE), vec![("proposal", proposal)]);
+    let (models, replies) = models(once_known("count-lines", decision(NONE, 0.7, 0.95, SAFE)), vec![("proposal", proposal)]);
     let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
     let outcome = go(&scratch, &models, "how many lines are in notes.txt", &mut Script::default(), &options);
     assert_eq!(outcome.path, Path::System2);
@@ -822,7 +843,7 @@ fn exit_1_with_nothing_on_stderr_after_a_yes_still_teaches_a_new_skill() {
     // Captured (--json) and streamed: in both, a new proposal's stderr is seen.
     for capture in [true, false] {
         let scratch = Scratch::new("exit-one");
-        let (models, _) = models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", grep())]);
+        let (models, _) = models(once_known("find-todos", decision(NONE, 0.4, 0.95, SAFE)), vec![("proposal", grep())]);
         let options = RouteOptions { capture, ..scratch.options(Mode::Semi) };
         let outcome = go(&scratch, &models, "where are my todos", &mut Script::new(&[Some(true)], &[]), &options);
         assert_eq!(outcome.exit_code, Some(1), "grep found nothing");
@@ -831,7 +852,7 @@ fn exit_1_with_nothing_on_stderr_after_a_yes_still_teaches_a_new_skill() {
 
     // Under --yes nobody vouched for it, so only a clean exit counts.
     let scratch = Scratch::new("exit-one-yes");
-    let (models, _) = models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", grep())]);
+    let (models, _) = models(once_known("find-todos", decision(NONE, 0.4, 0.95, SAFE)), vec![("proposal", grep())]);
     let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
     let outcome = go(&scratch, &models, "where are my todos", &mut Script::default(), &options);
     assert_eq!(outcome.exit_code, Some(1));
@@ -840,7 +861,7 @@ fn exit_1_with_nothing_on_stderr_after_a_yes_still_teaches_a_new_skill() {
 
     // Exit 1 with an error on stderr is a failure, yes or not.
     let cat = new_proposal("show-notes", "cat notes.txt", json!([]), json!([]));
-    let (models, _) = self::models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", cat)]);
+    let (models, _) = self::models(once_known("show-notes", decision(NONE, 0.4, 0.95, SAFE)), vec![("proposal", cat)]);
     let options = scratch.options(Mode::Semi);
     let outcome = go(&scratch, &models, "show my notes", &mut Script::new(&[Some(true)], &[]), &options);
     assert_eq!(outcome.exit_code, Some(1));
@@ -855,7 +876,10 @@ fn auto_mode_learns_a_new_skill_that_failed_where_it_ran() {
     let suggestion = json!({
         "verdict": "environment", "explanation": "This directory is not a git repository.", "options": [],
     });
-    let (models, _) = models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", proposal), ("suggestion", suggestion)]);
+    let (models, _) = models(
+        once_known("git-branches", decision(NONE, 0.4, 0.95, SAFE)),
+        vec![("proposal", proposal), ("suggestion", suggestion)],
+    );
     let options = RouteOptions { yes: true, ..scratch.options(Mode::Auto) };
     let outcome = go(&scratch, &models, "list every branch", &mut Script::default(), &options);
     assert_eq!(outcome.exit_code, Some(128));
@@ -1179,7 +1203,7 @@ fn a_label_taken_while_the_agent_was_thinking_is_not_overwritten() {
     });
     // After this request read the matrix, another jli on the same brain stores its own count-lines.
     let (models, _) = models(
-        move |_| {
+        move |request| {
             let other = Brain::open(BrainConfig::file(&path)).unwrap();
             other
                 .add_skill_if_missing(&NewSkill {
@@ -1192,7 +1216,7 @@ fn a_label_taken_while_the_agent_was_thinking_is_not_overwritten() {
                     slots: vec![],
                 })
                 .unwrap();
-            decision(NONE, 0.7, 0.95, SAFE)
+            once_known("count-lines", decision(NONE, 0.7, 0.95, SAFE))(request)
         },
         vec![("proposal", proposal)],
     );
@@ -1229,8 +1253,9 @@ fn a_label_taken_while_the_translator_was_writing_is_not_overwritten() {
         Ok((200, json!({ "choices": [{ "message": { "content": row.to_string() } }] }).to_string()))
     });
     let system1 = System1::fake(|request| {
+        // The row is checked in memory under the label it was given, before the other writer's row is seen.
         if request["state"]["request"] == "show the last 3 commits" {
-            decision("git-recent-commits-x", 0.92, 0.9, SAFE)
+            decision("git-recent-commits", 0.92, 0.9, SAFE)
         } else {
             decision("git-status", 0.9, 0.9, SAFE)
         }
