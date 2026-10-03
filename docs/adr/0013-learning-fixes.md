@@ -1,7 +1,10 @@
 # 13. One row per command, the shape of a request, this host's own fix, and failures that are not the command's fault
 
 - Status: accepted; superseded in part by [ADR 19](0019-one-row-per-command.md), under which a taught
-  command that a literal skill runs makes that skill general instead of joining it as it is
+  command that a literal skill runs makes that skill general instead of joining it as it is; and by
+  [ADR 20](0020-write-back.md): the agent's proposal of a rejected skill's command is refused instead
+  of becoming a new row, and a file value is also hidden in the form the request wrote it (`~/notes`
+  for `/Users/x/notes`)
 - Date: 2026-10-03
 - Origin: the Rust version
 - Supersedes in part: [ADR 5](0005-routing-loop.md), on when a new proposal becomes a skill;

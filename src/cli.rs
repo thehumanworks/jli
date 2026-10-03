@@ -122,6 +122,12 @@ impl Flags {
     pub(crate) fn quiet() -> Flags {
         Flags { quiet: true, ..Flags::default() }
     }
+
+    /// `--quiet --yes`, for tests where a correction runs what the agent proposes.
+    #[cfg(test)]
+    pub(crate) fn quiet_yes() -> Flags {
+        Flags { yes: true, ..Flags::quiet() }
+    }
 }
 
 fn parse_threshold(text: &str) -> Result<f64> {

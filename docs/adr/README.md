@@ -30,6 +30,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [17](0017-project-scope.md) | What is learned inside a project stays with it, global skills are still used there, and a project skill becomes global only with approval |
 | [18](0018-agent-contract.md) | A contract for agent callers: pinned plans, run in order, and corrections without a terminal |
 | [19](0019-one-row-per-command.md) | A flag is never a slot value, a literal skill is made general in place, and a label taken by the same command is joined |
+| [20](0020-write-back.md) | An accepted route links its phrasing, a rejected command is refused, and a path is hidden as it was typed |
 | [23](0023-shell-fixes-and-number-words.md) | The install line follows the running shell, the function cleans up after ctrl-c, and a hyphenated number word is not a count |
 
 ## Known gaps, by record
@@ -45,9 +46,9 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   of live cases, not on the benchmark.
 - [12](0012-slot-aliases.md): one alias cannot be removed by hand, an unknown name is only noticed as
   `name=value`, and a skill with no slots still blocks on any argument.
-- [13](0013-learning-fixes.md): the duplicate check was verified offline only, a rejected skill can
-  come back as a second row, hiding is verbatim and case-sensitive, and hidden examples were
-  measured on the demo and six requests, not on a benchmark built for it.
+- [13](0013-learning-fixes.md): the duplicate check was verified offline only, hiding is verbatim
+  and case-sensitive, and hidden examples were measured on the demo and six requests, not on a
+  benchmark built for it.
 - [14](0014-shell-integration.md): handed-over steps that are not tried first count as a clean
   exit, the trial runs in bash whatever the calling shell is, fish has only been tested offline,
   jli's own session hands its steps over only when it ends, and `~user` is not expanded.
@@ -76,6 +77,11 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   writer that joins a row drops its own scenario and slot names; a value that begins with `-` is never
   read back out of a command; a seed that names a value is never made general; and the
   compare-and-swap has run only against local files.
+- [20](0020-write-back.md): a refused repeat ends the correction with no second chance for the agent;
+  a command that does the same thing in other words is not recognised as the rejected one; a
+  rejected `ls {directory}` also refuses `ls -la` until `match_template` stops a slot taking a flag; a
+  confident System 1 route leaves a counter-example of its skill in place; and a path's written form
+  is found with the environment as it is when the phrase is worked out, never for a bare `~` or `~user`.
 - [23](0023-shell-fixes-and-number-words.md): whether fish removes the hand-off file after a ctrl-c
   is not measured; with no shell among jli's ancestors the install line still follows `$SHELL`, as
   `jli shell-init` with no argument does; digits joined by `-` are still numbers; and the number-word
