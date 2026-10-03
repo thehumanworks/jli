@@ -297,3 +297,284 @@ fn a_proposed_skill_that_fails_twice_keeps_the_request_as_its_scenario() {
     assert_eq!(skill.scenario, "the user wants: how many lines are in notes.txt");
     assert_eq!(skill.examples, ["how many lines are in notes.txt"]);
 }
+
+// ── jli eval ─────────────────────────────────────────────────────────────────
+
+use crate::eval::{self, Bounds, EvalOptions};
+use crate::store::NewEvent;
+
+fn options(scratch: &Scratch, dry_run: bool, optimise: Option<Bounds>) -> EvalOptions {
+    EvalOptions { cwd: scratch.work.clone(), threshold: 0.5, only: None, limit: None, dry_run, optimise }
+}
+
+fn event(scratch: &Scratch, query: &str, label: Option<&str>, path: Path, accepted: bool, exit: Option<i64>) -> NewEvent {
+    NewEvent {
+        cwd: scratch.work.to_string_lossy().into_owned(),
+        query: query.into(),
+        path,
+        label: label.map(String::from),
+        confidence: Some(0.9),
+        command: Some("du -sh .".into()),
+        exit_code: exit,
+        accepted,
+        learned: None,
+        ms_system1: Some(250),
+        ms_system2: None,
+    }
+}
+
+/// Two skills with stored examples, routed by a table. A held-out example never reaches the matrix.
+fn measured_brain(scratch: &Scratch) {
+    add(
+        scratch,
+        "disk-usage",
+        "du -sh .",
+        "the user wants disk use",
+        &["how big is this folder", "space used here", "size of everything"],
+        3,
+    );
+    add(scratch, "count-lines", "wc -l notes.txt", "the user wants lines counted", &["lines in a file"], 0);
+}
+
+fn table(request: &Value) -> Value {
+    let phrase = request_of(request);
+    for (label, criterion) in request["questions"]["skill"]["criteria"].as_object().unwrap() {
+        let examples = criterion["examples"].as_array().cloned().unwrap_or_default();
+        let counters = criterion["doesNotApplyTo"].as_array().cloned().unwrap_or_default();
+        assert!(!examples.iter().chain(&counters).any(|example| example == &json!(phrase)), "{phrase} reached {label}");
+    }
+    match phrase.as_str() {
+        "how big is this folder" => decision("disk-usage", 0.9, 0.9, SAFE),
+        "space used here" => decision("disk-usage", 0.4, 0.9, SAFE),
+        "size of everything" => decision("list-files-with-sizes", 0.8, 0.9, SAFE),
+        "lines in a file" => decision("count-lines", 0.95, 0.9, SAFE),
+        "What changes are unstaged in this repository?" => decision("git-status", 0.99, 0.9, SAFE),
+        "how much room is used" => decision("disk-usage", 0.7, 0.9, SAFE),
+        other => panic!("System 1 was not expecting {other:?}"),
+    }
+}
+
+#[test]
+fn leave_one_out_counts_home_steals_and_escalations() {
+    let scratch = Scratch::new("loo");
+    measured_brain(&scratch);
+    let (models, _) = models(table, no_language_model());
+    let report = eval::run(&scratch.brain, &models, &options(&scratch, false, None), &quiet()).unwrap();
+
+    let loo = &report.leave_one_out;
+    assert_eq!((loo.probes, loo.home, loo.stolen, loo.escalated), (5, 3, 1, 1));
+    assert_eq!((loo.accuracy, loo.steal_rate, loo.escalation_rate), (0.6, 0.2, 0.2));
+    // Home confidence: 0.9, 0.4 (home, but below the threshold), 0 (stolen), 0.95, 0.99.
+    assert_eq!((loo.mean_confidence, loo.worst_confidence), (0.648, 0.0));
+    assert_eq!(report.estimated_calls, 5);
+    assert!((report.estimated_cost - 0.0003).abs() < 1e-9, "{}", report.estimated_cost);
+
+    let disk = report.skills.iter().find(|skill| skill.label == "disk-usage").unwrap();
+    assert_eq!((disk.summary.home, disk.summary.stolen, disk.summary.escalated), (1, 1, 1));
+    assert_eq!(disk.steals.len(), 1);
+    assert_eq!(disk.steals[0].phrase, "size of everything");
+    assert_eq!(disk.steals[0].routed_to.as_deref(), Some("list-files-with-sizes"));
+    let lowest: Vec<&str> = disk.lowest.iter().map(|line| line.phrase.as_str()).collect();
+    assert_eq!(lowest, ["size of everything", "space used here", "how big is this folder"], "weakest first, home ones too");
+    assert_eq!(report.skills[0].label, "disk-usage", "the biggest expected gain comes first");
+
+    let stored = eval::trend(&scratch.brain).unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(Some(format!("eval:{}", stored[0].ts)), report.stored);
+    assert_eq!(stored[0].overall, report.overall);
+}
+
+#[test]
+fn accepted_requests_are_replayed_and_the_rest_are_not() {
+    let scratch = Scratch::new("replay");
+    measured_brain(&scratch);
+    let accepted = event(&scratch, "how much room is used", Some("disk-usage"), Path::System2, true, Some(0));
+    scratch.brain.log_event(&accepted).unwrap();
+    scratch.brain.log_event(&accepted).unwrap();
+    let gone_dir = NewEvent { cwd: "/nowhere/at/all/proj".into(), ..accepted.clone() };
+    scratch.brain.log_event(&gone_dir).unwrap();
+    let declined = NewEvent { learned: Some("corrected".into()), accepted: false, ..accepted.clone() };
+    scratch.brain.log_event(&NewEvent { query: "something else".into(), ..declined }).unwrap();
+    let failed = event(&scratch, "something failing", Some("disk-usage"), Path::System1, true, Some(1));
+    scratch.brain.log_event(&failed).unwrap();
+    let forgotten = event(&scratch, "an old one", Some("no-longer-here"), Path::System1, true, Some(0));
+    scratch.brain.log_event(&forgotten).unwrap();
+
+    let (models, _) = models(table, no_language_model());
+    let report = eval::run(&scratch.brain, &models, &options(&scratch, true, None), &quiet()).unwrap();
+    assert_eq!((report.replay.probes, report.replay.home), (1, 1), "one distinct wording, accepted three times");
+    assert_eq!(report.forgotten, 1);
+    assert_eq!(report.rebuilt_contexts, 1, "the newest of the three ran in a directory that is gone");
+
+    let (context, rebuilt) = eval::context_at("/nowhere/at/all/proj", Some("git status"), Some(0));
+    assert!(rebuilt && context.inside_git_repository && context.directory == "proj");
+    let (context, _) = eval::context_at("/nowhere/at/all/proj", Some("du -sh ."), Some(0));
+    assert!(!context.inside_git_repository);
+}
+
+#[test]
+fn a_dry_run_measures_and_writes_nothing() {
+    let scratch = Scratch::new("dry-eval");
+    measured_brain(&scratch);
+    let (models, _) = models(table, no_language_model());
+    let before = scratch.brain.skills().unwrap();
+    let report = eval::run(&scratch.brain, &models, &options(&scratch, true, None), &quiet()).unwrap();
+    assert_eq!(report.overall.probes, 5);
+    assert_eq!(report.stored, None);
+    assert!(scratch.brain.meta_with_prefix("eval:").unwrap().is_empty());
+    assert_eq!(scratch.brain.skills().unwrap(), before);
+    assert!(scratch.brain.events(10).unwrap().is_empty(), "measuring logs no requests");
+}
+
+#[test]
+fn a_limit_takes_phrasings_from_every_skill_in_turn() {
+    let scratch = Scratch::new("limit");
+    measured_brain(&scratch);
+    let (models, _) = models(table, no_language_model());
+    let limited = EvalOptions { limit: Some(3), ..options(&scratch, false, None) };
+    let report = eval::run(&scratch.brain, &models, &limited, &quiet()).unwrap();
+    let owners: Vec<&str> = report.skills.iter().map(|skill| skill.label.as_str()).collect();
+    assert_eq!(report.overall.probes, 3);
+    assert_eq!(owners.len(), 3, "one each from three skills, not three from the first: {owners:?}");
+    assert!(eval::trend(&scratch.brain).unwrap()[0].limited);
+
+    let one = EvalOptions { only: Some("count-lines".into()), ..options(&scratch, true, None) };
+    let report = eval::run(&scratch.brain, &models, &one, &quiet()).unwrap();
+    assert_eq!((report.overall.probes, report.skills.len()), (1, 1));
+}
+
+// ── jli eval --optimise ──────────────────────────────────────────────────────
+
+/// "space used here" is weak until disk-usage's scenario talks about total size. With `steals`, that
+/// rewrite also takes count-lines' phrasing, which System 1 ranks close behind disk-usage.
+fn optimisable(steals: bool) -> impl Fn(&Value) -> Value + Send + Sync + 'static {
+    move |request| {
+        let sharper = scenario_of(request, "disk-usage").contains("total size");
+        match request_of(request).as_str() {
+            "space used here" if sharper => ranked("disk-usage", 0.92, &[("count-lines", 0.06)]),
+            "space used here" => ranked("disk-usage", 0.4, &[("count-lines", 0.3)]),
+            "lines in a file" if sharper && steals => decision("disk-usage", 0.9, 0.9, SAFE),
+            "lines in a file" => decision("count-lines", 0.95, 0.9, SAFE),
+            "how big is this folder" => decision("disk-usage", 0.9, 0.9, SAFE),
+            "What changes are unstaged in this repository?" => decision("git-status", 0.99, 0.9, SAFE),
+            other => panic!("System 1 was not expecting {other:?}"),
+        }
+    }
+}
+
+fn optimisable_brain(scratch: &Scratch) {
+    add(scratch, "disk-usage", "du -sh .", "the user wants disk use", &["how big is this folder", "space used here"], 5);
+    add(scratch, "count-lines", "wc -l notes.txt", "the user wants lines counted", &["lines in a file"], 0);
+}
+
+fn sharper() -> Value {
+    json!({
+        "scenario": "the user wants the total size of the current directory",
+        "dropExamples": [], "counterExamples": [{ "label": "count-lines", "phrase": "how much disk this takes" }],
+        "explanation": "Names the outcome.",
+    })
+}
+
+fn bounds() -> Option<Bounds> {
+    Some(Bounds { max_skills: 1, max_calls: 100 })
+}
+
+#[test]
+fn a_rewrite_is_kept_when_the_measurement_improves_and_can_be_undone() {
+    let scratch = Scratch::new("optimise-kept");
+    optimisable_brain(&scratch);
+    let (models, replies) = models(optimisable(false), vec![("matrix_rewrite", sharper())]);
+    let report = eval::run(&scratch.brain, &models, &options(&scratch, false, bounds()), &quiet()).unwrap();
+    let optimisation = report.optimisation.unwrap();
+    assert_eq!(optimisation.ranking[0].label, "disk-usage");
+    assert_eq!(optimisation.changes.len(), 1);
+    let change = &optimisation.changes[0];
+    assert!(change.kept, "{:?}", change.problem);
+    assert!(change.score_after > change.score_before);
+    assert_eq!((change.home_before, change.home_after, change.probes), (2, 3, 3));
+    assert_eq!(optimisation.system2_calls, 1);
+
+    let skill = scratch.brain.skill("disk-usage").unwrap().unwrap();
+    assert_eq!(skill.scenario, "the user wants the total size of the current directory");
+    assert_eq!(skill.examples, ["how big is this folder", "space used here"], "examples are kept");
+    assert_eq!(scratch.brain.skill("count-lines").unwrap().unwrap().counter_examples, ["how much disk this takes"]);
+    assert_eq!(scratch.brain.meta_with_prefix("optimised:").unwrap().len(), 1, "the change is on record");
+    {
+        let seen = replies.seen.lock().unwrap();
+        let input: Value = serde_json::from_str(seen[0]["messages"][1]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(input["skill"]["label"], "disk-usage");
+        assert_eq!(input["weakPhrasings"][0]["phrase"], "space used here");
+        assert_eq!(input["competingSkills"][0]["label"], "count-lines");
+    }
+
+    let undone = eval::undo(&scratch.brain, None, false).unwrap();
+    assert_eq!(undone.label, "disk-usage");
+    assert_eq!(scratch.brain.skill("disk-usage").unwrap().unwrap().scenario, "the user wants disk use");
+    assert!(scratch.brain.skill("count-lines").unwrap().unwrap().counter_examples.is_empty());
+    assert!(eval::undo(&scratch.brain, None, false).is_err(), "nothing left to undo");
+}
+
+#[test]
+fn a_rewrite_that_takes_another_skills_phrasing_is_discarded() {
+    let scratch = Scratch::new("optimise-regress");
+    optimisable_brain(&scratch);
+    let (models, replies) = models(optimisable(true), vec![("matrix_rewrite", sharper()), ("matrix_rewrite", sharper())]);
+    let report = eval::run(&scratch.brain, &models, &options(&scratch, false, bounds()), &quiet()).unwrap();
+    let changes = report.optimisation.unwrap().changes;
+    assert_eq!(changes.len(), 2, "one retry with the measured problem");
+    assert!(changes.iter().all(|change| !change.kept));
+    let problem = "it made \"lines in a file\", which belongs to count-lines, route to disk-usage instead";
+    assert_eq!(changes[0].problem.as_deref(), Some(problem));
+    let seen = replies.seen.lock().unwrap();
+    let retry: Value = serde_json::from_str(seen[1]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(retry["previousAttemptProblem"], problem);
+    assert_eq!(scratch.brain.skill("disk-usage").unwrap().unwrap().scenario, "the user wants disk use");
+    assert!(scratch.brain.meta_with_prefix("optimised:").unwrap().is_empty());
+}
+
+#[test]
+fn a_dry_run_optimisation_shows_the_change_and_applies_none() {
+    let scratch = Scratch::new("optimise-dry");
+    optimisable_brain(&scratch);
+    let (models, _) = models(optimisable(false), vec![("matrix_rewrite", sharper())]);
+    let before = scratch.brain.skills().unwrap();
+    let report = eval::run(&scratch.brain, &models, &options(&scratch, true, bounds()), &quiet()).unwrap();
+    let optimisation = report.optimisation.unwrap();
+    assert!(optimisation.changes[0].kept && !optimisation.applied);
+    assert_eq!(scratch.brain.skills().unwrap(), before);
+    assert!(scratch.brain.meta_with_prefix("").unwrap().iter().all(|(key, _)| key == "seeded"), "no meta at all");
+}
+
+#[test]
+fn the_call_budget_stops_the_loop_before_it_spends() {
+    let scratch = Scratch::new("optimise-budget");
+    optimisable_brain(&scratch);
+    let (models, _) = models(optimisable(false), no_language_model());
+    let tight = Some(Bounds { max_skills: 3, max_calls: 2 });
+    let report = eval::run(&scratch.brain, &models, &options(&scratch, true, tight), &quiet()).unwrap();
+    let optimisation = report.optimisation.unwrap();
+    assert!(optimisation.changes.is_empty());
+    assert!(optimisation.stopped.unwrap().contains("--max-calls=2"));
+}
+
+// ── jli stats ────────────────────────────────────────────────────────────────
+
+#[test]
+fn correctness_keeps_declined_and_corrected_attempts_in_the_count() {
+    let scratch = Scratch::new("correctness");
+    let log = |event: NewEvent| scratch.brain.log_event(&event).unwrap();
+    log(NewEvent { ms_system2: Some(900), ..event(&scratch, "a", Some("x"), Path::System1, true, Some(0)) });
+    log(NewEvent { learned: Some("corrected".into()), ..event(&scratch, "b", Some("x"), Path::System1, false, None) });
+    log(event(&scratch, "b", Some("y"), Path::Taught, true, Some(0)));
+    log(event(&scratch, "c", Some("y"), Path::Taught, true, Some(0)));
+    log(event(&scratch, "d", Some("x"), Path::System1, true, Some(1)));
+    log(event(&scratch, "e", Some("x"), Path::System1, false, None));
+    log(event(&scratch, "f", None, Path::None, false, None));
+    let mut events = scratch.brain.events(10).unwrap();
+    events.reverse();
+    let tally = eval::correctness(&events);
+    assert_eq!((tally.requests, tally.first_try, tally.turned_down, tally.failed, tally.blocked), (5, 1, 2, 1, 1));
+    assert_eq!((tally.system1_routes, tally.system1_with_model), (4, 1));
+    let evidence = eval::evidence(&events);
+    assert_eq!((evidence["x"].judged, evidence["x"].correct), (2, 1));
+}

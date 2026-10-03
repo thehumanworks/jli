@@ -473,6 +473,24 @@ impl Brain {
         Ok(())
     }
 
+    /// Write a `meta` entry, replacing the value under the same key.
+    pub fn put_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            vec![key.into(), value.into()],
+        )?;
+        Ok(())
+    }
+
+    /// Every `meta` entry whose key starts with `prefix`, in key order.
+    pub fn meta_with_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        self.query(
+            "SELECT key, value FROM meta WHERE substr(key, 1, length(?)) = ? ORDER BY key",
+            vec![prefix.into(), prefix.into()],
+            |row| (text(row.get_value(0).unwrap_or(Value::Null)), text(row.get_value(1).unwrap_or(Value::Null))),
+        )
+    }
+
     pub fn forget(&self, label: &str) -> Result<bool> {
         Ok(self.execute("DELETE FROM skills WHERE label = ?", vec![label.into()])? > 0)
     }
@@ -489,6 +507,10 @@ impl Brain {
     /// Remember that `phrase` does NOT mean `label`.
     pub fn add_counter_example(&self, label: &str, phrase: &str) -> Result<bool> {
         self.edit_list(label, ListColumn::CounterExamples, |list| with(list, phrase))
+    }
+
+    pub fn remove_counter_example(&self, label: &str, phrase: &str) -> Result<bool> {
+        self.edit_list(label, ListColumn::CounterExamples, |list| without(list, phrase))
     }
 
     /// Remember that `alias` is another name for a slot of `label`. Returns false if nothing changed.
