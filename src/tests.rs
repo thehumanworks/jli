@@ -1609,6 +1609,21 @@ fn quiet_flags() -> Flags {
     Flags::quiet()
 }
 
+#[test]
+fn words_that_ask_for_help_are_never_routed() {
+    let scratch = Scratch::new("help");
+    // System 1 and every language model panic: a request routed here would fail the test.
+    let (silent, _) = models(|_| panic!("help asks no model"), no_language_model());
+    let mut app = app(&scratch, "default", silent);
+    for asked in
+        [&["skills", "--help"][..], &["slot", "-h"][..], &["deploy", "the", "app", "--help"][..], &["help", "eval"][..]]
+    {
+        let words: Vec<String> = asked.iter().map(|word| word.to_string()).collect();
+        assert_eq!(app.dispatch(&quiet_flags(), &words, &[]).unwrap(), 0, "{asked:?}");
+    }
+    assert!(scratch.brain.events(10).unwrap().is_empty(), "nothing was routed or logged");
+}
+
 fn lists(scratch: &Scratch, label: &str) -> (Vec<String>, Vec<String>) {
     let skill = scratch.brain.skill(label).unwrap().unwrap();
     (skill.examples, skill.counter_examples)

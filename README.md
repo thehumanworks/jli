@@ -145,14 +145,17 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | Command | What it does |
 | --- | --- |
 | `jli <request>` | route, run, learn |
+| `jli <command> --help` | that command's usage and the options that matter to it, with no brain opened and no model asked (also `-h`, `jli help <command>`); `jli --help` lists everything. Only before `--`: after it, `--help` is the command's |
 | `jli -n <request>` | dry run: show the command, execute and learn nothing, and keep it as a plan for `jli run` |
 | `jli -y <request>` | run without asking; never approves destructive commands (also `--yes`, `JLI_YES=1`) |
 | `jli -Y <request>` | run without asking, destructive commands included (also `--yolo`, `JLI_YOLO=1`) |
+| `jli -q <request>` | hide the decision trace; a question still shows what it asks about (also `--quiet`, `JLI_QUIET=1`) |
 | `jli config confidence <0..1>` | set the confidence threshold |
 | `jli config mode <manual\|semi\|auto>` | set the learning mode |
 | `jli --json <request>` | machine-readable outcome with captured output, for agents; an error is one JSON object too |
 | `jli run <planId> [<planId> …] [name=value …]` | run stored plans exactly as shown, in order, with no model call; stop at the first that fails |
 | `jli skills` | every skill, with learned phrasings and counter-examples |
+| `jli skills --project` | only the project's own skills, not the global ones |
 | `jli stats` | routing mix, latency, the learning curve, how often routes were right first time, and the `jli eval` trend |
 | `jli eval [<label>] [--limit N]` | route every stored example with itself held out, and replay accepted requests; priced before it spends |
 | `jli eval --optimise` | the agent rewrites the weakest rows; a rewrite is kept only if the measurement improves, and inside a project only for that project |
@@ -172,6 +175,7 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | `jli slot <label> <slot> --choice=release --choice=debug` | the only values a slot takes, each put in the command as its own name; `--choice=release=--release` puts other text, `--choice=debug=` nothing, and `--no-choices` takes them away |
 | `jli project` | the project this directory is in, from the nearest `.jlirc`, and how many skills are its own |
 | `jli project init [<id>]` | make this directory a project: what jli learns here stays with it |
+| `jli --project=<id> …` | any command, in project `<id>`, as if run in one of its directories (also `--project <id>`); a bare `--project` is the project of this directory's `.jlirc` |
 | `jli generalize [<label>]` | the agent proposes how to make project skills global; each is written only once you approve (`--all-projects`, `--approve-all`, `-n`) |
 | `jli shell-init [zsh\|bash\|fish]` | print the shell function that lets `cd`, `export` and `source` change your shell |
 | `jli --user-id=<id> …` | any command, as another user with their own skills, history and settings (also `JLI_USER_ID`) |
@@ -406,6 +410,7 @@ say yes. Without a `.jlirc` nothing changes. See [ADR 17](docs/adr/0017-project-
 | `src/seed.rs` | the original hard-coded matrix, now only the seed for an empty brain |
 | `src/exec.rs` | runs the steps with `bash -c`, watching stderr in auto mode and for a new proposal, tries builtins before they are handed over, and reads the process table to find the shell jli was started from |
 | `src/cli.rs` | argument parsing, subcommands, the interactive session, and errors as JSON |
+| `src/help.rs` | the help, written once as a table of commands, options and variables, and which help a command line asks for |
 | `src/ui.rs` | the trace on stderr, and the one owner of stdin |
 | `src/demo.rs` | the two-pass learning demo |
 | `src/tests.rs` | the router and learning loop, offline, against fake models and a scripted prompt |

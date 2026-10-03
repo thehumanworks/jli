@@ -13,6 +13,7 @@ pub mod eval;
 pub mod exec;
 pub mod generalize;
 pub mod hand;
+pub mod help;
 pub mod learn;
 pub mod llm;
 pub mod plan;
