@@ -122,8 +122,27 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | `jli teach "<phrase>" -- <command>` | link a phrase to a command; repeat to add more phrasings |
 | `jli fix` | the last command run here was wrong: unlearn it and ask the agent |
 | `jli forget <label>` | delete a skill |
+| `jli shell-init [zsh\|bash\|fish]` | print the shell function that lets `cd`, `export` and `source` change your shell |
 
 The decision trace goes to stderr and the command's output to stdout, so `jli` composes in pipes.
+
+## Commands that change your shell
+
+jli runs commands in a shell of its own, so on its own a `cd` or an `export` would change nothing
+you can see. Install the shell function once:
+
+```sh
+eval "$(jli shell-init zsh)"        # in ~/.zshrc; bash: the same with bash, in ~/.bashrc
+jli shell-init fish | source        # in ~/.config/fish/config.fish
+```
+
+Then a step such as `cd`, `pushd`, `export`, `unset`, `source` or `alias`, and every step after it,
+is handed to your shell, which runs it once jli exits: `jli go to src` leaves you in `src`. jli
+passes it through a temp file, not stdout, so output still goes down a pipe, and the function
+returns jli's exit code. A `cd` to a directory that does not exist fails before it is handed over.
+Without the function such a step is not run and nothing is learned from it: jli says how to install
+the function and exits 3, and `--json` lists the steps in `callerShell` for an agent to run itself.
+See [ADR 14](docs/adr/0014-shell-integration.md).
 
 ## Slots
 
@@ -152,6 +171,13 @@ slot as `{name}` in the command, with its other names below it. See
 Anything not stated is filled by the cheapest method that works: a number in the request, a System 1
 `choice` among the real files or branches, the agent, and last the slot's default. See
 [ADR 11](docs/adr/0011-stated-arguments.md).
+
+A file value has a leading `~` and any `$NAME` or `${NAME}` expanded by jli before it is quoted, so
+`jli list dir=~/notes` runs `ls /Users/you/notes`, and the trace says
+`(from request, ~/notes expanded)`. Nothing is ever run to expand a value, an unset variable is left
+as written, and a text value such as a commit message is never expanded. A path named anywhere in
+the request, not only in the working directory, can be picked for a file slot. See
+[ADR 14](docs/adr/0014-shell-integration.md).
 
 What is learned is the shape of a request, not the instance: every value the command ran with is
 hidden in the stored phrasing wherever it appears as a whole word, so `how many lines are in
@@ -186,9 +212,10 @@ The cloud modes are wired but have not been run against a live Turso database ye
 | `src/router.rs` | the loop: decide, escalate, confirm, run, write back |
 | `src/store.rs` | the brain: skills and events in libSQL, behind a runtime that never leaves the module |
 | `src/args.rs` | reads the arguments a request states: `name=value`, labels and quoted text |
-| `src/slots.rs` | fills and shell-quotes `{slot}` values |
+| `src/slots.rs` | fills, expands and shell-quotes `{slot}` values |
+| `src/shell.rs` | the shell function, and which steps it must run in your shell |
 | `src/seed.rs` | the original hard-coded matrix, now only the seed for an empty brain |
-| `src/exec.rs` | runs the steps with `bash -c`, watching stderr in auto mode and for a new proposal |
+| `src/exec.rs` | runs the steps with `bash -c`, watching stderr in auto mode and for a new proposal, and tries builtins before they are handed over |
 | `src/cli.rs` | argument parsing, subcommands and the interactive session |
 | `src/ui.rs` | the trace on stderr, and the one owner of stdin |
 | `src/demo.rs` | the two-pass learning demo |

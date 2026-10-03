@@ -1,7 +1,9 @@
 # 5. One routing loop, one confirmation rule, and a CLI that composes in pipes
 
 - Status: accepted; superseded in part by [ADR 13](0013-learning-fixes.md), which also learns a
-  new proposal that failed for a reason that is not the command's fault
+  new proposal that failed for a reason that is not the command's fault; and by
+  [ADR 14](0014-shell-integration.md), which hands steps such as `cd` to the calling shell and
+  appends `callerShell` and `handedOff` to the `--json` outcome
 - Date: 2026-10-02
 - Origin: the TypeScript prototype; kept unchanged by the Rust port
 

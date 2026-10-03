@@ -24,6 +24,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [11](0011-stated-arguments.md) | Arguments stated in the request are read by a parser, before and instead of any model |
 | [12](0012-slot-aliases.md) | A slot answers to several names, and a new name is worked out once and kept |
 | [13](0013-learning-fixes.md) | One row per command, the shape of a request, this host's own fix, and failures that are not the command's fault |
+| [14](0014-shell-integration.md) | Steps such as `cd` are handed to the calling shell, and paths are expanded before they are quoted |
 
 ## Known gaps, by record
 
@@ -41,3 +42,6 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 - [13](0013-learning-fixes.md): the duplicate check was verified offline only, a rejected skill can
   come back as a second row, hiding is verbatim and case-sensitive, and hidden examples were
   measured on the demo and six requests, not on a benchmark built for it.
+- [14](0014-shell-integration.md): handed-over steps that are not tried first count as a clean
+  exit, the trial runs in bash whatever the calling shell is, fish has only been tested offline,
+  jli's own session hands its steps over only when it ends, and `~user` is not expanded.
