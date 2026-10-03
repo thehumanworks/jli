@@ -195,6 +195,12 @@ impl Terminal {
     pub fn interactive(&self) -> bool {
         self.interactive
     }
+
+    /// Nobody at the keyboard, whatever stdin the tests were started with.
+    #[cfg(test)]
+    pub fn not_a_terminal() -> Terminal {
+        Terminal { stdin: io::stdin(), interactive: false }
+    }
 }
 
 impl Default for Terminal {

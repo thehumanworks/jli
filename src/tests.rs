@@ -1590,7 +1590,7 @@ fn app(scratch: &Scratch, user: &str, models: Models) -> App {
     App {
         brain: Brain::open_as(BrainConfig::file(&scratch.root.join("brain.db")), user).unwrap(),
         models,
-        terminal: crate::ui::Terminal::new(),
+        terminal: crate::ui::Terminal::not_a_terminal(),
     }
 }
 

@@ -640,6 +640,14 @@ impl App {
         let command = steps.join(" && ");
         if flags.dry_run {
             eprintln!("{}\n", c::dim(format!("  Dry run: would learn that \"{}\" means {command}.", last.query)));
+            if flags.json {
+                let mut outcome = Outcome::new(&last.query);
+                outcome.path = Path::Taught;
+                outcome.commands = steps.to_vec();
+                outcome.blocked = Some(DRY_RUN.into());
+                outcome.blocked_code = Some(DRY_RUN_CODE.into());
+                say(serde_json::to_string_pretty(&outcome)?);
+            }
             return Ok(0);
         }
         let ui = Ui::new(!flags.quiet && !flags.json);
@@ -908,6 +916,11 @@ impl App {
         }
         if first == "run" && rest.is_empty() {
             if let Some(given) = run_shape(others) {
+                if flags.dry_run {
+                    // -n promises nothing runs; a plan's preview is the outcome it was made with.
+                    let why = "jli run runs plans, so -n cannot apply: the outcome that made a plan is its preview";
+                    return Ok(refuse(flags, USAGE, why));
+                }
                 return self.run_plans(&given.ids, &given.values, flags);
             }
         }
@@ -1105,6 +1118,20 @@ mod tests {
         assert_eq!(fix(&["7", "--expected", "x"], &["ls"]), None, "one correction at a time");
         assert_eq!(fix(&["the", "parser"], &[]), None, "jli fix the parser is a request");
         assert_eq!(fix(&["7", "please"], &[]), None);
+    }
+
+    #[test]
+    fn a_dry_run_of_jli_run_is_refused_before_any_plan_is_read() {
+        let dir = std::env::temp_dir().join(format!("jli-cli-dry-run-{}-{}", std::process::id(), crate::store::now_iso()));
+        let mut app = App {
+            brain: Brain::open(BrainConfig::file(&dir.join("brain.db"))).unwrap(),
+            models: Models::default(),
+            terminal: Terminal::not_a_terminal(),
+        };
+        let flags = Flags { dry_run: true, quiet: true, ..Flags::default() };
+        assert_eq!(app.dispatch(&flags, &args(&["run", "1"]), &[]).unwrap(), 1, "a usage refusal, not plan_not_found's 3");
+        drop(app);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

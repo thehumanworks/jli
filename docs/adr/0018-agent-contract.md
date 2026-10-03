@@ -3,7 +3,8 @@
 - Status: accepted
 - Date: 2026-10-03
 - Origin: the Rust version
-- Supersedes in part: [ADR 5](0005-routing-loop.md), on what a dry run writes (a plan row, nothing
+- Supersedes in part: [ADR 8](0008-corrections.md), on corrections, which no longer need a terminal;
+  [ADR 5](0005-routing-loop.md), on what a dry run writes (a plan row, nothing
   else), on the CLI contract (`jli run`, `jli fix <eventId>`), on the `--json` outcome (fields
   appended) and on what `--json` prints for an error
 
@@ -124,6 +125,9 @@ each it checks, in this order, refusing with the code given:
   the route's cost once, where it ran.
 - **The trace** names the plan, shows the command, and says what was learned; with `--json` it is
   off, as for any request.
+- **`-n run` is refused** (`error: usage`, exit 1) before any plan is read. `-n` promises that nothing
+  runs, and an agent that habitually adds it to preview must not run commands; the preview of a plan
+  is the outcome that made it.
 
 ### 2. Every outcome says what happened as data
 
@@ -197,6 +201,8 @@ to be logged: the run stopped there).
   sees it run; an agent correcting an event may be anywhere, later, and running it would be a second,
   unreviewed effect. So it returns a plan of the corrected command (`blockedCode: dry_run`, exit 0),
   which `jli run <planId>` runs with no model call. `--run` runs it at once, on the terms of `jli run`.
+  Either way `--json` prints one outcome object, not `jli run`'s array, with what was learned first in
+  `learned`. With `-n` nothing is learned and the outcome only shows the command.
 - **`jli fix <eventId> --expected "<words>"`** unlearns the event and asks the agent again, with the
   skill left out and the words as the clarification (the path a "?" or an answer takes in auto mode).
   It returns a plan of the agent's answer; `--run` runs it on the terms of `jli run`.
@@ -242,6 +248,7 @@ stdin from `/dev/null`:
 | `--json -y what files are here` | System 1, `list-files`, `ls`, at 1.00, `eventId: 6` |
 | `--json fix 6 -- ls -la` | exit 0; `learned: "what files are here" means list-files-details` (a new skill, written by the translator in semi mode), `planId: 7`, `blockedCode: dry_run`; `corrections` holds `(6, terminal 0, command, ls -la)` |
 | `--json -n what files are here` | System 1, `list-files-details`, `ls -la`, at 0.84, `list-files` at 0.14 |
+| `--json -n run 7`, then `--json run 7` | `{"error": "usage", …}`, exit 1, nothing run; then `ls -la` ran, path `taught`, exit 0 |
 | `JLI_MODE=wild --json where am I`; `--json --mode=wild …`; `--json fix 99999`; `--json where am I` with no System 1 key | `{"error": "configuration", …}`, `usage`, `event_not_found`, `configuration`; exit 1 each |
 
 The acceptance checks 1 to 8 of [ADR 9](0009-port-to-rust.md) were re-run on a fresh scratch brain and
