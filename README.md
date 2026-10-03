@@ -139,7 +139,8 @@ jli shell-init fish | source        # in ~/.config/fish/config.fish
 Then a step such as `cd`, `pushd`, `export`, `unset`, `source` or `alias`, and every step after it,
 is handed to your shell, which runs it once jli exits: `jli go to src` leaves you in `src`. jli
 passes it through a temp file, not stdout, so output still goes down a pipe, and the function
-returns jli's exit code. A `cd` to a directory that does not exist fails before it is handed over.
+returns jli's exit code, or the status of what your shell ran. A plain `cd` to a directory that does
+not exist fails in jli, with the shell's own message, before anything is handed over.
 Without the function such a step is not run and nothing is learned from it: jli says how to install
 the function and exits 3, and `--json` lists the steps in `callerShell` for an agent to run itself.
 See [ADR 14](docs/adr/0014-shell-integration.md).

@@ -90,7 +90,10 @@ similar name in the working directory could be picked instead.
   dropped. If that fails, as `cd /nowhere` does, nothing is handed over and the run is a failure
   with the shell's own message and exit code, which learning and auto mode's diagnosis treat like
   any failure. Anything else (`source`, `setopt`, a later `make`) is not tried: it would run twice,
-  or mean something else in bash 3.2 than in the user's zsh.
+  or mean something else in bash 3.2 than in the user's zsh. Nor is a step with `$( … )`, `<( … )`
+  or a backtick in it, whose command would run twice, even when it is only inside a quoted value;
+  nor `cd -`, `popd`, a bare `pushd` or any `cd` or `pushd` with an option, which read `OLDPWD` and
+  the directory stack that only the calling shell has. Those are handed over untried.
 - **The text handed over is exactly the rendered steps.** One step is written as it is. Several
   are each kept verbatim in a group, joined so each runs only if the one before succeeded:
   `{ cd x\n} && { make\n}` for bash and zsh, `begin … end` joined by `and` for fish. A `;`, `||` or
@@ -108,7 +111,8 @@ similar name in the working directory could be picked instead.
   trace says
   `Not run: cd sub has to run in your own shell, and jli can only run commands in a shell of its
   own, where this would change nothing.`, gives the install line for the shell in `$SHELL` (all
-  three when it is unknown), and says nothing was learned. `blocked` is
+  three when it is unknown), and says nothing was learned. Like every other reason for not
+  running, it is part of the trace, so `-q` hides it and leaves the exit code. `blocked` is
   `"must run in the calling shell"` and the exit code is 3, as for anything else that did not run.
 - **Nothing is learned**: no skill, no phrasing, no alias, no use. A command typed after a "no"
   is refused the same way, before it is learned. The counter-example from the "no" is kept: that
@@ -191,6 +195,7 @@ from a `.zshrc` and a `.bashrc` that `eval` it, in `zsh -i` (5.9) and `bash -i` 
 | `command jli --json -y go to the sub directory` | `blocked: "must run in the calling shell"`, `callerShell: ["cd sub"]`, `handedOff: false` |
 | `jli --json -y go to the sub directory > out.json` | `ran: true, exitCode: 0, handedOff: true`; the shell is in `sub` |
 | `jli -y make a scratch dir and enter it` (`mkdir -p tmpx`, `cd tmpx`, `touch inside`) | the shell is in `tmpx`, and `inside` is there |
+| `jli -y go to the source and build it` (`cd nowhere-here`, `make`), zsh only | handed over untried; zsh's own `no such file or directory: nowhere-here`, exit 1 from the function, the shell stays; jli counted it as a clean exit |
 | `jli -n go to the sub directory` | `cd sub would run in your shell, once jli has exited.`; exit 0 |
 | `jli -n --json commit "message=it's \$5 and \"quoted\""` | `git commit -m 'it'\''s $5 and "quoted"'`: arguments pass through the function untouched |
 | `jli -y --agent "list the files in dir=~/notes"` | `ls /…/home/notes`, lists `n.txt`, learned as a new skill |
@@ -217,7 +222,8 @@ Under `expect`, in `zsh -i` at a real terminal: `jli go to the sub directory`, a
 - **Known gap:** jli cannot see what happens to steps it handed over without trying them first
   (`source`, `setopt`, or any step after the first that needs the calling shell, such as the `make`
   in `cd build`, `make`). For `--json` and for learning they count as a clean exit, their output is
-  not captured, and auto mode cannot diagnose them.
+  not captured, and auto mode cannot diagnose them. When one fails, the calling shell's message
+  names the temp file it was sourced from (`…/jli-handoff.nSq9Mo:cd:1: no such file or directory`).
 - **Known gap:** the trial runs in bash, which on macOS is 3.2, whatever the calling shell is. A
   builtin that means something else in zsh or fish can pass the trial and then fail, or the other
   way round; fish has no `unset`, so a handed-over `unset` passes the trial and fails in fish.

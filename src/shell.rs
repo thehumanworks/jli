@@ -149,7 +149,7 @@ const CALLER_SHELL: [&str; 16] = [
 
 /// Of those, the ones that touch nothing outside the shell and mean the same in bash and zsh, so
 /// jli can try them in a shell of its own first and see whether they fail.
-const SAFE_TO_TRY: [&str; 8] = ["cd", "pushd", "popd", "export", "unset", "alias", "unalias", "umask"];
+const SAFE_TO_TRY: [&str; 7] = ["cd", "pushd", "export", "unset", "alias", "unalias", "umask"];
 
 /// Never handed over: in the calling shell these would end it or replace it.
 const NEVER_HANDED: [&str; 3] = ["exit", "logout", "exec"];
@@ -260,12 +260,26 @@ pub fn needs_caller(step: &str) -> bool {
 
 /// Whether jli can try the steps in a shell of its own before handing them over: every command
 /// in them is one that changes nothing outside that shell.
+/// A `$( … )`, `<( … )` or backtick would run its command once here and again in the calling shell.
+/// `cd -`, `popd` and a bare `pushd` read state that only the calling shell has: `OLDPWD` and the
+/// directory stack.
 pub fn safe_to_try(steps: &[String]) -> bool {
+    let tryable = |words: &[String]| {
+        let Some(name) = command_name(words) else { return true };
+        let Some(name) = name else { return true };
+        let args: Vec<&String> = words.iter().skip_while(|word| word.as_str() != name).skip(1).collect();
+        let plain = args.iter().all(|arg| !arg.starts_with(['-', '+']));
+        match name {
+            "cd" => plain && args.len() <= 1,
+            "pushd" => plain && args.len() == 1,
+            _ => SAFE_TO_TRY.contains(&name),
+        }
+    };
     steps.iter().all(|step| {
-        commands_of(step)
-            .iter()
-            .filter_map(|words| command_name(words))
-            .all(|name| name.is_none_or(|name| SAFE_TO_TRY.contains(&name)))
+        !step.contains("$(")
+            && !step.contains("<(")
+            && !step.contains('`')
+            && commands_of(step).iter().all(|words| tryable(words))
     })
 }
 
@@ -343,6 +357,13 @@ mod tests {
         assert!(!safe_to_try(&steps(&["cd repo", "make"])));
         assert!(!safe_to_try(&steps(&["source ~/.zshrc"])), "a sourced file is a script of its own");
         assert!(!safe_to_try(&steps(&["setopt autocd"])), "zsh only: bash would refuse it");
+        assert!(safe_to_try(&steps(&["cd", "cd '/tmp/a b'", "pushd /tmp"])));
+        for step in ["cd -", "popd", "pushd", "pushd +1", "cd -P x"] {
+            assert!(!safe_to_try(&steps(&[step])), "{step} reads the calling shell's own state");
+        }
+        for step in ["export STAMP=$(date)", "cd \"$(git rev-parse --show-toplevel)\"", "cd `pwd`", "source <(x)"] {
+            assert!(!safe_to_try(&steps(&[step])), "{step} would run its command twice");
+        }
     }
 
     #[test]
