@@ -28,7 +28,7 @@ Learning is writing to that database:
 
 | What happened | What is stored | Effect |
 | --- | --- | --- |
-| System 2 proposed a command and it ran | a new skill with the request as its first example, its values hidden; a command a skill already runs adds the phrasing to that skill instead | System 1 answers next time |
+| System 2 proposed a command and it ran, with exit 0 or a failure that was not the command's fault ([ADR 13](docs/adr/0013-learning-fixes.md)) | a new skill with the request as its first example, its values hidden; a command a skill already runs adds the phrasing to that skill instead | System 1 answers next time |
 | You said yes to "Run it?" | the phrasing, as an example of that skill | that phrasing becomes more confident |
 | You said no and typed the right command | a counter-example on the wrong skill, and the phrasing on the right one | it routes to your command next time |
 | You ran `jli teach` or `jli fix` | a phrasing, or a counter-example | same as above, by hand |

@@ -78,7 +78,7 @@ learns as an example and what a correction takes as a counter-example.
 | `show the last 3 commits` | `3` (agent) | `show the last … commits` |
 | `show the first three lines of the notes` | `3` (from the number word) | `show the first … lines of the notes` |
 | `greet name="Ada L" greeting=hello 3 times` | stated, and `3` | `greet name="…" greeting=… … times` |
-| `search every file here for the word FIXME` | `FIXME` (agent), `.` (default) | `search every file here for the word …` |
+| `search every file here for the word FIXME, with line numbers` | `FIXME` (agent), `.` (default) | `search every file here for the word …, with line numbers` (seen live) |
 
 - **Whole words only.** A value is found where neither side continues the word: letters, digits,
   `_`, `-`, `/` and `.` continue it, except a `.` that ends a sentence. So `src` is not hidden in
