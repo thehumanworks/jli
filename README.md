@@ -168,7 +168,8 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | `jli forget <label>` | delete a skill; inside a project only the project's own, `--global` for a global one |
 | `jli forget-phrase <label> "<phrase>"` | take one phrasing back from a skill and keep it as a counter-example, so it is not learned straight back; inside a project, for a global skill, in that project only (`--global` for every project) |
 | `jli alias <label> <slot> <name>` | give a slot another name for `name=value`; `--remove` takes one away. Inside a project an alias of a global skill holds in every project; `--global` reaches a global skill that a project skill of the same label hides |
-| `jli slot <label> <slot> --default=<value>` | the value a slot takes when the request names none; also `--optional` or `--required`, `--flag=<flag>`, `--choice=<value>=<text>` (repeat; `--no-choices`) and `--kind=`. Written where `jli alias` writes |
+| `jli slot <label> <slot> --default=<value>` | the value a slot takes when the request names none; also `--optional` or `--required`, `--flag=<flag>`, `--choice=` and `--kind=`. Written where `jli alias` writes |
+| `jli slot <label> <slot> --choice=release --choice=debug` | the only values a slot takes, each put in the command as its own name; `--choice=release=--release` puts other text, `--choice=debug=` nothing, and `--no-choices` takes them away |
 | `jli project` | the project this directory is in, from the nearest `.jlirc`, and how many skills are its own |
 | `jli project init [<id>]` | make this directory a project: what jli learns here stays with it |
 | `jli generalize [<label>]` | the agent proposes how to make project skills global; each is written only once you approve (`--all-projects`, `--approve-all`, `-n`) |
@@ -280,9 +281,17 @@ job without it. A model never leaves out a value that has no flag before it, nev
 slot a default, and never writes choices: those are yours.
 
 `jli slot` sets them. A default is what an unsaid value means, and it wins over leaving the slot out.
-Choices are the only values a slot takes, each with the text it puts in the command, written as you
-wrote it and never quoted. An empty text puts nothing there. For Cargo's profiles, teach the command
-with a placeholder and give it choices:
+Choices are the only values a slot takes. A choice puts its own name in the command, so for a skill
+that runs `cargo install --path . --profile {profile}`:
+
+```sh
+jli slot install-app profile --choice=release --choice=dev --default=release
+```
+
+When the command needs other text than the word you say, write that text after a second `=`. It is
+put in the command as you wrote it and never quoted, and an empty text puts nothing there. For
+`cargo build`, `release` is `--release` and `debug` is nothing, so teach the command with a
+placeholder and give it choices:
 
 ```sh
 jli --mode=manual teach "build the app" -- 'cargo build {profile}'
@@ -296,7 +305,8 @@ jli slot list-largest-files count --default=5
 
 A choice is found by name (`profile=debug`), as a label, or as a word of its own in the request ("a
 debug build"). Each setting is written with `=`, so `--flag=-n` stays one word. `jli skills` shows
-what each slot has: `{profile}: release → --release, debug → nothing; default release`. An older jli
+what each slot has: `{profile}: release → --release, debug → nothing; default release`, and a choice
+that puts its own name in the command as that name alone: `{profile}: release, dev; default release`. An older jli
 reads a slot with choices as a plain one, and writes `cargo build release`. See
 [ADR 24](docs/adr/0024-optional-slots.md).
 

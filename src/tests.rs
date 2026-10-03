@@ -3130,6 +3130,30 @@ fn a_placeholder_is_given_choices_and_a_default_by_hand() {
 }
 
 #[test]
+fn a_choice_given_by_its_name_alone_puts_that_name_in_the_command() {
+    let scratch = Scratch::new("hand-slot-plain");
+    let (label, _) = scratch.brain.learn_command("install the app", &["echo install {profile}".into()], Risk::Safe).unwrap();
+    // As a person writes it: jli slot <label> profile --choice=release --choice=debug --default=release.
+    let words: Vec<String> = [label.as_str(), "profile", "--choice=release", "--choice=debug", "--default=release"]
+        .iter()
+        .map(|word| word.to_string())
+        .collect();
+    let edit = hand::slot_shape(&words, false).unwrap();
+    let choices: Vec<(&str, &str)> =
+        edit.choices.iter().flatten().map(|choice| (choice.value.as_str(), choice.text.as_str())).collect();
+    assert_eq!(choices, [("release", "release"), ("debug", "debug")], "a choice's text is its name");
+    let done = hand::slot(&mut mutable(&scratch), &edit).unwrap();
+    assert_eq!(done.refused, None, "the default is one of the choices: {}", done.message);
+    assert_eq!(done.message, format!("{{profile}} in {label} is now a slot: release, debug; default release."));
+
+    let to = label.clone();
+    let (models, _) = models(move |_| decision(&to, 0.9, 0.9, SAFE), no_language_model());
+    let dry = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    assert_eq!(go(&scratch, &models, "install the app", &mut Script::default(), &dry).commands, ["echo install release"]);
+    assert_eq!(go(&scratch, &models, "a debug install", &mut Script::default(), &dry).commands, ["echo install debug"]);
+}
+
+#[test]
 fn a_slot_is_made_optional_with_its_flag_by_hand_and_keeps_its_aliases() {
     let scratch = Scratch::new("hand-optional");
     first_lines_skill(&scratch);

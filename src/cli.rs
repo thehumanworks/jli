@@ -70,8 +70,9 @@ fn help() -> String {
   jli slot <label> <slot> <setting>…   how a slot is filled and written; each setting is written with =
       --default=<value>                the value it takes when the request names none (--default= for none)
       --optional | --required          whether it, and its --flag=<flag>, may be left out of the command
-      --choice=<value>=<text> …        the only values it takes, each with what it puts in the command
-                                       (--choice=debug= puts nothing; --no-choices takes them away)
+      --choice=<value>[=<text>] …      the only values it takes. A choice puts its own name in the command,
+                                       or <text> when one is given: --choice=release=--release.
+                                       --choice=debug= puts nothing; --no-choices takes them away
   jli eval [<label>] [--limit N]       route every stored example with itself held out, and replay accepted
                                        requests: how often each skill comes home (System 1 calls, priced first)
   jli eval --optimise                  the agent rewrites the weakest rows; a rewrite is kept only if the
