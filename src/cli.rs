@@ -199,6 +199,14 @@ fn switched_on(lookup: impl Fn(&str) -> Option<String>, name: &str) -> bool {
     lookup(name).is_some_and(|value| matches!(value.trim().to_lowercase().as_str(), "1" | "true"))
 }
 
+/// `JLI_YES`, `JLI_YOLO` and `JLI_QUIET` turn on their flags. The environment never turns a flag off.
+fn switches_from(mut flags: Flags, lookup: impl Fn(&str) -> Option<String>) -> Flags {
+    flags.yes |= switched_on(&lookup, "JLI_YES");
+    flags.yolo |= switched_on(&lookup, "JLI_YOLO");
+    flags.quiet |= switched_on(&lookup, "JLI_QUIET");
+    flags
+}
+
 struct Parsed {
     flags: Flags,
     words: Vec<String>,
@@ -1211,9 +1219,8 @@ fn shell_init(name: Option<&str>) -> Result<i32> {
 }
 
 fn run(argv: &[String]) -> Result<i32> {
-    let Parsed { mut flags, words, rest } = parse(argv).map_err(|error| coded(USAGE, format!("{error:#}")))?;
-    flags.yes |= switched_on(env, "JLI_YES");
-    flags.yolo |= switched_on(env, "JLI_YOLO");
+    let Parsed { flags, words, rest } = parse(argv).map_err(|error| coded(USAGE, format!("{error:#}")))?;
+    let flags = switches_from(flags, env);
     let first = words.first().map(String::as_str);
     if matches!(first, Some("help" | "--help" | "-h")) {
         say(help());
@@ -1311,6 +1318,27 @@ mod tests {
             assert!(!with(Some(value)), "{value} does not switch it on");
         }
         assert!(!with(None));
+    }
+
+    #[test]
+    fn quiet_comes_from_the_flag_or_jli_quiet() {
+        for flag in ["-q", "--quiet"] {
+            assert!(parse(&args(&[flag, "list", "files"])).unwrap().flags.quiet, "{flag}");
+        }
+        let quiet = |value: &str| {
+            let value = value.to_string();
+            switches_from(Flags::default(), move |name| (name == "JLI_QUIET").then(|| value.clone())).quiet
+        };
+        for value in ["1", "true", "TRUE", " True "] {
+            assert!(quiet(value), "JLI_QUIET={value} is --quiet");
+        }
+        for value in ["0", "yes", "", "false"] {
+            assert!(!quiet(value), "JLI_QUIET={value} is not");
+        }
+        let only_quiet = switches_from(Flags::default(), |name| (name == "JLI_QUIET").then(|| "1".to_string()));
+        assert_eq!(only_quiet, Flags::quiet(), "it turns on nothing else");
+        let flagged = switches_from(Flags::quiet(), |_| Some("0".to_string()));
+        assert!(flagged.quiet, "the environment never turns a flag off");
     }
 
     #[test]
