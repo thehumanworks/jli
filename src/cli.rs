@@ -572,6 +572,12 @@ impl App {
         ));
         say(c::dim(if learned.created {
             format!("  new skill{scope}")
+        } else if learned.upgraded {
+            let (count, takes) = skill.map_or((1, String::new()), |skill| {
+                let names: Vec<String> = skill.slots.iter().map(|slot| format!("{{{}}}", slot.name)).collect();
+                (skill.examples.len(), names.join(", "))
+            });
+            format!("  added to an existing skill, which now takes {takes} and has {count} phrasings{scope}")
         } else {
             let count = skill.map_or(1, |skill| skill.examples.len());
             format!("  added to an existing skill, which now has {count} phrasings{scope}")

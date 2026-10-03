@@ -9,6 +9,7 @@ use libsql::{Builder, Connection, Database, Value};
 use tokio::runtime::Runtime;
 
 use crate::seed::seed_skills;
+use crate::slots::match_proposal;
 use crate::types::{add_alias, coded, BrainEvent, Origin, Path, Risk, Skill, Slot, STORAGE};
 
 /// Where the brain lives. One libSQL client covers every deployment:
@@ -875,24 +876,107 @@ impl Brain {
     }
 
     /// Insert a new skill under its label, or under the label with `-x` appended until one is free.
-    /// A label that another writer took after this one looked is never overwritten. Returns the
-    /// label the skill was stored under.
-    pub fn add_new_skill(&self, skill: &NewSkill) -> Result<String> {
+    /// A label that another writer took after this one looked is never overwritten. If the row that
+    /// holds a label runs the same command, the skill is that row: its phrasings are added to it and
+    /// nothing new is written. Returns the label, and whether a new row was written.
+    pub fn add_new_skill(&self, skill: &NewSkill) -> Result<(String, bool)> {
         self.claim(&self.scope, skill)
     }
 
     /// Inside a project a label the user's global skills hold is taken too, so a new project skill
     /// never hides a global one by accident.
-    fn claim(&self, scope: &Scope, skill: &NewSkill) -> Result<String> {
+    ///
+    /// Two writers teaching one command at once both pick its label; the second finds it taken by the
+    /// same command and joins it, so the phrasings collect on one row instead of `du-sh` and `du-sh-x`
+    /// (ADR 19). "The same command" is `match_proposal`: the row's template produces this skill's, so a
+    /// literal row never stands in for a template.
+    fn claim(&self, scope: &Scope, skill: &NewSkill) -> Result<(String, bool)> {
         let mut skill = skill.clone();
         for _ in 0..LABEL_ATTEMPTS {
             let held_globally = scope.has_project() && self.row(&scope.base(), &skill.label)?.is_some();
             if !held_globally && self.insert_skill(scope, &skill, "DO NOTHING")? > 0 {
-                return Ok(skill.label);
+                return Ok((skill.label, true));
+            }
+            let holder = match self.row(scope, &skill.label)? {
+                Some(own) => Some(own),
+                None if scope.has_project() => self.row(&scope.base(), &skill.label)?,
+                None => None,
+            };
+            if holder.is_some_and(|holder| match_proposal(&holder.steps, &skill.steps, &HashMap::new()).is_some()) {
+                for phrase in &skill.examples {
+                    self.link_in(scope, &skill.label, phrase)?;
+                }
+                return Ok((skill.label, false));
             }
             skill.label.push_str("-x");
         }
         Err(coded(STORAGE, format!("could not find a free label for {}", skill.label)))
+    }
+
+    /// Add a phrasing to the row `scope` sees under `label`, and drop it from that row's counter-examples.
+    /// In this brain's own scope that is `link_phrase`, so inside a project a global row gets a lesson;
+    /// in another scope (`promote` writing the global skills) the row itself is written.
+    fn link_in(&self, scope: &Scope, label: &str, phrase: &str) -> Result<()> {
+        if scope == &self.scope {
+            return self.link_phrase(label, phrase);
+        }
+        let edit = |list: Vec<String>| with(list, phrase);
+        self.edit_column_in(scope, label, ListColumn::Examples.name(), |stored| {
+            Ok(edit(json(stored)).map(|next| serde_json::to_string(&next)).transpose()?)
+        })?;
+        let edit = |list: Vec<String>| without(list, phrase);
+        self.edit_column_in(scope, label, ListColumn::CounterExamples.name(), |stored| {
+            Ok(edit(json(stored)).map(|next| serde_json::to_string(&next)).transpose()?)
+        })?;
+        Ok(())
+    }
+
+    /// True when this brain's own scope holds `label`: outside a project any skill, inside one a
+    /// project skill and not a global one seen there.
+    pub fn owns(&self, label: &str) -> Result<bool> {
+        Ok(self.row(&self.scope, label)?.is_some())
+    }
+
+    /// Make a literal skill general in place (ADR 19): it runs `to`'s steps with `to`'s slots, scenario
+    /// and risk, and keeps everything learned about it, as an upsert does (ADR 2): examples,
+    /// counter-examples, uses, origin, `created_at`, and the aliases of a slot that keeps its name.
+    /// Written only in this brain's own scope, and only if the row still runs `from`, with one
+    /// conditional statement on its steps and slots, as a list is written (ADR 15). Returns false when
+    /// the row is not this scope's, has gone, or another writer changed it first.
+    pub fn upgrade_skill(&self, label: &str, from: &[String], to: &NewSkill) -> Result<bool> {
+        let (table, rows) = (self.scope.skills(), self.scope.rows());
+        let read = self.query(
+            &format!("SELECT steps, slots FROM {table} WHERE {rows} AND label = ?"),
+            self.scope.args(vec![label.into()]),
+            |row| (row.get_value(0).unwrap_or(Value::Null), row.get_value(1).unwrap_or(Value::Null)),
+        )?;
+        let Some((steps, slots)) = read.into_iter().next() else { return Ok(false) };
+        if json::<Vec<String>>(steps.clone()) != from {
+            return Ok(false);
+        }
+        let mut next = to.slots.clone();
+        for known in json::<Vec<Slot>>(slots.clone()) {
+            for alias in &known.aliases {
+                add_alias(&mut next, &known.name, alias);
+            }
+        }
+        let written = self.execute(
+            &format!(
+                "UPDATE {table} SET steps = ?, slots = ?, scenario = ?, risk = ?
+                 WHERE {rows} AND label = ? AND steps IS ? AND slots IS ?"
+            ),
+            [
+                vec![
+                    serde_json::to_string(&to.steps)?.into(),
+                    serde_json::to_string(&next)?.into(),
+                    to.scenario.clone().into(),
+                    to.risk.as_str().into(),
+                ],
+                self.scope.args(vec![label.into(), steps, slots]),
+            ]
+            .concat(),
+        )?;
+        Ok(written > 0)
     }
 
     /// Returns how many rows were written: 0 when the label was taken and `conflict` does nothing.
@@ -927,7 +1011,7 @@ impl Brain {
             self.link_phrase(&existing.label, phrase)?;
             return Ok((existing.label.clone(), false));
         }
-        let label = self.add_new_skill(&NewSkill {
+        self.add_new_skill(&NewSkill {
             label: slug(&wanted),
             steps: steps.to_vec(),
             scenario: format!("the user wants: {phrase}"),
@@ -935,8 +1019,7 @@ impl Brain {
             origin: Origin::Taught,
             examples: vec![phrase.to_string()],
             slots: vec![],
-        })?;
-        Ok((label, true))
+        })
     }
 
     /// Add a phrasing to a skill, and drop it from that skill's counter-examples if it was one.
@@ -1227,20 +1310,13 @@ impl Brain {
         let base = scope.base();
         let Some(row) = self.row(&scope, label)? else { return Ok(None) };
         let global = match to {
-            Promote::New(skill) => self.claim(&base, skill)?,
+            Promote::New(skill) => self.claim(&base, skill)?.0,
             Promote::Into(global) => {
                 if self.row(&base, global)?.is_none() {
                     return Err(anyhow!("there is no global skill called {global}"));
                 }
                 for phrase in &row.examples {
-                    let edit = |list: Vec<String>| with(list, phrase);
-                    self.edit_column_in(&base, global, ListColumn::Examples.name(), |stored| {
-                        Ok(edit(json(stored)).map(|next| serde_json::to_string(&next)).transpose()?)
-                    })?;
-                    let edit = |list: Vec<String>| without(list, phrase);
-                    self.edit_column_in(&base, global, ListColumn::CounterExamples.name(), |stored| {
-                        Ok(edit(json(stored)).map(|next| serde_json::to_string(&next)).transpose()?)
-                    })?;
+                    self.link_in(&base, global, phrase)?;
                 }
                 global.clone()
             }
@@ -1481,6 +1557,7 @@ pub fn slug(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::SlotKind;
 
     struct Scratch(PathBuf);
 
@@ -1799,15 +1876,16 @@ mod tests {
             slots: vec![],
         };
         // Both looked when du-sh was free; theirs was written first.
-        assert_eq!(theirs.add_new_skill(&skill("du-sh", "du -h")).unwrap(), "du-sh");
-        assert_eq!(mine.add_new_skill(&skill("du-sh", "du -sh .")).unwrap(), "du-sh-x");
+        assert_eq!(theirs.add_new_skill(&skill("du-sh", "du -h")).unwrap(), ("du-sh".into(), true));
+        assert_eq!(mine.add_new_skill(&skill("du-sh", "du -sh .")).unwrap(), ("du-sh-x".into(), true));
         assert_eq!(mine.skill("du-sh").unwrap().unwrap().steps, ["du -h"]);
         assert_eq!(mine.skill("du-sh-x").unwrap().unwrap().steps, ["du -sh ."]);
 
         // Four writers teaching four commands with one slug at once each keep their own command.
+        // (`du  -s` would not do here: it is `du -s` with another space, the same command, and joins it.)
         drop((mine, theirs));
         let path = scratch.0.join("brain.db");
-        let commands = ["du -s", "du -s .", "du  -s", "du -s ./"];
+        let commands = ["du -s", "du -s .", "du -s /", "du -s ./"];
         let start = std::sync::Barrier::new(commands.len());
         let learned: Vec<String> = std::thread::scope(|scope| {
             let writers: Vec<_> = commands
@@ -1832,6 +1910,87 @@ mod tests {
         let mut distinct = learned.clone();
         distinct.sort();
         assert_eq!(distinct, ["du-s", "du-s-x", "du-s-x-x", "du-s-x-x-x"]);
+    }
+
+    #[test]
+    fn a_label_taken_by_the_same_command_is_joined() {
+        let scratch = Scratch::new("label-join");
+        let (mine, theirs) = (scratch.brain(), scratch.brain());
+        let template = |label: &str, step: &str, slot: &str, examples: &[&str]| NewSkill {
+            slots: vec![Slot {
+                name: slot.into(),
+                kind: SlotKind::Number,
+                description: String::new(),
+                default: None,
+                aliases: vec![],
+            }],
+            ..new_skill(label, step, examples)
+        };
+        // Both looked when du-sh was free, and both are teaching du -sh .; theirs was written first.
+        theirs.add_new_skill(&new_skill("du-sh", "du -sh .", &["disk use"])).unwrap();
+        theirs.add_counter_example("du-sh", "how big is this").unwrap();
+        assert_eq!(
+            mine.add_new_skill(&new_skill("du-sh", "du  -sh  .", &["how big is this"])).unwrap(),
+            ("du-sh".into(), false)
+        );
+        let joined = mine.skill("du-sh").unwrap().unwrap();
+        assert_eq!(joined.steps, ["du -sh ."], "the row is theirs, as written");
+        assert_eq!(joined.examples, ["disk use", "how big is this"]);
+        assert!(joined.counter_examples.is_empty(), "joining links the phrase, so it is no longer a counter-example");
+        assert!(mine.skill("du-sh-x").unwrap().is_none());
+
+        // The same template under other slot names, and a command a template produces, are the same command.
+        theirs.add_new_skill(&template("recent", "git log --oneline -n {count}", "count", &["last commits"])).unwrap();
+        let renamed = template("recent", "git log --oneline -n {n}", "n", &["latest commits"]);
+        assert_eq!(mine.add_new_skill(&renamed).unwrap(), ("recent".into(), false));
+        let five = new_skill("recent", "git log --oneline -n 5", &["five commits"]);
+        assert_eq!(mine.add_new_skill(&five).unwrap(), ("recent".into(), false));
+        assert_eq!(mine.skill("recent").unwrap().unwrap().examples, ["last commits", "latest commits", "five commits"]);
+
+        // A literal row never stands in for a template: the template gets the next free label.
+        theirs.add_new_skill(&new_skill("three", "git log --oneline -n 3", &["three commits"])).unwrap();
+        let general = template("three", "git log --oneline -n {count}", "count", &["some commits"]);
+        assert_eq!(mine.add_new_skill(&general).unwrap(), ("three-x".into(), true));
+        assert_eq!(mine.skill("three").unwrap().unwrap().examples, ["three commits"]);
+
+        // Inside a project, a global row of the label that runs the same command gets the phrase as the
+        // project's lesson; the global row is not written (ADR 17).
+        let shop = scratch.in_project(DEFAULT_USER, "shop");
+        assert_eq!(
+            shop.add_new_skill(&new_skill("du-sh", "du -sh .", &["size of the shop"])).unwrap(),
+            ("du-sh".into(), false)
+        );
+        assert!(shop.project_skills().unwrap().is_empty());
+        assert!(shop.skill("du-sh").unwrap().unwrap().examples.contains(&"size of the shop".to_string()));
+        assert_eq!(theirs.skill("du-sh").unwrap().unwrap().examples, ["disk use", "how big is this"]);
+    }
+
+    #[test]
+    fn writers_teaching_one_command_at_once_get_one_skill() {
+        let scratch = Scratch::new("label-race-same");
+        let path = scratch.0.join("brain.db");
+        let writers = 4;
+        let start = std::sync::Barrier::new(writers);
+        let learned: Vec<(String, bool)> = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..writers)
+                .map(|n| {
+                    let (path, start) = (&path, &start);
+                    scope.spawn(move || {
+                        let brain = Brain::open(BrainConfig::file(path)).unwrap();
+                        start.wait();
+                        brain.learn_command(&format!("disk use {n}"), &["du -sh .".into()], Risk::Safe).unwrap()
+                    })
+                })
+                .collect();
+            threads.into_iter().map(|thread| thread.join().unwrap()).collect()
+        });
+        assert!(learned.iter().all(|(label, _)| label == "du-sh"), "{learned:?}");
+        assert_eq!(learned.iter().filter(|(_, created)| *created).count(), 1, "one writer wrote the row: {learned:?}");
+        let brain = scratch.brain();
+        assert_eq!(labels(&brain).iter().filter(|label| label.starts_with("du-sh")).count(), 1);
+        let mut examples = brain.skill("du-sh").unwrap().unwrap().examples;
+        examples.sort();
+        assert_eq!(examples, (0..writers).map(|n| format!("disk use {n}")).collect::<Vec<_>>());
     }
 
     #[test]

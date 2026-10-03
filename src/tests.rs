@@ -655,7 +655,10 @@ fn a_translated_row_is_kept_when_system1_confirms_it() {
         cwd: scratch.work.clone(),
     };
     let learned = learn_phrase(&scratch.brain, &models, &input, &quiet()).unwrap();
-    assert_eq!(learned, crate::learn::Learned { label: "git-recent-commits".into(), created: true, translated: true });
+    assert_eq!(
+        learned,
+        crate::learn::Learned { label: "git-recent-commits".into(), created: true, translated: true, upgraded: false }
+    );
     let skill = scratch.brain.skill("git-recent-commits").unwrap().unwrap();
     assert_eq!(skill.steps, ["git log --oneline -n {count}"]);
     assert_eq!(skill.slots[0].name, "count");
@@ -2041,4 +2044,290 @@ fn a_generalization_that_fails_a_check_is_never_offered() {
     let (models, _) = self::models(takes_node(false), vec![("generalization", parameterized())]);
     let approve = GeneralizeOptions { approve_all: true, ..options_for(&scratch) };
     assert_eq!(generalize(&rust, &models, &approve, &quiet(), &mut Script::default()).unwrap().written.len(), 1);
+}
+
+// ── One row per command: flags, literal skills and labels taken by the same command (ADR 19) ──
+
+fn teach(phrase: &str, command: &str, mode: Mode, scratch: &Scratch) -> LearnInput {
+    LearnInput {
+        phrase: phrase.into(),
+        steps: vec![command.into()],
+        risk: None,
+        mode,
+        threshold: 0.5,
+        cwd: scratch.work.clone(),
+    }
+}
+
+/// A skill that runs one fixed command, as manual mode or an agent's literal proposal leaves one.
+fn literal_skill(brain: &Brain, label: &str, step: &str, examples: &[&str]) {
+    brain
+        .add_skill(&NewSkill {
+            label: label.into(),
+            steps: vec![step.into()],
+            scenario: format!("the user wants: {}", examples.first().copied().unwrap_or(step)),
+            risk: Risk::Safe,
+            origin: Origin::Taught,
+            examples: examples.iter().map(|example| example.to_string()).collect(),
+            slots: vec![],
+        })
+        .unwrap();
+}
+
+/// System 1 that sends `phrase` to `label` and every other request to git-status, as the check expects.
+fn routes_phrase_to(phrase: &'static str, label: &'static str) -> impl Fn(&Value) -> Value + Send + Sync + 'static {
+    move |request| {
+        if request["state"]["request"] == phrase {
+            decision(label, 0.92, 0.9, SAFE)
+        } else {
+            decision("git-status", 0.9, 0.9, SAFE)
+        }
+    }
+}
+
+#[test]
+fn teaching_cd_minus_beside_cd_directory_makes_its_own_skill() {
+    let scratch = Scratch::new("teach-cd-minus");
+    directory_skill(&scratch, "go-to-directory", &["cd {directory}"]);
+    let (models, _) = models(|_| panic!("System 1 must not be asked"), no_language_model());
+    let learned =
+        learn_phrase(&scratch.brain, &models, &teach("go back", "cd -", Mode::Manual, &scratch), &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created), ("cd", true), "- is a flag, not a directory");
+    assert_eq!(scratch.brain.skill("cd").unwrap().unwrap().steps, ["cd -"]);
+    assert!(scratch.brain.skill("go-to-directory").unwrap().unwrap().examples.is_empty());
+}
+
+#[test]
+fn a_translator_that_names_a_template_with_a_flag_for_its_value_is_not_believed() {
+    let scratch = Scratch::new("teach-cd-minus-translated");
+    directory_skill(&scratch, "go-to-directory", &["cd {directory}"]);
+    // The translator calls `cd -` the known skill with `-` for the directory, the same mistake #17 was.
+    let row = json!({
+        "existingLabel": "go-to-directory", "label": "go-back", "steps": ["cd {directory}"],
+        "scenario": "the user wants to go back to the previous directory",
+        "slots": [{ "name": "directory", "kind": "file", "description": "the directory", "default": null }],
+        "slotValues": [{ "name": "directory", "value": "-" }], "risk": "safe",
+    });
+    let (models, _) = models(routes_phrase_to("go back", "go-back"), vec![("matrix_row", row)]);
+    let learned = learn_phrase(&scratch.brain, &models, &teach("go back", "cd -", Mode::Semi, &scratch), &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created), ("go-back", true), "- is a flag, not a directory");
+    assert_eq!(scratch.brain.skill("go-back").unwrap().unwrap().steps, ["cd -"]);
+    assert!(scratch.brain.skill("go-to-directory").unwrap().unwrap().examples.is_empty());
+}
+
+#[test]
+fn teaching_a_literal_skills_command_makes_it_general_in_place() {
+    let scratch = Scratch::new("teach-upgrade");
+    literal_skill(&scratch.brain, "recent-three", "git log --oneline -n 3", &["show the last 3 commits"]);
+    scratch.brain.add_counter_example("recent-three", "show the last 3 tags").unwrap();
+    scratch.brain.record_use("recent-three").unwrap();
+    let before = scratch.brain.skill("recent-three").unwrap().unwrap();
+    // The translator writes the template, and names the literal skill as the one that runs the command.
+    let mut row = draft("git log --oneline -n {count}", "3");
+    row["existingLabel"] = json!("recent-three");
+    let (models, _) = models(routes_phrase_to("list the 3 newest commits", "recent-three"), vec![("matrix_row", row)]);
+    let input = teach("list the 3 newest commits", "git log --oneline -n 3", Mode::Semi, &scratch);
+    let learned = learn_phrase(&scratch.brain, &models, &input, &quiet()).unwrap();
+    assert_eq!(
+        learned,
+        crate::learn::Learned { label: "recent-three".into(), created: false, translated: true, upgraded: true }
+    );
+    let after = scratch.brain.skill("recent-three").unwrap().unwrap();
+    assert_eq!(after.steps, ["git log --oneline -n {count}"]);
+    assert_eq!((after.slots[0].name.as_str(), after.slots[0].default.as_deref()), ("count", Some("3")));
+    assert!(after.scenario.starts_with("the user wants a one-line summary"));
+    assert_eq!(after.examples, ["show the last 3 commits", "list the 3 newest commits"]);
+    assert_eq!(after.counter_examples, ["show the last 3 tags"]);
+    assert_eq!((after.uses, after.created_at.as_str(), after.origin), (1, before.created_at.as_str(), Origin::Taught));
+    assert!(scratch.brain.skill("git-recent-commits").unwrap().is_none(), "no second row");
+
+    // Every count now runs, and a phrasing that names none still runs what the literal skill ran.
+    let (models, _) = self::models(|_| decision("recent-three", 0.95, 0.9, SAFE), no_language_model());
+    let dry = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let seven = go(&scratch, &models, "show the last 7 commits", &mut Script::default(), &dry);
+    assert_eq!(seven.commands, ["git log --oneline -n 7"]);
+    let some = go(&scratch, &models, "show me some recent commits", &mut Script::default(), &dry);
+    assert_eq!(some.commands, ["git log --oneline -n 3"]);
+}
+
+#[test]
+fn a_literal_skill_takes_the_phrase_when_there_is_nothing_to_generalise() {
+    let scratch = Scratch::new("teach-literal-kept");
+    literal_skill(&scratch.brain, "list-everything", "ls -la", &["everything here"]);
+    let unchanged = json!({
+        "existingLabel": "list-everything", "label": "list-all", "steps": ["ls -la"],
+        "scenario": "the user wants every file listed with details", "slots": [], "slotValues": [], "risk": "safe",
+    });
+    let (models, replies) = models(|_| panic!("System 1 must not be asked"), vec![("matrix_row", unchanged)]);
+    let learned =
+        learn_phrase(&scratch.brain, &models, &teach("all of it", "ls -la", Mode::Semi, &scratch), &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created, learned.upgraded), ("list-everything", false, false));
+    assert_eq!(scratch.brain.skill("list-everything").unwrap().unwrap().examples, ["everything here", "all of it"]);
+    assert_eq!(replies.seen.lock().unwrap().len(), 1, "the translator is asked once");
+
+    // A seed is a fixed command written by hand: it takes the phrase with no model at all.
+    let (models, _) = self::models(|_| panic!("System 1 must not be asked"), no_language_model());
+    let learned =
+        learn_phrase(&scratch.brain, &models, &teach("oldest last", "ls -ltr", Mode::Semi, &scratch), &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created), ("list-files-by-time", false));
+}
+
+#[test]
+fn a_template_wins_over_a_literal_skill_that_runs_the_same_command() {
+    let scratch = Scratch::new("teach-template-first");
+    literal_skill(&scratch.brain, "recent-three", "git log --oneline -n 3", &["show the last 3 commits"]);
+    // The literal skill is the more used, so it comes first in the matrix.
+    scratch.brain.record_use("recent-three").unwrap();
+    scratch
+        .brain
+        .add_skill(&NewSkill {
+            label: "git-recent-commits".into(),
+            steps: vec!["git log --oneline -n {count}".into()],
+            scenario: "the user wants the most recent commits".into(),
+            risk: Risk::Safe,
+            origin: Origin::Agent,
+            examples: vec!["latest commits".into()],
+            slots: vec![Slot {
+                name: "count".into(),
+                kind: SlotKind::Number,
+                description: "how many".into(),
+                default: None,
+                aliases: vec![],
+            }],
+        })
+        .unwrap();
+    let (models, _) = models(|_| panic!("System 1 must not be asked"), no_language_model());
+    let input = teach("three newest commits", "git log --oneline -n 3", Mode::Semi, &scratch);
+    let learned = learn_phrase(&scratch.brain, &models, &input, &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created), ("git-recent-commits", false));
+    assert_eq!(scratch.brain.skill("recent-three").unwrap().unwrap().examples, ["show the last 3 commits"]);
+}
+
+#[test]
+fn a_global_literal_skill_is_not_made_general_from_inside_a_project() {
+    let scratch = Scratch::new("teach-upgrade-project");
+    literal_skill(&scratch.brain, "recent-three", "git log --oneline -n 3", &["show the last 3 commits"]);
+    let shop = in_project(&scratch, "shop");
+    let (models, _) = models(
+        routes_phrase_to("three newest commits", "git-recent-commits"),
+        vec![("matrix_row", draft("git log --oneline -n {count}", "3"))],
+    );
+    let input = teach("three newest commits", "git log --oneline -n 3", Mode::Semi, &scratch);
+    let learned = learn_phrase(&shop, &models, &input, &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created, learned.upgraded), ("git-recent-commits", true, false));
+    assert_eq!(shop.project_skills().unwrap()[0].steps, ["git log --oneline -n {count}"]);
+    let global = scratch.brain.skill("recent-three").unwrap().unwrap();
+    assert_eq!((global.steps.as_slice(), global.examples.len()), (["git log --oneline -n 3".to_string()].as_slice(), 1));
+}
+
+#[test]
+fn a_literal_skill_another_writer_made_general_first_is_joined() {
+    let scratch = Scratch::new("teach-upgrade-race");
+    literal_skill(&scratch.brain, "recent-three", "git log --oneline -n 3", &["show the last 3 commits"]);
+    let path = scratch.root.join("brain.db");
+    let row = draft("git log --oneline -n {count}", "3");
+    let llm = Llm::with_transport(move |_| {
+        // Another jli makes the same skill general while this one's translator is writing.
+        let other = Brain::open(BrainConfig::file(&path)).unwrap();
+        let general = NewSkill {
+            label: "recent-three".into(),
+            steps: vec!["git log --oneline -n {n}".into()],
+            scenario: "theirs".into(),
+            risk: Risk::Safe,
+            origin: Origin::Taught,
+            examples: vec![],
+            slots: vec![Slot {
+                name: "n".into(),
+                kind: SlotKind::Number,
+                description: String::new(),
+                default: None,
+                aliases: vec![],
+            }],
+        };
+        other.upgrade_skill("recent-three", &["git log --oneline -n 3".into()], &general).unwrap();
+        Ok((200, json!({ "choices": [{ "message": { "content": row.to_string() } }] }).to_string()))
+    });
+    let system1 = System1::fake(routes_phrase_to("three newest commits", "recent-three"));
+    let input = teach("three newest commits", "git log --oneline -n 3", Mode::Semi, &scratch);
+    let learned = learn_phrase(&scratch.brain, &Models { system1, llm }, &input, &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created, learned.upgraded), ("recent-three", false, false));
+    let skill = scratch.brain.skill("recent-three").unwrap().unwrap();
+    assert_eq!(
+        (skill.steps.as_slice(), skill.scenario.as_str()),
+        (["git log --oneline -n {n}".to_string()].as_slice(), "theirs")
+    );
+    assert_eq!(skill.examples, ["show the last 3 commits", "three newest commits"]);
+    assert!(scratch.brain.skill("recent-three-x").unwrap().is_none());
+}
+
+#[test]
+fn a_label_taken_by_the_same_command_while_the_agent_was_thinking_is_joined() {
+    let scratch = Scratch::new("label-race-same-agent");
+    std::fs::write(scratch.work.join("notes.txt"), "one\ntwo\n").unwrap();
+    let path = scratch.root.join("brain.db");
+    let proposal = json!({
+        "kind": "new", "existingLabel": null, "label": "count-lines", "steps": ["wc -l {file}"],
+        "scenario": "the user wants the number of lines in a file",
+        "slots": [{ "name": "file", "kind": "file", "description": "the file to count", "default": null }],
+        "slotValues": [{ "name": "file", "value": "notes.txt" }],
+        "risk": "safe", "explanation": "Counts lines.", "answer": null,
+    });
+    // After this request read the matrix, another jli on the same brain stores the same command.
+    let (models, _) = models(
+        move |request| {
+            Brain::open(BrainConfig::file(&path))
+                .unwrap()
+                .add_skill_if_missing(&NewSkill {
+                    label: "count-lines".into(),
+                    steps: vec!["wc -l {path}".into()],
+                    scenario: "theirs".into(),
+                    risk: Risk::Safe,
+                    origin: Origin::Agent,
+                    examples: vec!["lines in a file".into()],
+                    slots: vec![],
+                })
+                .unwrap();
+            once_known("count-lines", decision(NONE, 0.7, 0.95, SAFE))(request)
+        },
+        vec![("proposal", proposal)],
+    );
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "how many lines are in notes.txt", &mut Script::default(), &options);
+    assert!(outcome.ran);
+    assert_eq!(outcome.label.as_deref(), Some("count-lines"));
+    assert_eq!(outcome.learned, ["\"how many lines are in …\" means count-lines"]);
+    let theirs = scratch.brain.skill("count-lines").unwrap().unwrap();
+    assert_eq!((theirs.scenario.as_str(), theirs.uses), ("theirs", 1));
+    assert_eq!(theirs.examples, ["lines in a file", "how many lines are in …"]);
+    assert!(scratch.brain.skill("count-lines-x").unwrap().is_none());
+}
+
+#[test]
+fn a_command_another_writer_taught_while_the_translator_was_writing_is_joined() {
+    let scratch = Scratch::new("teach-race-same");
+    let path = scratch.root.join("brain.db");
+    let row = draft("git log --oneline -n {count}", "3");
+    let llm = Llm::with_transport(move |_| {
+        // Another jli teaches the same command meanwhile; its translator named it differently (seen live).
+        Brain::open(BrainConfig::file(&path))
+            .unwrap()
+            .add_skill_if_missing(&NewSkill {
+                label: "show-recent-commits".into(),
+                steps: vec!["git log --oneline -n {n}".into()],
+                scenario: "theirs".into(),
+                risk: Risk::Safe,
+                origin: Origin::Taught,
+                examples: vec!["latest commits".into()],
+                slots: vec![],
+            })
+            .unwrap();
+        Ok((200, json!({ "choices": [{ "message": { "content": row.to_string() } }] }).to_string()))
+    });
+    let system1 = System1::fake(routes_phrase_to("show the last 3 commits", "git-recent-commits"));
+    let input = teach("show the last 3 commits", "git log --oneline -n 3", Mode::Semi, &scratch);
+    let learned = learn_phrase(&scratch.brain, &Models { system1, llm }, &input, &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created, learned.translated), ("show-recent-commits", false, false));
+    let theirs = scratch.brain.skill("show-recent-commits").unwrap().unwrap();
+    assert_eq!(theirs.examples, ["latest commits", "show the last 3 commits"]);
+    assert!(scratch.brain.skill("git-recent-commits").unwrap().is_none(), "no second row");
 }

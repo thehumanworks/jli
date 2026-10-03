@@ -1,7 +1,9 @@
 # 15. What is learned belongs to a user, a skill is shared by copy, and parallel writers lose nothing
 
 - Status: accepted; superseded in part by [ADR 17](0017-project-scope.md), which sets `project_id` from
-  a `.jlirc`, sees a project's skills beside the user's, and keeps settings and seeds with the user
+  a `.jlirc`, sees a project's skills beside the user's, and keeps settings and seeds with the user;
+  and by [ADR 19](0019-one-row-per-command.md), under which a writer whose label is taken by the same
+  command joins that row instead of writing `-x`
 - Date: 2026-10-03
 - Origin: the Rust version
 - Supersedes in part: [ADR 2](0002-brain-in-libsql.md), on the fixed schema (four tables are

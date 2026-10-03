@@ -1,6 +1,7 @@
 # 13. One row per command, the shape of a request, this host's own fix, and failures that are not the command's fault
 
-- Status: accepted
+- Status: accepted; superseded in part by [ADR 19](0019-one-row-per-command.md), under which a taught
+  command that a literal skill runs makes that skill general instead of joining it as it is
 - Date: 2026-10-03
 - Origin: the Rust version
 - Supersedes in part: [ADR 5](0005-routing-loop.md), on when a new proposal becomes a skill;

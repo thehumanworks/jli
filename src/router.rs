@@ -803,8 +803,9 @@ impl Route<'_> {
                     ),
                     _ => (skill.scenario.clone(), Settled::Unchecked),
                 };
-                // Another writer may have taken the label since it was shown; the skill then gets the next free one.
-                let label = self.brain.add_new_skill(&NewSkill {
+                // Another writer may have taken the label since it was shown; the skill then gets the next free
+                // one, or, if that writer stored this same command, the phrasing joins their skill.
+                let (label, created) = self.brain.add_new_skill(&NewSkill {
                     label: skill.label.clone(),
                     steps: skill.steps.clone(),
                     scenario,
@@ -815,9 +816,18 @@ impl Route<'_> {
                 })?;
                 self.outcome.label = Some(label.clone());
                 self.brain.record_use(&label)?;
-                self.outcome.learned.push(format!("new skill {label}"));
-                self.outcome.learned.extend(settled.note(&label));
-                ui.learned(format!("new skill {}. Next time System 1 handles this without the agent.", c::bold(&label)));
+                if created {
+                    self.outcome.learned.push(format!("new skill {label}"));
+                    self.outcome.learned.extend(settled.note(&label));
+                    ui.learned(format!("new skill {}. Next time System 1 handles this without the agent.", c::bold(&label)));
+                } else {
+                    self.outcome.learned.push(format!("\"{}\" means {label}", self.phrase));
+                    ui.learned(format!(
+                        "\"{}\" means {}, which another jli stored for this command while it ran",
+                        self.phrase,
+                        c::bold(&label)
+                    ));
+                }
             } else {
                 ui.note("The command failed, so the proposal was not learned.");
             }
