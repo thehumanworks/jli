@@ -105,4 +105,5 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   translator, 3 of 6 for the agent), and can still call a needed flag optional; a number word fills an
   optional count even when it counts something else; a choice is found only by the word that names
   it; nothing checks a value left out by hand or a choice's text; the translator's scenario can still
-  be narrower than an optional value makes the skill; and `jli slot` inside a project ran live once.
+  be narrower than an optional value makes the skill; a plan's left-out slot cannot be given to `jli
+  run`; and `jli slot` inside a project ran live once.

@@ -138,8 +138,10 @@ given twice), and `default_invalid` (a default that is not one of the choices).
 
 - `--json`'s `accepts` and `missing` describe each slot with `optional`, `flag` and `choices`,
   appended after `default` and always present.
-- A plan leaves out an optional slot and does not wait for it. `jli run <plan> profile=Release`
-  takes a choice as a request does, and refuses one that is none, saying which it takes.
+- A plan leaves out an optional slot and does not wait for it. It runs as it was shown, so a value
+  for that slot given later is refused: `jli run <plan> count=3` stops with `none of these plans is
+  missing a value for count=`. `jli run <plan> profile=Release` takes a choice for a slot the plan is
+  waiting on as a request does, and refuses one that is none, saying which it takes.
 - A command is read back against the skill's slots: `git log --oneline` is `git log --oneline -n
   {count}` without the count, and `cargo build` is `cargo build {profile}` with `debug`. So teaching
   `git log --oneline` joins that skill with no model call, a "no" followed by it is not a different
@@ -239,5 +241,7 @@ with ctrl-d, exit 0; `jli demo` exit 0, answered instantly 2 of 5 then 5 of 5, d
   taught command, is not checked either.
 - **Known gap:** the translator still writes the scenario of the instance: "show me the git log" did
   not reach a skill whose scenario said "limited to a specific count", though the skill runs it.
+- **Known gap:** an agent that reads an optional slot in a plan's `accepts` cannot give it to
+  `jli run`; it has to route the request again with the value.
 - **Known gap:** `jli slot` inside a project was run live once, and offline only through the code it
   shares with `jli alias`.

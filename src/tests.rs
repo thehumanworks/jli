@@ -2907,10 +2907,22 @@ fn an_optional_slot_nothing_names_is_left_out_with_its_flag_and_no_model() {
     assert_eq!(command("run it 5 times"), "echo ran --count 5", "a number in the request");
     assert_eq!(command("run it count=two"), "echo ran --count 2", "stated by name");
 
-    // A dry run's plan is ready: an optional slot is not a value it waits for.
+    // A dry run's plan is ready: an optional slot is not a value it waits for, nor one it takes later.
     let dry = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
     let outcome = go(&scratch, &models, "run it", &mut Script::default(), &dry);
     assert!(outcome.missing.is_empty());
+    let late = [("count".to_string(), "3".to_string())];
+    let flags = RunFlags { yolo: false, capture: true };
+    let refused = run_plans(
+        &scratch.brain,
+        &no_model_at_all(),
+        &[outcome.plan_id.unwrap()],
+        &late,
+        &quiet(),
+        &mut Script::default(),
+        flags,
+    );
+    assert_eq!(refused.unwrap_err().to_string(), "none of these plans is missing a value for count=");
     let ran = plans(&scratch, &no_model_at_all(), &[outcome.plan_id.unwrap()], &[], &mut Script::default());
     assert_eq!((ran[0].commands.as_slice(), ran[0].output.as_deref()), (["echo ran".to_string()].as_slice(), Some("ran\n")));
 }
