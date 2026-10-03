@@ -153,11 +153,15 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | `jli eval undo [<label>]` | put back what the last optimisation changed |
 | `jli history` | recent requests and how each was routed |
 | `jli teach "<phrase>" -- <command>` | link a phrase to a command; repeat to add more phrasings |
+| `jli teach --global "<phrase>" -- <command>` | the same, from inside a project, for every project |
 | `jli fix` | the last command run here was wrong: unlearn it and ask the agent |
-| `jli fix <eventId>` | the same for one of your events, from anywhere |
+| `jli fix <eventId>` | the same for one of your events, from any directory (an event made in a project, from inside that project) |
 | `jli fix <eventId> -- <command>` | that was wrong, this is right: learn it as a "no" and the command at the prompt would, and return a plan of it (`--run` runs it) |
 | `jli fix <eventId> --expected "<words>"` | unlearn it and ask the agent with what you expected; returns a plan (`--run` runs it) |
-| `jli forget <label>` | delete a skill |
+| `jli forget <label>` | delete a skill; inside a project only the project's own, `--global` for a global one |
+| `jli project` | the project this directory is in, from the nearest `.jlirc`, and how many skills are its own |
+| `jli project init [<id>]` | make this directory a project: what jli learns here stays with it |
+| `jli generalize [<label>]` | the agent proposes how to make project skills global; each is written only once you approve (`--all-projects`, `--approve-all`, `-n`) |
 | `jli shell-init [zsh\|bash\|fish]` | print the shell function that lets `cd`, `export` and `source` change your shell |
 | `jli --user-id=<id> …` | any command, as another user with their own skills, history and settings (also `JLI_USER_ID`) |
 | `jli share <label> --to <user>` | give another user a copy of one of your skills |
@@ -276,12 +280,34 @@ counter-examples, and refuses if the other user already has that label or that c
 jli processes can write one brain at once without losing a lesson. An older jli on the same brain
 sees only the default user. See [ADR 15](docs/adr/0015-user-scope.md).
 
+## Projects
+
+"Run the tests" is `cargo test` in one repository and `npm test` in the next. Make each one a
+project, and what jli learns in one stays there:
+
+```sh
+jli project init                     # writes .jlirc: project = shop-api-4k2x9q (commit it)
+jli teach "run the tests" -- cargo test     # kept for this project
+jli generalize                       # the agent proposes which project skills could be global; you approve each
+```
+
+A project is named by the id in the nearest `.jlirc` at or above the working directory (up to
+`$HOME`), never by a path, so every checkout is the same project. Inside one, System 1 sees the
+project's skills and your global ones together, and a project skill wins a label both hold. A new
+skill is the project's; a phrasing or a counter-example for a global skill is kept as the project's
+own lesson about it, so correcting `cargo test` to `npm test` in one project never reaches another.
+`teach --global` and `forget --global` reach the global skills from inside a project. Settings stay
+yours; history, stats, and the event and plan ids that `jli fix` and `jli run` take are the
+project's. `jli generalize` checks each proposal with System 1 in
+the project, among the global skills and against your other projects, and writes it only when you
+say yes. Without a `.jlirc` nothing changes. See [ADR 17](docs/adr/0017-project-scope.md).
+
 ## Layout
 
 | File | Role |
 | --- | --- |
 | `src/system1.rs` | builds the matrix from the database and asks Jev; the only module that uses `typesafe-jev` |
-| `src/system2.rs` | the agent: structured proposals, free-text slot filling, naming an unknown argument's slot, and rewriting a weak row |
+| `src/system2.rs` | the agent: structured proposals, free-text slot filling, naming an unknown argument's slot, rewriting a weak row, and proposing how a project skill could be global |
 | `src/translator.rs` | turns a taught phrase and command into a general matrix row |
 | `src/learn.rs` | writes a row once System 1 has verified it, and settles a skill the agent proposed |
 | `src/eval.rs` | measures the matrix against its own examples and history, optimises it, and checks a new row against its closest skills |
@@ -289,7 +315,9 @@ sees only the default user. See [ADR 15](docs/adr/0015-user-scope.md).
 | `src/llm.rs` | the one HTTP call every language model request goes through |
 | `src/router.rs` | the loop: decide, escalate, confirm, run, write back; and a stored plan through the same confirmation and write-back |
 | `src/plan.rs` | plans: what a route pins, and `jli run` |
-| `src/store.rs` | the brain: skills, events, settings, plans and corrections per user in libSQL, behind a runtime that never leaves the module |
+| `src/store.rs` | the brain: skills, events, settings, plans and corrections per user and project in libSQL, behind a runtime that never leaves the module |
+| `src/project.rs` | finds, reads and writes the `.jlirc` that names a project |
+| `src/generalize.rs` | `jli generalize`: checks the agent's proposal for a project skill and writes it once approved |
 | `src/args.rs` | reads the arguments a request states: `name=value`, labels and quoted text |
 | `src/slots.rs` | fills, expands and shell-quotes `{slot}` values |
 | `src/shell.rs` | the shell function, and which steps it must run in your shell |
@@ -301,6 +329,7 @@ sees only the default user. See [ADR 15](docs/adr/0015-user-scope.md).
 | `src/tests.rs` | the router and learning loop, offline, against fake models and a scripted prompt |
 | `src/tests/eval_tests.rs` | `jli eval`, the optimiser, undo, and the check a new row gets, offline |
 | `examples/bench-translator.rs` | manual versus semi on held-out paraphrases, and with `--forgetting` the forgetting rate |
+| `examples/bench-context.rs` | one phrase taught to two commands in two projects: whether a correction in one undoes the other |
 | `docs/adr/` | the design decisions, and the lessons and known gaps behind them |
 
 ## How it talks to the world

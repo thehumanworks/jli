@@ -1591,6 +1591,7 @@ fn app(scratch: &Scratch, user: &str, models: Models) -> App {
         brain: Brain::open_as(BrainConfig::file(&scratch.root.join("brain.db")), user).unwrap(),
         models,
         terminal: crate::ui::Terminal::not_a_terminal(),
+        project: None,
     }
 }
 
@@ -1717,4 +1718,327 @@ fn a_plan_that_must_run_in_the_calling_shell_is_not_run_by_jli_run() {
     let outcomes = plans(&scratch, &no_model_at_all(), &[id], &[], &mut Script::default());
     assert_eq!((code(&outcomes[0]), outcomes[0].ran), (Some("needs_caller_shell"), false));
     assert_eq!(outcomes[0].caller_shell, ["cd src"]);
+}
+
+// ── Projects (ADR 17) ───────────────────────────────────────────────────────────
+
+fn in_project(scratch: &Scratch, project: &str) -> Brain {
+    Brain::open_in(BrainConfig::file(&scratch.root.join("brain.db")), "default", Some(project)).unwrap()
+}
+
+/// The criteria System 1 is shown for a request in `brain`, from a dry run that asks nobody else.
+fn criteria(scratch: &Scratch, brain: &Brain, request: &str) -> Value {
+    let seen = Arc::new(Mutex::new(Value::Null));
+    let recorder = seen.clone();
+    let (models, _) = self::models(
+        move |sent| {
+            *recorder.lock().unwrap() = sent["questions"]["skill"]["criteria"].clone();
+            decision(NONE, 0.9, 0.05, SAFE)
+        },
+        no_language_model(),
+    );
+    let options = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    route(brain, &models, request, &quiet(), &mut Script::default(), &options).unwrap();
+    let criteria = seen.lock().unwrap().clone();
+    criteria
+}
+
+#[test]
+fn run_the_tests_means_one_command_in_one_project_and_another_in_the_next() {
+    let scratch = Scratch::new("ping-pong");
+    // Taught before either project existed, so it is global.
+    let (silent, _) = models_without_calls();
+    let taught = LearnInput {
+        phrase: "run the tests".into(),
+        steps: vec!["echo cargo test".into()],
+        risk: Some(Risk::Safe),
+        mode: Mode::Manual,
+        threshold: 0.5,
+        cwd: scratch.work.clone(),
+    };
+    assert_eq!(learn_phrase(&scratch.brain, &silent, &taught, &quiet()).unwrap().label, "echo-cargo-test");
+    let (rust, node) = (in_project(&scratch, "rust"), in_project(&scratch, "node"));
+
+    // In the node project System 1 picks it; the person says no and types what they meant.
+    let (models, _) = self::models(|_| decision("echo-cargo-test", 0.9, 0.9, SAFE), no_language_model());
+    let mut script = Script::new(&[Some(false)], &["echo npm test"]);
+    let outcome = route(&node, &models, "run the tests", &quiet(), &mut script, &scratch.options(Mode::Manual)).unwrap();
+    assert_eq!((outcome.path, outcome.label.as_deref()), (Path::Taught, Some("echo-npm-test")));
+    assert_eq!(outcome.output.as_deref(), Some("npm test\n"));
+    assert_eq!(node.project_skills().unwrap().len(), 1, "the new skill is the node project's");
+
+    // The global row is untouched, so the rust project is shown exactly what it was before.
+    let row = scratch.brain.skill("echo-cargo-test").unwrap().unwrap();
+    assert_eq!((row.examples.as_slice(), row.counter_examples.len()), (["run the tests".to_string()].as_slice(), 0));
+    let in_rust = criteria(&scratch, &rust, "run the tests");
+    assert_eq!(in_rust["echo-cargo-test"]["examples"], json!(["run the tests"]));
+    assert!(in_rust["echo-cargo-test"].get("doesNotApplyTo").is_none() && in_rust.get("echo-npm-test").is_none());
+    let in_node = criteria(&scratch, &node, "run the tests");
+    assert_eq!(in_node["echo-cargo-test"]["doesNotApplyTo"], json!(["run the tests"]));
+    assert!(in_node["echo-cargo-test"].get("examples").is_none(), "the phrasing is not both an example and not one");
+    assert_eq!(in_node["echo-npm-test"]["examples"], json!(["run the tests"]));
+
+    // Back in the rust project the global skill still runs, and nothing it learns reaches the node project.
+    let (models, _) = self::models(|_| decision("echo-cargo-test", 0.8, 0.9, SAFE), no_language_model());
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Manual) };
+    let outcome = route(&rust, &models, "please run the tests", &quiet(), &mut Script::default(), &options).unwrap();
+    assert_eq!(outcome.output.as_deref(), Some("cargo test\n"));
+    assert_eq!(outcome.learned, ["\"please run the tests\" means echo-cargo-test"]);
+    assert_eq!(rust.skill("echo-cargo-test").unwrap().unwrap().examples, ["run the tests", "please run the tests"]);
+    assert_eq!(scratch.brain.skill("echo-cargo-test").unwrap().unwrap().examples, ["run the tests"]);
+    assert_eq!(criteria(&scratch, &node, "run the tests"), in_node, "the node project is shown what it was");
+    assert_eq!(scratch.brain.skill("echo-cargo-test").unwrap().unwrap().uses, 1, "a use is counted on the global row");
+}
+
+#[test]
+fn a_skill_learned_in_a_project_stays_there_unless_taught_globally() {
+    let scratch = Scratch::new("project-learn");
+    std::fs::write(scratch.work.join("notes.txt"), "one\ntwo\n").unwrap();
+    let mut shop = in_project(&scratch, "shop");
+    let proposal = new_proposal(
+        "count-lines",
+        "wc -l {file}",
+        json!([{ "name": "file", "kind": "file", "description": "the file", "default": null }]),
+        json!([{ "name": "file", "value": "notes.txt" }]),
+    );
+    let (models, _) = self::models(once_known("count-lines", decision(NONE, 0.7, 0.95, SAFE)), vec![("proposal", proposal)]);
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
+    let outcome =
+        route(&shop, &models, "how many lines are in notes.txt", &quiet(), &mut Script::default(), &options).unwrap();
+    assert_eq!(outcome.learned, ["new skill count-lines"]);
+    assert_eq!(shop.project_skills().unwrap()[0].label, "count-lines");
+    assert!(scratch.brain.skill("count-lines").unwrap().is_none(), "not global");
+    assert_eq!(shop.events(10).unwrap().len(), 1);
+    assert!(scratch.brain.events(10).unwrap().is_empty(), "the request is in the project's history");
+
+    // `teach --global` from inside the project.
+    let (silent, _) = models_without_calls();
+    let taught = LearnInput {
+        phrase: "how big is this folder".into(),
+        steps: vec!["du -sh .".into()],
+        risk: Some(Risk::Safe),
+        mode: Mode::Manual,
+        threshold: 0.5,
+        cwd: scratch.work.clone(),
+    };
+    let learned = shop.globally(|brain| learn_phrase(brain, &silent, &taught, &quiet())).unwrap();
+    assert_eq!(scratch.brain.skill(&learned.label).unwrap().unwrap().steps, ["du -sh ."]);
+    assert!(shop.project_skills().unwrap().iter().all(|skill| skill.label != learned.label));
+    assert!(shop.skill(&learned.label).unwrap().is_some(), "and the project sees it");
+}
+
+fn models_without_calls() -> (Models, Arc<Replies>) {
+    self::models(|_| panic!("System 1 must not be asked"), no_language_model())
+}
+
+// ── jli generalize ──────────────────────────────────────────────────────────────
+
+use crate::generalize::{generalize, GeneralizeOptions, Generalized};
+
+/// A rust project with one skill, `cargo test -p api`, and a node project that means `npm test` by "run the tests".
+fn two_projects(scratch: &Scratch) -> (Brain, Brain) {
+    let (rust, node) = (in_project(scratch, "rust"), in_project(scratch, "node"));
+    let skill = |label: &str, step: &str, examples: &[&str]| NewSkill {
+        label: label.into(),
+        steps: vec![step.into()],
+        scenario: format!("the user wants {step} run"),
+        risk: Risk::Safe,
+        origin: Origin::Taught,
+        examples: examples.iter().map(|example| example.to_string()).collect(),
+        slots: vec![],
+    };
+    rust.add_skill(&skill("api-tests", "cargo test -p api", &["run the api tests"])).unwrap();
+    rust.add_counter_example("api-tests", "test the docs").unwrap();
+    node.add_skill(&skill("npm-test", "npm test", &["run the tests"])).unwrap();
+    (rust, node)
+}
+
+fn parameterized() -> Value {
+    json!({
+        "decision": "parameterize", "reason": "Any Rust workspace can test one package.", "mergeInto": null,
+        "label": "cargo-test-package", "steps": ["cargo test -p {package}"],
+        "scenario": "the user wants the tests of one package of a Rust workspace run",
+        "slots": [{ "name": "package", "kind": "text", "description": "the package", "default": null, "aliases": ["pkg"] }],
+        "risk": "safe",
+    })
+}
+
+/// System 1 that sends the project skill's own phrasing to `label` and every other phrasing elsewhere.
+fn routes_own_phrasing_to(label: &'static str) -> impl Fn(&Value) -> Value + Send + Sync + 'static {
+    move |sent| {
+        if sent["state"]["request"] == "run the api tests" {
+            decision(label, 0.9, 0.9, SAFE)
+        } else {
+            decision("npm-test", 0.9, 0.9, SAFE)
+        }
+    }
+}
+
+fn options_for(scratch: &Scratch) -> GeneralizeOptions {
+    GeneralizeOptions {
+        label: None,
+        all_projects: false,
+        dry_run: false,
+        approve_all: false,
+        threshold: 0.5,
+        cwd: scratch.work.clone(),
+    }
+}
+
+fn nothing_written(scratch: &Scratch, rust: &Brain, done: &Generalized) {
+    assert!(done.written.is_empty());
+    assert_eq!(rust.project_skills().unwrap()[0].label, "api-tests", "the project row is intact");
+    assert!(scratch.brain.skill("cargo-test-package").unwrap().is_none(), "no global row appeared");
+    assert!(rust.events(10).unwrap().is_empty());
+}
+
+#[test]
+fn generalize_writes_nothing_without_approval() {
+    let scratch = Scratch::new("generalize-refused");
+    let (rust, _node) = two_projects(&scratch);
+    let options = options_for(&scratch);
+
+    // The person says no.
+    let (models, replies) =
+        self::models(routes_own_phrasing_to("cargo-test-package"), vec![("generalization", parameterized())]);
+    let mut script = Script::new(&[Some(false)], &[]);
+    let done = generalize(&rust, &models, &options, &quiet(), &mut script).unwrap();
+    assert_eq!((done.proposed, script.questions.as_slice()), (1, ["Make it global?".to_string()].as_slice()));
+    nothing_written(&scratch, &rust, &done);
+    let sent: Value =
+        serde_json::from_str(replies.seen.lock().unwrap()[0]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(sent["projectSkill"]["steps"], json!(["cargo test -p api"]));
+    assert_eq!(sent["sameIntentElsewhere"][0]["project"], "node", "the node project's tests are shown to the agent");
+    assert_eq!(sent["globalSkills"].as_array().unwrap().len(), 9);
+
+    // Nobody at the keyboard, and no --approve-all.
+    let (models, _) = self::models(routes_own_phrasing_to("cargo-test-package"), vec![("generalization", parameterized())]);
+    let done = generalize(&rust, &models, &options, &quiet(), &mut Script::new(&[None], &[])).unwrap();
+    nothing_written(&scratch, &rust, &done);
+
+    // A dry run shows the proposal and asks nothing (an unexpected question would panic).
+    let (models, _) = self::models(routes_own_phrasing_to("cargo-test-package"), vec![("generalization", parameterized())]);
+    let dry = GeneralizeOptions { dry_run: true, ..options_for(&scratch) };
+    let done = generalize(&rust, &models, &dry, &quiet(), &mut Script::default()).unwrap();
+    assert_eq!(done.proposed, 1);
+    nothing_written(&scratch, &rust, &done);
+
+    // Outside a project there is nothing to generalize unless every project is asked for.
+    let (models, _) = models_without_calls();
+    assert!(generalize(&scratch.brain, &models, &options, &quiet(), &mut Script::default()).unwrap().nothing);
+    let (models, _) = self::models(routes_own_phrasing_to("cargo-test-package"), vec![("generalization", parameterized())]);
+    let every =
+        GeneralizeOptions { all_projects: true, label: Some("api-tests".into()), dry_run: true, ..options_for(&scratch) };
+    assert_eq!(generalize(&scratch.brain, &models, &every, &quiet(), &mut Script::default()).unwrap().proposed, 1);
+    let only = GeneralizeOptions { label: Some("git-status".into()), ..options_for(&scratch) };
+    let (models, _) = models_without_calls();
+    assert!(generalize(&rust, &models, &only, &quiet(), &mut Script::default()).unwrap().nothing, "already global");
+}
+
+#[test]
+fn an_approved_generalization_moves_the_skill_to_the_global_ones() {
+    let scratch = Scratch::new("generalize-approved");
+    let (rust, node) = two_projects(&scratch);
+    let (models, _) = self::models(routes_own_phrasing_to("cargo-test-package"), vec![("generalization", parameterized())]);
+    let mut script = Script::new(&[Some(true)], &[]);
+    let done = generalize(&rust, &models, &options_for(&scratch), &quiet(), &mut script).unwrap();
+    assert_eq!(done.written, [("rust".to_string(), "api-tests".to_string(), "cargo-test-package".to_string())]);
+
+    let row = scratch.brain.skill("cargo-test-package").unwrap().unwrap();
+    assert_eq!(row.steps, ["cargo test -p {package}"]);
+    assert_eq!((row.slots[0].name.as_str(), row.slots[0].aliases.as_slice()), ("package", ["pkg".to_string()].as_slice()));
+    assert_eq!(row.examples, ["run the api tests"], "the project's phrasings go with it");
+    assert!(row.counter_examples.is_empty());
+    assert!(rust.project_skills().unwrap().is_empty(), "the project row is removed");
+    assert_eq!(rust.skill("cargo-test-package").unwrap().unwrap().counter_examples, ["test the docs"]);
+    assert!(node.skill("cargo-test-package").unwrap().unwrap().counter_examples.is_empty());
+    let event = rust.events(1).unwrap().remove(0);
+    assert_eq!((event.query.as_str(), event.label, event.accepted), ("jli generalize api-tests", None, false));
+    assert!(event.learned.unwrap().contains("the project row was removed"));
+
+    // --approve-all writes what passes without asking; a command a global skill runs joins that skill.
+    let slot =
+        Slot { name: "script".into(), kind: SlotKind::Text, description: String::new(), default: None, aliases: vec![] };
+    scratch
+        .brain
+        .add_skill(&NewSkill {
+            label: "npm-script".into(),
+            steps: vec!["npm run {script}".into()],
+            scenario: "the user wants an npm script run".into(),
+            risk: Risk::Safe,
+            origin: Origin::Taught,
+            examples: vec![],
+            slots: vec![slot],
+        })
+        .unwrap();
+    node.add_skill(&NewSkill {
+        label: "lint".into(),
+        steps: vec!["npm run lint".into()],
+        scenario: "the user wants the code linted".into(),
+        risk: Risk::Safe,
+        origin: Origin::Taught,
+        examples: vec!["run the api tests".into()],
+        slots: vec![],
+    })
+    .unwrap();
+    let promote = json!({
+        "decision": "promote", "reason": "It is general.", "mergeInto": null, "label": "npm-lint",
+        "steps": ["npm run lint"], "scenario": "the user wants the code linted", "slots": [], "risk": "safe",
+    });
+    let (models, _) = self::models(routes_own_phrasing_to("npm-script"), vec![("generalization", promote)]);
+    let all = GeneralizeOptions { approve_all: true, label: Some("lint".into()), ..options_for(&scratch) };
+    let done = generalize(&node, &models, &all, &quiet(), &mut Script::default()).unwrap();
+    assert_eq!(done.written[0].2, "npm-script", "the proposal became a merge into the skill that already runs it");
+    assert!(scratch.brain.skill("npm-lint").unwrap().is_none());
+    assert_eq!(scratch.brain.skill("npm-script").unwrap().unwrap().examples, ["run the api tests"]);
+}
+
+#[test]
+fn a_generalization_that_fails_a_check_is_never_offered() {
+    let scratch = Scratch::new("generalize-checks");
+    let (rust, _node) = two_projects(&scratch);
+    let options = options_for(&scratch);
+    let with = |changes: Value| {
+        let mut reply = parameterized();
+        for (key, value) in changes.as_object().unwrap() {
+            reply[key] = value.clone();
+        }
+        reply
+    };
+    let flag_slot = json!([{ "name": "flag", "kind": "text", "description": "", "default": null, "aliases": [] }]);
+    // Each is refused before System 1 or the person is asked: either would panic.
+    for (reply, why) in [
+        (with(json!({ "steps": ["cargo test --workspace"] })), "it does not give back the project's command"),
+        (with(json!({ "steps": ["cargo test {flag} api"], "slots": flag_slot })), "a flag is never a slot"),
+        (with(json!({ "slots": [] })), "an undeclared slot"),
+        (with(json!({ "decision": "merge", "mergeInto": "git-status" })), "git-status does not run it"),
+        (with(json!({ "decision": "keep" })), "kept in the project"),
+    ] {
+        let (models, _) =
+            self::models(|_| panic!("System 1 is asked only about a proposal that passed"), vec![("generalization", reply)]);
+        let done = generalize(&rust, &models, &options, &quiet(), &mut Script::default()).unwrap();
+        assert_eq!(done.proposed, 0, "{why}");
+        nothing_written(&scratch, &rust, &done);
+    }
+    // System 1 does not send the project's own phrasing to the new row.
+    let (models, _) = self::models(routes_own_phrasing_to("npm-test"), vec![("generalization", parameterized())]);
+    let done = generalize(&rust, &models, &options, &quiet(), &mut Script::default()).unwrap();
+    nothing_written(&scratch, &rust, &done);
+    // Or the new row would take a phrasing that belongs to the node project: there "run the tests" is npm test.
+    let takes_node = |takes: bool| {
+        move |sent: &Value| {
+            let request = sent["state"]["request"].as_str().unwrap();
+            if request == "run the tests" {
+                return decision(if takes { "cargo-test-package" } else { "npm-test" }, 0.9, 0.9, SAFE);
+            }
+            once_known("cargo-test-package", decision(NONE, 0.9, 0.9, SAFE))(sent)
+        }
+    };
+    let (models, _) = self::models(takes_node(true), vec![("generalization", parameterized())]);
+    let done = generalize(&rust, &models, &options, &quiet(), &mut Script::default()).unwrap();
+    nothing_written(&scratch, &rust, &done);
+    // The same proposal, with the node project's phrasing staying home, is written.
+    let (models, _) = self::models(takes_node(false), vec![("generalization", parameterized())]);
+    let approve = GeneralizeOptions { approve_all: true, ..options_for(&scratch) };
+    assert_eq!(generalize(&rust, &models, &approve, &quiet(), &mut Script::default()).unwrap().written.len(), 1);
 }
