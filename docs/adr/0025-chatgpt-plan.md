@@ -126,7 +126,7 @@ statics, so a fake transport never looks for a sign-in and the trace can say whe
 
 | Command | What it does |
 | --- | --- |
-| `jli login` | Continue with ChatGPT in the browser; the saved account again when there is one. Without a browser, the URL is printed. A person who declined plan usage before is asked for consent again. |
+| `jli login` | Continue with ChatGPT in the browser; the saved account again when there is one. Without a browser, the URL is printed to stderr, even with `--quiet` or `--json`. A person who declined plan usage before is asked for consent again. |
 | `jli login --new` | the same with another ChatGPT account; the first registration is kept |
 | `jli login --codex` | use the account the Codex CLI is signed in with |
 | `jli logout` | stop using the plan; jli's own session is revoked, and its client id and host id kept |

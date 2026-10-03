@@ -195,8 +195,9 @@ impl Accounts {
     }
 
     /// Continue with ChatGPT in the browser: the saved account again, or with `another`, a ChatGPT
-    /// account this host has not used. `open` opens a URL and says whether it could.
-    pub fn login(&self, ui: &Ui, open: &dyn Fn(&str) -> bool, another: bool) -> Result<SignedIn> {
+    /// account this host has not used. `open` opens a URL and says whether it could; when it could
+    /// not, `show` must put the URL in front of the person, whatever the trace's setting.
+    pub fn login(&self, ui: &Ui, open: &dyn Fn(&str) -> bool, show: &dyn Fn(&str), another: bool) -> Result<SignedIn> {
         let store = self.store()?;
         let saved = if another { None } else { store.active()? };
         let registration = match &saved {
@@ -217,7 +218,7 @@ impl Accounts {
         if open(&url) {
             ui.note("Continue with ChatGPT in the browser that just opened.");
         } else {
-            ui.note(format!("Open this page to continue with ChatGPT:\n  {url}"));
+            show(&url);
         }
         let failed = |error: chatgpt_sdk::Error| coded(CONFIGURATION, format!("Sign-in did not complete: {error}"));
         let callback = listener.wait(request.state(), SIGN_IN_WAIT).map_err(failed)?;
@@ -351,6 +352,30 @@ mod tests {
         Ui::new(false)
     }
 
+    fn never_shown(url: &str) {
+        panic!("the browser opened, so the URL must not be shown: {url}");
+    }
+
+    #[test]
+    fn without_a_browser_the_url_is_shown_even_when_the_trace_is_off() {
+        let scratch = Scratch::new("headless");
+        let fake = FakeChatGpt::new();
+        let accounts = Accounts::fake(scratch.0.clone(), &fake, None);
+        let shown = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let show = {
+            let (fake, shown) = (fake.clone(), shown.clone());
+            move |url: &str| {
+                shown.lock().unwrap().push(url.to_string());
+                fake.browse(url);
+            }
+        };
+        let signed_in = accounts.login(&quiet(), &|_: &str| false, &show, false).unwrap();
+        assert!(signed_in.plan_usage);
+        let shown = shown.lock().unwrap();
+        assert_eq!(shown.len(), 1);
+        assert!(shown[0].starts_with("https://auth.chatgpt.fake/authorize?client_id=dynamic_agent_client&"), "{}", shown[0]);
+    }
+
     #[test]
     fn a_first_sign_in_uses_the_plan_and_says_so_once() {
         let scratch = Scratch::new("login");
@@ -358,7 +383,7 @@ mod tests {
         let accounts = Accounts::fake(scratch.0.join("chatgpt"), &fake, None);
         assert!(accounts.provider().unwrap().is_none(), "nothing is used before a sign-in");
 
-        let first = accounts.login(&quiet(), &browser(&fake), false).unwrap();
+        let first = accounts.login(&quiet(), &browser(&fake), &never_shown, false).unwrap();
         assert_eq!((first.source, first.plan_usage, first.welcome), (Source::SignIn, true, true));
         assert_eq!((first.email.as_deref(), first.model.as_str()), (Some("user@example.com"), DEFAULT_MODEL));
         let provider = accounts.provider().unwrap().unwrap();
@@ -379,7 +404,7 @@ mod tests {
                 true
             }
         };
-        let again = accounts.login(&quiet(), &open, false).unwrap();
+        let again = accounts.login(&quiet(), &open, &never_shown, false).unwrap();
         assert!(!again.welcome, "the welcome is shown after the first sign-in only");
         let url = opened.lock().unwrap().clone();
         assert!(
@@ -393,12 +418,12 @@ mod tests {
         let scratch = Scratch::new("another");
         let fake = FakeChatGpt::new();
         let accounts = Accounts::fake(scratch.0.clone(), &fake, None);
-        accounts.login(&quiet(), &browser(&fake), false).unwrap();
+        accounts.login(&quiet(), &browser(&fake), &never_shown, false).unwrap();
         fake.sign_in_as("user-2", "two@example.com");
         fake.issue_client_id("oaiapp_second");
-        let refused = accounts.login(&quiet(), &browser(&fake), false).unwrap_err();
+        let refused = accounts.login(&quiet(), &browser(&fake), &never_shown, false).unwrap_err();
         assert!(refused.to_string().contains("different ChatGPT account"), "{refused}");
-        let second = accounts.login(&quiet(), &browser(&fake), true).unwrap();
+        let second = accounts.login(&quiet(), &browser(&fake), &never_shown, true).unwrap();
         assert_eq!(second.email.as_deref(), Some("two@example.com"));
         assert_eq!(accounts.provider().unwrap().unwrap().email.as_deref(), Some("two@example.com"));
         let store = CredentialStore::open(&scratch.0).unwrap();
@@ -412,7 +437,7 @@ mod tests {
         let fake = FakeChatGpt::new();
         fake.grant("email openid profile offline_access");
         let accounts = Accounts::fake(scratch.0.clone(), &fake, None);
-        let signed_in = accounts.login(&quiet(), &browser(&fake), false).unwrap();
+        let signed_in = accounts.login(&quiet(), &browser(&fake), &never_shown, false).unwrap();
         assert!(!signed_in.plan_usage && !signed_in.welcome);
         assert!(accounts.provider().unwrap().is_none(), "jli keeps what it used before");
 
@@ -427,7 +452,7 @@ mod tests {
                 true
             }
         };
-        assert!(accounts.login(&quiet(), &open, false).unwrap().plan_usage);
+        assert!(accounts.login(&quiet(), &open, &never_shown, false).unwrap().plan_usage);
         assert!(seen.lock().unwrap().ends_with("prompt=consent"), "consent is asked for again");
         assert!(accounts.provider().unwrap().is_some());
     }
@@ -438,7 +463,7 @@ mod tests {
         let fake = FakeChatGpt::new();
         fake.deny_next();
         let accounts = Accounts::fake(scratch.0.clone(), &fake, None);
-        let error = accounts.login(&quiet(), &browser(&fake), false).unwrap_err();
+        let error = accounts.login(&quiet(), &browser(&fake), &never_shown, false).unwrap_err();
         assert_eq!(crate::types::error_code(&error), CONFIGURATION);
         assert!(error.to_string().contains("declined"), "{error}");
         assert_eq!(accounts.choice().unwrap(), Choice::default());
@@ -449,7 +474,7 @@ mod tests {
         let scratch = Scratch::new("logout");
         let fake = FakeChatGpt::new();
         let accounts = Accounts::fake(scratch.0.clone(), &fake, None);
-        accounts.login(&quiet(), &browser(&fake), false).unwrap();
+        accounts.login(&quiet(), &browser(&fake), &never_shown, false).unwrap();
         let out = accounts.logout().unwrap();
         assert_eq!((out.source, out.revoked, out.email.as_deref()), (Some(Source::SignIn), true, Some("user@example.com")));
         assert_eq!(fake.revoked().len(), 1);
@@ -457,7 +482,7 @@ mod tests {
         assert!(accounts.logout().unwrap().source.is_none(), "a second logout has nothing to do");
 
         // A refresh that fails for good clears the session; jli then says so instead of moving on.
-        accounts.login(&quiet(), &browser(&fake), false).unwrap();
+        accounts.login(&quiet(), &browser(&fake), &never_shown, false).unwrap();
         let store = CredentialStore::open(&scratch.0).unwrap();
         let active = store.active().unwrap().unwrap();
         store.save(&active.signed_out()).unwrap();
@@ -508,7 +533,7 @@ mod tests {
         let fake = FakeChatGpt::new();
         let accounts = Accounts::fake(scratch.0.clone(), &fake, None);
         assert!(accounts.models().is_err(), "no list without a sign-in");
-        accounts.login(&quiet(), &browser(&fake), false).unwrap();
+        accounts.login(&quiet(), &browser(&fake), &never_shown, false).unwrap();
         let (models, current) = accounts.models().unwrap();
         let slugs: Vec<&str> = models.iter().map(|model| model.slug.as_str()).collect();
         assert_eq!(

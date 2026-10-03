@@ -1289,7 +1289,9 @@ fn account(words: &[String], flags: &Flags) -> Result<Option<i32>> {
     match shape.as_slice() {
         ["login"] | ["login", "--new"] => {
             let trace = Ui::new(!flags.quiet && !flags.json);
-            let signed_in = Accounts::from_env()?.login(&trace, &open_in_browser, shape.len() == 2)?;
+            // The URL is the sign-in itself, so it reaches stderr even with --quiet or --json.
+            let show = |url: &str| eprintln!("{} Open this page to continue with ChatGPT:\n  {url}", c::yellow("!"));
+            let signed_in = Accounts::from_env()?.login(&trace, &open_in_browser, &show, shape.len() == 2)?;
             say_signed_in(&signed_in, flags);
         }
         ["login", "--codex"] => say_signed_in(&Accounts::from_env()?.login_codex()?, flags),
