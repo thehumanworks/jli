@@ -978,8 +978,11 @@ impl Brain {
     /// what was learned about it: examples, counter-examples and uses are never replaced,
     /// and a slot that keeps its name keeps its aliases.
     ///
-    /// Inside a project, a label only the user's global skills hold is changed there, like an
-    /// alias: what a skill runs and when it applies is the skill's, not a lesson (ADR 17).
+    /// No command calls it (ADR 22): a new skill is stored with `add_new_skill`, a literal skill is
+    /// made general with `upgrade_skill`, and a rewritten scenario goes through `set_scenario`. It is
+    /// kept for tests, which build their brains with it. Inside a project it still writes a label
+    /// only the user's global skills hold to the global row, the write ADR 22 took away from
+    /// `jli eval --optimise`, so a command run inside a project must not use it.
     pub fn add_skill(&self, skill: &NewSkill) -> Result<()> {
         let mut skill = skill.clone();
         for known in self.skill(&skill.label)?.map(|known| known.slots).unwrap_or_default() {

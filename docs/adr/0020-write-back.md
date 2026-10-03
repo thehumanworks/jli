@@ -176,8 +176,10 @@ run.
   given a second chance; `jli teach` is the way to say what was right.
 - **Known gap:** a command that does the same thing in other words (`awk 'END { print NR }' {file}`
   for `wc -l {file}`) is not recognised as the rejected command.
-- **Known gap:** `match_template` lets a slot capture a flag (issue #17), so a rejected
-  `ls {directory}` would also refuse `ls -la`, until that is fixed in `match_template`.
+- A rejected `ls {directory}` does not refuse `ls -la`. When this record was written `match_template`
+  let a slot capture a flag (issue #17), and it would have; [ADR 19](0019-one-row-per-command.md)
+  made it refuse a flag, and `a_rejected_template_does_not_refuse_its_command_with_a_flag` checks that
+  after `jli fix` rejects `ls {directory}` the agent's `ls -la` runs and is learned as its own skill.
 - **Known gap:** a counter-example on the skill a confident System 1 route ran (0.95 or above) stays,
   since such a route writes nothing.
 - **Known gap:** a written form is found with the environment as it is when the phrase is worked out.

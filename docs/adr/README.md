@@ -78,18 +78,18 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   global literal skill is not made general, and the router still stores a more general proposal beside
   a literal skill; two agents' proposals for one command named differently still make two rows, and a
   writer that joins a row drops its own scenario and slot names; a value that begins with `-` is never
-  read back out of a command; a seed that names a value is never made general; and the
-  compare-and-swap has run only against local files.
+  read back out of a command; a seed that names a value is never made general; once a skill is
+  chosen, a flag still reaches its slot as a value the agent works out, a System 1 pick of an entry
+  named `-…`, or a default; and the compare-and-swap has run only against local files.
 - [20](0020-write-back.md): a refused repeat ends the correction with no second chance for the agent;
   a command that does the same thing in other words is not recognised as the rejected one; a
-  rejected `ls {directory}` also refuses `ls -la` until `match_template` stops a slot taking a flag; a
   confident System 1 route leaves a counter-example of its skill in place; and a path's written form
   is found with the environment as it is when the phrase is worked out, never for a bare `~` or `~user`.
 - [21](0021-hand-edits.md): `jli alias` and exactly three words is read as the command, never as a
-  request; a forgotten phrasing that System 1 still routes to its skill comes back as an example while
-  it stays a counter-example; `jli eval` still replays an accepted request in those words as evidence
-  for the skill; there is no alias for one project only; and the edits have run only against local
-  files.
+  request; a yes to a route of a forgotten phrasing to its skill below 0.95 makes it an example again
+  and lifts the counter-example, so the edit is undone (at 0.95 or above nothing is written); `jli
+  eval` still replays an accepted request in those words as evidence for the skill; there is no alias
+  for one project only; and the edits have run only against local files.
 - [22](0022-project-scenarios.md): a project's scenario has no path to the global row; a project
   with one does not see later global rewrites, and only `eval undo` or `forget --global` drops it; a
   rewrite in a project cannot drop a global row's phrasing; a counter-example already listed as an

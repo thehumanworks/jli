@@ -61,6 +61,42 @@ What follows, by caller:
   command, so the request becomes a counter-example of the skill that was turned down.
 - `generalize`: a proposal that slots a flag is still refused as `it made a flag a slot`, now worked
   out from the match itself.
+- The agent's proposal in the router, added after this record was first written: the agent can give a
+  flag as a value without any match, by naming a known skill as kind `existing` with `-` for
+  `{directory}`, or by proposing that skill's template under another slot name (`cd {dir}`, `dir = -`),
+  which `match_proposal` maps onto `cd {directory}`. Before the proposal is matched or checked against
+  the rejected skills (`flags_written_in`), every value that is a flag is written into the steps it
+  fills, and the slot is dropped: `cd {directory}` with `-` becomes the new proposal `cd -`, and
+  `ls {options} {directory}` with `-la` becomes `ls -la {directory}`, keeping its other slot. The trace
+  says `- is a flag, not a value for {directory} of go-to-directory, so cd - is a command of its own.`
+  From there the proposal goes the way of any new one: if a known skill runs `cd -` it is that skill,
+  if a rejected skill runs it it is refused ([ADR 20](0020-write-back.md)), and otherwise it is learned
+  as a new skill after a yes. A proposal named as a rejected template with a flag for its value is
+  therefore not refused, since the command it renders is not the rejected one. The kind `existing`
+  carries no scenario of its own, so an empty one becomes `the user wants: <request>` before System 1
+  checks it, as `learn_phrase` falls back. Tested in
+  `an_agent_proposal_that_gives_a_known_template_a_flag_is_a_command_of_its_own`, which fails without
+  it: the route went to `list-directory`, ran `ls -la` and linked the phrasing there.
+
+  This is the translator's rule applied to the agent. The other way to obey it, not believing the
+  proposal and running nothing, was weighed and not taken: the agent has said which command fits the
+  request, and only the reading of it as a known skill with a value is wrong. Teaching `cd -` beside
+  `cd {directory}` makes `cd -` a skill of its own, so an approved route to it does the same.
+
+**Where a flag can still reach a slot.** The rule holds wherever a command is read back into a
+template: a taught command, a translator's draft, an agent's proposal, `jli fix` and `generalize`.
+Once a skill is chosen, its slots are filled by `fill_slots` ([ADR 7](0007-slot-templates.md)), and
+there a value is not checked for a flag:
+
+- a value the person states (`directory=-`, a quoted `'-v'`), which [ADR 11](0011-stated-arguments.md)
+  passes as written, by design, as are the values a caller gives `jli run`;
+- a value the agent works out (`extract`) for a slot of a skill System 1 chose: `go back` routed by
+  System 1 to `cd {directory}` with the agent giving `-` runs `cd -`, and a yes below 0.95 links the
+  phrasing to `cd {directory}`;
+- a System 1 pick from the directory's entries, when an entry's name begins with `-`;
+- a slot's default, if a proposal or the translator wrote a flag there.
+
+A number found in the request never begins with `-` (`numbers_in` reads digits and number words).
 
 ### 2. A literal skill never absorbs a template
 
@@ -217,8 +253,12 @@ instantly 2 of 5 then 5 of 5, and spent 5.0 s deciding, then 1.3 s; a second run
 - **Known gap:** inside a project a global literal skill is not made general. The template becomes the
   project's own skill beside it, and the two compete for the same phrasings there until
   `teach --global`.
-- **Known gap:** the router is unchanged. An agent's proposal more general than a literal skill still
-  becomes a row beside it (ADR 13).
+- **Known gap:** the router does not make a literal skill general. An agent's proposal more general than
+  a literal skill still becomes a row beside it (ADR 13).
+- **Known gap:** a flag still reaches a slot through `fill_slots` once a skill is chosen: a value the
+  agent works out for a skill System 1 picked, a System 1 pick of an entry whose name begins with `-`,
+  and a default that is a flag. Only the first is likely, and it links the phrasing to the template as
+  #17 did. A stated value is passed as written on purpose (ADR 11).
 - **Known gap:** the claim compares only the row under its label, and only `learn_phrase` reads the
   matrix again. Two agents' proposals for one command, named differently and stored at once, still make
   two rows, and so can two teaches whose last read and insert interleave within milliseconds.
