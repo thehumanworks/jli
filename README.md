@@ -219,9 +219,10 @@ See [ADR 14](docs/adr/0014-shell-integration.md) and [ADR 23](docs/adr/0023-shel
 
 ## Slots
 
-Skills are templates such as `git log -n {count}` or `git commit -m {message}`. A flag is never a
-value: `cd -` is a skill of its own, not `cd {directory}` with `-`. A value you state is passed as
-written, by a parser and no model:
+Skills are templates such as `git log -n {count}` or `git commit -m {message}`. A flag is never read
+as a value, in a command you teach or one the agent proposes: `cd -` is a skill of its own, not
+`cd {directory}` with `-` ([ADR 19](docs/adr/0019-one-row-per-command.md)). A value you state
+is passed as written, by a parser and no model:
 
 ```sh
 jli commit message="fix the parser"            # name=value, for the slot called message

@@ -99,6 +99,13 @@ these went through the agent with `--agent`:
 | `SHELL=/bin/bash zsh -f -c 'jli -y --agent go into the directory sub'` | refused, exit 3, `add this line to ~/.zshrc`, `eval "$(jli shell-init zsh)"` |
 | `jli -y --agent one-line log of the newest 4 commits`, with `git log --oneline -n {count}` taught | `git log --oneline -n 4`; the count came from the agent, not from `numbers_in`, and the learned phrasing is `one-line log of the newest … commits` |
 
+Later on 2026-10-03, on the merged build of ADRs 19 to 23 (the integration branch), System 1 answered,
+so the number-word fix was run through it. On a fresh scratch brain, `jli teach "show the last 3
+commits" -- git log --oneline -n 3` made `git-log-latest` (`git log --oneline -n {count}`); then
+`jli -n one-line log of the newest 4 commits` was routed by System 1 to `git-log-latest` at 0.75 and
+rendered `git log --oneline -n 4`, with `{count} = 4 (from pattern)`: the count was read by
+`numbers_in`, with no model, and `one-line` gave none.
+
 ## Consequences
 
 - `one-line log of the newest 4 commits` fills `{count}` with 4 when System 1 picks the skill.
@@ -114,5 +121,3 @@ these went through the agent with `--agent`:
 - **Known gap:** `jli shell-init` with no argument still reads `$SHELL`.
 - **Known gap:** a sourced hand-off that sets its own INT trap in bash has it replaced by the user's
   earlier trap when the function returns.
-- **Known gap:** the number-word fix was not exercised live through System 1, whose key was rejected
-  on 2026-10-03; it is covered by the offline test only.

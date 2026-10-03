@@ -2491,6 +2491,76 @@ fn a_home_path_is_hidden_as_the_request_wrote_it() {
     assert!(scratch.brain.remove_example("show-dir", &again).unwrap());
 }
 
+#[test]
+fn an_agent_proposal_that_gives_a_known_template_a_flag_is_a_command_of_its_own() {
+    let scratch = Scratch::new("agent-flag-value");
+    directory_skill(&scratch, "list-directory", &["ls {directory}"]);
+    directory_skill(&scratch, "go-to-directory", &["cd {directory}"]);
+    let flag = |value: &str| json!([{ "name": "directory", "value": value }]);
+
+    // The agent names the known skill with `-la` for its directory, as the translator named `cd {directory}`
+    // with `-` for `cd -` (#17). The command it renders is a skill of its own, not a phrasing of that one.
+    let mut named = existing_proposal("list-directory");
+    named["slotValues"] = flag("-la");
+    let (models, _) = models(once_known("ls-la", decision(NONE, 0.4, 0.95, SAFE)), vec![("proposal", named)]);
+    let outcome = go(&scratch, &models, "show everything here in detail", &mut Script::default(), &yes(&scratch));
+    assert_eq!((outcome.label.as_deref(), outcome.ran, outcome.exit_code()), (Some("ls-la"), true, 0));
+    assert_eq!(outcome.commands, ["ls -la"]);
+    assert_eq!(outcome.learned, ["new skill ls-la"]);
+    let made = scratch.brain.skill("ls-la").unwrap().unwrap();
+    assert!(made.steps == ["ls -la"] && made.slots.is_empty(), "the flag is written into the command");
+    assert!(lists(&scratch, "list-directory").0.is_empty(), "-la is a flag, not a directory");
+
+    // A new proposal of the same template under another slot name, with the flag for its value, is that
+    // command too: here the row just made, which takes the phrasing.
+    let renamed = new_proposal("list-all", "ls {dir}", file_slot("dir"), json!([{ "name": "dir", "value": "-la" }]));
+    let (models, _) = self::models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", renamed)]);
+    let outcome = go(&scratch, &models, "long listing of this folder", &mut Script::default(), &yes(&scratch));
+    assert_eq!((outcome.label.as_deref(), outcome.commands.clone()), (Some("ls-la"), vec!["ls -la".to_string()]));
+    assert_eq!(outcome.learned, ["\"long listing of this folder\" means ls-la"]);
+    assert!(scratch.brain.skill("list-all").unwrap().is_none());
+    assert!(lists(&scratch, "list-directory").0.is_empty());
+
+    // `cd {directory}` with `-`, the case of the issue, shown in a dry run.
+    let mut back = existing_proposal("go-to-directory");
+    back["slotValues"] = flag("-");
+    let (models, _) = self::models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", back)]);
+    let dry = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "go back", &mut Script::default(), &dry);
+    assert_eq!((outcome.label.as_deref(), outcome.commands.clone()), (Some("cd"), vec!["cd -".to_string()]));
+}
+
+#[test]
+fn a_rejected_template_does_not_refuse_its_command_with_a_flag() {
+    let scratch = Scratch::new("rejected-flag");
+    std::fs::create_dir(scratch.work.join("sub")).unwrap();
+    directory_skill(&scratch, "list-directory", &["ls {directory}"]);
+    let mut listed = existing_proposal("list-directory");
+    listed["slotValues"] = json!([{ "name": "directory", "value": "sub" }]);
+    let (models, _) = models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", listed)]);
+    let ran = go(&scratch, &models, "what is in sub", &mut Script::default(), &yes(&scratch));
+    assert_eq!((ran.label.as_deref(), ran.commands.clone()), (Some("list-directory"), vec!["ls sub".to_string()]));
+
+    // `jli fix` rejects `ls {directory}`, and the agent proposes `ls -la`: a flag is never a slot value
+    // (ADR 19), so `ls -la` is not the rejected command, and it runs and is learned (ADR 20's gap closed).
+    let proposal = new_proposal("list-all", "ls -la", json!([]), json!([]));
+    let (models, _) = self::models(once_known("list-all", decision(NONE, 0.4, 0.95, SAFE)), vec![("proposal", proposal)]);
+    let fix = Fix { event: ran.event_id, how: FixHow::Unlearn, run: false };
+    assert_eq!(app(&scratch, "default", models).fix(&Flags::quiet_yes(), fix).unwrap(), 0, "run, not refused");
+    let event = scratch.brain.events(1).unwrap().remove(0);
+    assert!(event.accepted && event.label.as_deref() == Some("list-all"), "{event:?}");
+    assert_eq!(scratch.brain.skill("list-all").unwrap().unwrap().steps, ["ls -la"]);
+
+    // Named as the rejected skill with `-la` for its directory, the proposal is still `ls -la`, which
+    // the rejected template does not run: it is the row just learned, not a repeat.
+    let mut named = existing_proposal("list-directory");
+    named["slotValues"] = json!([{ "name": "directory", "value": "-la" }]);
+    let (models, _) = self::models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", named)]);
+    let rejected = RouteOptions { rejected: vec!["list-directory".into()], dry_run: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "what is in sub", &mut Script::default(), &rejected);
+    assert_eq!((code(&outcome), outcome.label.as_deref()), (Some("dry_run"), Some("list-all")));
+}
+
 // ── Hand edits: jli alias and jli forget-phrase (ADR 21) ────────────────────────
 
 use crate::hand::{self, AliasEdit, PhraseEdit};
@@ -2643,6 +2713,35 @@ fn a_phrasing_taught_to_the_wrong_skill_is_forgotten_and_kept_as_a_counter_examp
     // Teaching it back by hand lifts the counter-example, as for any phrasing.
     scratch.brain.link_phrase("directory-size", "size of each file here").unwrap();
     assert_eq!(lists(&scratch, "directory-size").1.len(), 0);
+}
+
+#[test]
+fn a_forgotten_phrasing_routed_back_to_its_skill_is_one_list_or_the_other() {
+    let scratch = Scratch::new("hand-forget-then-route");
+    directory_size(&scratch.brain, "directory-size");
+    let mut brain = mutable(&scratch);
+    let phrase = "size of each file here";
+    let forget = |brain: &mut Brain| hand::forget_phrase(brain, &phrase_edit("directory-size", phrase)).unwrap();
+    let route_at = |confidence: f64| {
+        let (models, _) = models(move |_| decision("directory-size", confidence, 0.95, SAFE), no_language_model());
+        go(&scratch, &models, phrase, &mut Script::default(), &yes(&scratch))
+    };
+    let only_examples = (vec!["how big is this folder".to_string(), phrase.to_string()], vec![]);
+    let only_counter = (vec!["how big is this folder".to_string()], vec![phrase.to_string()]);
+
+    // A route System 1 is unsure of (below 0.95), accepted, teaches the phrasing back: it is linked as
+    // teaching links it (ADR 20), so it leaves the counter-examples and the edit is undone, not doubled.
+    forget(&mut brain);
+    let outcome = route_at(0.9);
+    assert!(outcome.ran);
+    assert_eq!(outcome.learned, [format!("\"{phrase}\" means directory-size")]);
+    assert_eq!(lists(&scratch, "directory-size"), only_examples);
+
+    // A confident route (0.95 or above) writes nothing (ADR 5): the phrasing stays a counter-example only.
+    forget(&mut brain);
+    let outcome = route_at(0.96);
+    assert!(outcome.ran && outcome.learned.is_empty());
+    assert_eq!(lists(&scratch, "directory-size"), only_counter);
 }
 
 #[test]

@@ -9,16 +9,17 @@ use crate::context::{list_entries, read_context, Context};
 use crate::eval::verify_row;
 use crate::exec::{run, try_builtins, RunOptions, RunResult};
 use crate::learn::{learn_phrase, settle_proposed, LearnInput, Learned, Settled};
-use crate::llm::AGENT_MODEL;
+use crate::llm::{SlotDraft, AGENT_MODEL};
 use crate::plan::{self, CandidateInfo, PlanRecord, SlotInfo, SlotValue};
 use crate::shell::{first_caller_step, hand_off_text, safe_to_try, HandOff, Shell};
 use crate::slots::{
-    expand_path, fill_slots, match_proposal, match_template, render, render_fish, undeclared, Filled, Source, Template,
+    expand_path, fill_slots, is_flag, match_proposal, match_template, render, render_fish, undeclared, Filled, Source,
+    Template,
 };
 use crate::store::{slug, Brain, NewEvent, NewSkill};
 use crate::suggest::{suggest, Failure, SuggestInput, Suggestion, Verdict};
 use crate::system1::Decision;
-use crate::system2::{propose, ProposalKind, ProposeInput, Rejected};
+use crate::system2::{propose, Proposal, ProposalKind, ProposeInput, Rejected};
 use crate::types::error_code;
 use crate::types::{add_alias, with_checked_aliases, Mode, Origin, Path, Risk, Skill, Slot, SlotKind};
 use crate::ui::{c, fixed, Prompt, Ui};
@@ -499,6 +500,16 @@ impl Route<'_> {
                 ui.proposal(&proposal, ms);
                 let provided: HashMap<String, String> =
                     proposal.slot_values.iter().map(|slot| (slot.name.clone(), slot.value.clone())).collect();
+                // A flag is never a slot value (ADR 19): given one, the proposal is the command with the flag
+                // written in, which no known skill's slot stands for. Looked up among every skill, so a
+                // rejected template named with a flag is not taken for the rejected command below.
+                let (proposal, provided) = match flags_written_in(&proposal, &provided, &self.all_skills, &self.phrase) {
+                    Some((written, provided, why)) => {
+                        ui.note(why);
+                        (written, provided)
+                    }
+                    None => (proposal, provided),
+                };
                 let existing = match proposal.kind {
                     ProposalKind::Existing => {
                         skills.iter().find(|skill| Some(&skill.label) == proposal.existing_label.as_ref()).cloned()
@@ -1134,6 +1145,63 @@ impl Route<'_> {
 /// with another slot value is not: that skill was right.
 pub fn is_another_command(wrong: &[String], steps: &[String]) -> bool {
     match_template(wrong, &steps.join(" && ")).is_none()
+}
+
+/// A proposal that gives a flag for a slot's value, of the known skill it names or of its own template, as
+/// the command with the flag written into its steps: `cd {directory}` with `-` is `cd -`, and `ls {options}
+/// {directory}` with `-la` is `ls -la {directory}`. A translator's draft is refused the same way when a
+/// command is taught (ADR 19). Returns the new proposal, the values left and what to tell the person;
+/// None when no value the steps use is a flag.
+fn flags_written_in(
+    proposal: &Proposal,
+    provided: &HashMap<String, String>,
+    skills: &[Skill],
+    phrase: &str,
+) -> Option<(Proposal, HashMap<String, String>, String)> {
+    let named = match proposal.kind {
+        ProposalKind::Existing => Some(skills.iter().find(|skill| Some(&skill.label) == proposal.existing_label.as_ref())?),
+        ProposalKind::New => None,
+        ProposalKind::NotACommand => return None,
+    };
+    let draft = |slot: &Slot| SlotDraft {
+        name: slot.name.clone(),
+        kind: slot.kind,
+        description: slot.description.clone(),
+        default: slot.default.clone(),
+        aliases: slot.aliases.clone(),
+    };
+    let (steps, slots): (Vec<String>, Vec<SlotDraft>) = match named {
+        Some(skill) => (skill.steps.clone(), skill.slots.iter().map(draft).collect()),
+        None => (proposal.steps.clone(), proposal.slots.clone()),
+    };
+    let used = undeclared(&steps, &[]);
+    let flags: HashMap<String, String> = provided
+        .iter()
+        .filter(|(name, value)| used.contains(name) && is_flag(value))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    let (name, value) = flags.iter().min_by_key(|(name, _)| used.iter().position(|seen| seen == *name))?;
+    let steps = render(&steps, &flags);
+    let whose = named.map(|skill| format!(" of {}", c::bold(&skill.label))).unwrap_or_default();
+    let why =
+        format!("{value} is a flag, not a value for {{{name}}}{whose}, so {} is a command of its own.", steps.join(" && "));
+    let written = Proposal {
+        kind: ProposalKind::New,
+        existing_label: None,
+        label: if named.is_some() { None } else { proposal.label.clone() },
+        steps,
+        scenario: if proposal.scenario.trim().is_empty() {
+            format!("the user wants: {phrase}")
+        } else {
+            proposal.scenario.clone()
+        },
+        slots: slots.into_iter().filter(|slot| !flags.contains_key(&slot.name)).collect(),
+        slot_values: proposal.slot_values.iter().filter(|slot| !flags.contains_key(&slot.name)).cloned().collect(),
+        risk: named.map_or(proposal.risk, |skill| proposal.risk.max(skill.risk)),
+        ..proposal.clone()
+    };
+    let left = provided.iter().filter(|(name, _)| !flags.contains_key(*name));
+    Some((written, left.map(|(name, value)| (name.clone(), value.clone())).collect(), why))
 }
 
 /// Whether a skill's steps run the proposed command: the same template (`match_proposal`), or, once

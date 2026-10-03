@@ -78,14 +78,19 @@ Two reasons, one from the router and one from projects:
   System 1 picked the skill below 0.95 ([ADR 5](0005-routing-loop.md)). A phrasing taught to the
   wrong skill was usually taught because the skill's scenario looks close to it, so System 1 is
   likely to pick the skill again and the next yes undoes the edit. As a counter-example the phrasing
-  goes to System 1 under `doesNotApplyTo`, which is what it is.
+  goes to System 1 under `doesNotApplyTo`, which is what it is. The counter-example makes that pick
+  less likely; it does not forbid it. If System 1 still picks the skill below 0.95 and the person says
+  yes, the write-back links the phrasing as teaching does ([ADR 20](0020-write-back.md)): it is an
+  example again and leaves the counter-examples. A pick at 0.95 or above writes nothing and leaves the
+  counter-example as it is.
 - **Inside a project it is the only way to hide a global phrasing.** A project never writes a global
   row; it keeps a lesson, and a lesson hides a row's example only by holding it as a counter-example
   (`with_lesson`, ADR 17).
 
 So the rule is the same in every scope, and it is what `jli fix` already does to the phrasing it
 unlearns. It is undone the way any counter-example is: `jli teach "<phrase>" -- <command>` links
-the phrase to the skill that runs the command and lifts it from that skill's counter-examples.
+the phrase to the skill that runs the command and lifts it from that skill's counter-examples, and
+so does a yes to a route of the phrase to the skill below 0.95.
 Removing without a counter-example was rejected for the two reasons above; a person who only wants
 a list tidied loses nothing by the counter-example except one place in the newest 16.
 
@@ -165,6 +170,19 @@ interactive session of two confirmed requests left with ctrl-d, exit 0; `jli dem
 instantly 2 of 5 then 5 of 5, deciding 4.9 s then 1.3 s. Check 13 was not run: the TypeScript version
 is not available.
 
+**Later on 2026-10-03, on the merged build** of ADRs 19 to 23 (the integration branch), with
+[ADR 20](0020-write-back.md)'s write-back in place, on a fresh scratch brain. `du -sh .` was taught as
+`get-folder-size` with "how big is this folder", "size of everything in here" and "total disk space
+used by this directory".
+
+| Step | Result |
+| --- | --- |
+| `forget-phrase get-folder-size "size of everything in here"`, then `-y size of everything in here` | System 1 picked `list-files-with-sizes` at 0.71 (`get-folder-size` 0.26) and the phrasing was learned there; on `get-folder-size` it stayed a counter-example only. The same request with `--agent` also went to `list-files-with-sizes` |
+| `forget-phrase get-folder-size "total disk space used by this directory"`, then `-y` that request, twice | System 1 picked `get-folder-size` at 0.84, then 0.83; `du -sh .` ran, and each time the phrasing was an example again and was gone from the counter-examples: the yes undid the edit, and no phrasing was in both lists |
+
+A route back to the skill at 0.95 or above, which writes nothing, was not reproduced live; the offline
+test covers it.
+
 ## Consequences
 
 - A wrong alias or a mis-taught phrasing costs one command, not the skill and everything else it
@@ -174,9 +192,15 @@ is not available.
   and the message says so. A phrasing forgotten there changes that project only.
 - **Known gap:** `jli alias` followed by exactly three words is read as the command, so a request
   shaped like that, `jli alias gs git status`, is refused as `No skill called gs.` instead of routed.
-- **Known gap:** a forgotten phrasing that System 1 still routes to the skill, after a yes below
-  0.95, is added back to its examples while it stays a counter-example: the write-back's
-  `add_example` does not lift a counter-example, as `link_phrase` does.
+- A forgotten phrasing that System 1 still routes to the skill is in one list or the other, never
+  both. When this record was written the write-back added it back with `add_example` and left the
+  counter-example; [ADR 20](0020-write-back.md) made it use `link_phrase`. Now, after a yes to a route
+  below 0.95 (or one the agent made), the phrasing is an example again and is no longer a
+  counter-example: the yes undoes the edit. A route at 0.95 or above writes nothing, so the phrasing
+  stays a counter-example and nothing else. `a_forgotten_phrasing_routed_back_to_its_skill_is_one_list_or_the_other`
+  checks both.
+- **Known gap:** a yes to such a route below 0.95 undoes the edit, so a person who forgot a phrasing
+  and then says yes to it out of habit has taught it back.
 - **Known gap:** forgetting a phrasing does not touch the events log, so `jli eval` still replays an
   accepted request in those words as evidence for the skill ([ADR 16](0016-measuring-the-matrix.md)).
 - **Known gap:** the measurement still cannot recognise a mis-taught example by itself
