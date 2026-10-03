@@ -1,6 +1,7 @@
 # 5. One routing loop, one confirmation rule, and a CLI that composes in pipes
 
-- Status: accepted
+- Status: accepted; superseded in part by [ADR 13](0013-learning-fixes.md), which also learns a
+  new proposal that failed for a reason that is not the command's fault
 - Date: 2026-10-02
 - Origin: the TypeScript prototype; kept unchanged by the Rust port
 

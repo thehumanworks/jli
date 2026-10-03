@@ -9,7 +9,7 @@ use crate::context::{list_entries, read_context, Context};
 use crate::exec::{run, RunOptions};
 use crate::learn::{learn_phrase, LearnInput};
 use crate::llm::AGENT_MODEL;
-use crate::slots::{fill_slots, match_template, render, undeclared, Source, Template};
+use crate::slots::{fill_slots, match_proposal, match_template, render, undeclared, Source, Template};
 use crate::store::{slug, Brain, NewEvent, NewSkill};
 use crate::suggest::{suggest, Failure, SuggestInput, Suggestion, Verdict};
 use crate::system1::Decision;
@@ -339,6 +339,20 @@ impl Route<'_> {
                     }
                     _ => None,
                 };
+                // A "new" command that a known skill already produces is that skill, as in `learn_phrase`:
+                // a second row would compete with it for the same phrasings.
+                let (existing, provided) = match existing {
+                    None if proposal.kind != ProposalKind::NotACommand => skills
+                        .iter()
+                        .find_map(|skill| {
+                            match_proposal(&skill.steps, &proposal.steps, &provided).map(|values| (skill.clone(), values))
+                        })
+                        .map_or((None, provided), |(skill, values)| {
+                            ui.note(format!("{} already runs this command, so that skill is used.", c::bold(&skill.label)));
+                            (Some(skill), values)
+                        }),
+                    existing => (existing, provided),
+                };
                 let confidence = decision.as_ref().map(|decided| decided.confidence);
 
                 if proposal.kind == ProposalKind::NotACommand || (existing.is_none() && proposal.steps.is_empty()) {
@@ -452,7 +466,8 @@ impl Route<'_> {
 
         // ── Permission: one question, every time, unless --yes or --yolo ───────────────────
         let destructive = plan.risk == Risk::Destructive;
-        let approved = if options.yolo || (options.yes && !destructive) { Some(true) } else { prompt.confirm("Run it?") };
+        let asked = !(options.yolo || (options.yes && !destructive));
+        let approved = if asked { prompt.confirm("Run it?") } else { Some(true) };
         let Some(approved) = approved else {
             self.outcome.blocked = Some(
                 if destructive { "destructive commands need an interactive yes or --yolo" } else { "needs confirmation" }
@@ -475,11 +490,10 @@ impl Route<'_> {
         }
 
         // ── Execute ───────────────────────────────────────────────────────────────
-        let result = run(
-            &self.outcome.commands,
-            &options.cwd,
-            RunOptions { capture: options.capture, watch_stderr: options.mode == Mode::Auto },
-        )?;
+        // A new proposal's stderr is watched too, so a failure with nothing to say can be told apart.
+        let watch_stderr = options.mode == Mode::Auto || plan.is_new;
+        let result = run(&self.outcome.commands, &options.cwd, RunOptions { capture: options.capture, watch_stderr })?;
+        let stderr_seen = options.capture || watch_stderr;
         self.outcome.ran = true;
         self.outcome.exit_code = Some(result.exit_code);
         self.outcome.output = result.output.clone();
@@ -488,6 +502,7 @@ impl Route<'_> {
         }
 
         // ── Auto mode: a failure is feedback, but only a diagnosis says what kind ──
+        let mut diagnosed = None;
         if options.mode == Mode::Auto && result.exit_code != 0 {
             let failure = Failure { exit_code: result.exit_code, stderr: result.stderr.clone() };
             if let Some(diagnosis) = self.diagnose(Some(failure)) {
@@ -501,6 +516,7 @@ impl Route<'_> {
                 ui.line(format!("   {}", diagnosis.explanation));
                 // An environment problem says nothing about the route, so nothing is unlearned or offered.
                 let verdict = diagnosis.verdict;
+                diagnosed = Some(verdict);
                 if matches!(verdict, Verdict::WrongCommand | Verdict::WrongValue) {
                     if let Some(corrected) =
                         self.correct(prompt, &plan, Some(diagnosis), verdict == Verdict::WrongCommand)?
@@ -526,7 +542,20 @@ impl Route<'_> {
             }
         }
         if plan.is_new {
-            if result.exit_code == 0 {
+            // A failure that is not the command's fault still teaches the route: a diagnosis that says
+            // so, or exit 1 with nothing on stderr after a person said yes (grep finding no match,
+            // diff finding a difference). Under --yes or --yolo only a clean exit counts.
+            let blameless = if diagnosed == Some(Verdict::Environment) {
+                Some("the diagnosis put the failure on where it ran")
+            } else if result.exit_code == 1 && asked && stderr_seen && result.stderr.trim().is_empty() {
+                Some("it exited 1 with nothing on stderr, which is an answer and not an error")
+            } else {
+                None
+            };
+            if let Some(reason) = blameless {
+                ui.note(format!("The command did not exit 0, but {reason}, so the proposal is learned."));
+            }
+            if result.exit_code == 0 || blameless.is_some() {
                 // Another writer may have taken the label since it was shown; the skill then gets the next free one.
                 let label = self.brain.add_new_skill(&NewSkill {
                     label: skill.label.clone(),

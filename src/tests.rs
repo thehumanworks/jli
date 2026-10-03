@@ -25,6 +25,11 @@ struct Scratch {
 
 impl Scratch {
     fn new(name: &str) -> Scratch {
+        // A git hook exports where the repository is, and in a worktree that path is absolute, so
+        // `git` run in the scratch directory would find this repository. The tests expect no repository.
+        for variable in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
+            std::env::remove_var(variable);
+        }
         let root = std::env::temp_dir().join(format!(
             "jli-test-{name}-{}-{}",
             std::process::id(),
@@ -455,7 +460,7 @@ fn an_agent_proposal_that_runs_becomes_a_skill() {
     assert_eq!(outcome.learned, ["new skill count-lines"]);
     let skill = scratch.brain.skill("count-lines").unwrap().unwrap();
     assert_eq!((skill.origin, skill.uses), (Origin::Agent, 1));
-    assert_eq!(skill.examples, ["how many lines are in notes.txt"]);
+    assert_eq!(skill.examples, ["how many lines are in …"], "the shape of the request, not the file it named");
     assert_eq!(skill.slots[0].kind, SlotKind::File);
 
     let body = &replies.seen.lock().unwrap()[0];
@@ -713,6 +718,151 @@ fn an_unreachable_translator_falls_back_to_manual() {
     assert_eq!((skill.scenario.as_str(), skill.risk), ("the user wants: how big is this folder", Risk::Safe));
 }
 
+fn first_lines_skill(scratch: &Scratch) {
+    std::fs::write(scratch.work.join("notes.txt"), "one\ntwo\nthree\n").unwrap();
+    scratch
+        .brain
+        .add_skill(&NewSkill {
+            label: "first-lines".into(),
+            steps: vec!["head -n {count} notes.txt".into()],
+            scenario: "the user wants the first lines of the notes".into(),
+            risk: Risk::Safe,
+            origin: Origin::Taught,
+            examples: vec!["top of the notes".into()],
+            slots: vec![Slot {
+                name: "count".into(),
+                kind: SlotKind::Number,
+                description: "how many lines".into(),
+                default: None,
+                aliases: vec![],
+            }],
+        })
+        .unwrap();
+}
+
+fn new_proposal(label: &str, step: &str, slots: Value, values: Value) -> Value {
+    json!({
+        "kind": "new", "existingLabel": null, "label": label, "steps": [step],
+        "scenario": "the user wants it", "slots": slots, "slotValues": values,
+        "risk": "safe", "explanation": "Does it.", "answer": null,
+    })
+}
+
+#[test]
+fn a_new_proposal_that_a_known_skill_already_runs_is_that_skill() {
+    let scratch = Scratch::new("same-as-known");
+    first_lines_skill(&scratch);
+    let before = scratch.brain.skills().unwrap().len();
+    // The agent calls the slot {lines} and gives its value under that name.
+    let proposal = new_proposal(
+        "head-of-notes",
+        "head -n {lines} notes.txt",
+        json!([{ "name": "lines", "kind": "number", "description": "how many", "default": null }]),
+        json!([{ "name": "lines", "value": "2" }]),
+    );
+    let (models, _) = models(|_| decision("first-lines", 0.3, 0.95, SAFE), vec![("proposal", proposal)]);
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "print the opening couple of lines", &mut Script::default(), &options);
+    assert_eq!((outcome.path, outcome.label.as_deref()), (Path::System2, Some("first-lines")));
+    assert_eq!(outcome.commands, ["head -n 2 notes.txt"], "the agent's value reaches the known slot");
+    assert_eq!(outcome.output.as_deref(), Some("one\ntwo\n"));
+    assert_eq!(outcome.learned, ["\"print the opening couple of lines\" means first-lines"]);
+    assert_eq!(scratch.brain.skills().unwrap().len(), before, "no second row");
+    let skill = scratch.brain.skill("first-lines").unwrap().unwrap();
+    assert_eq!(skill.examples, ["top of the notes", "print the opening couple of lines"]);
+
+    // A literal command that a seeded skill runs, and the same command once that skill is rejected.
+    let proposal = new_proposal("list-by-date", "ls -ltr", json!([]), json!([]));
+    let (models, _) = self::models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", proposal.clone())]);
+    let dry = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "files by date", &mut Script::default(), &dry);
+    assert_eq!(outcome.label.as_deref(), Some("list-files-by-time"));
+    let (models, _) = self::models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", proposal)]);
+    let rejected = RouteOptions { rejected: vec!["list-files-by-time".into()], ..dry };
+    let outcome = go(&scratch, &models, "files by date", &mut Script::default(), &rejected);
+    assert_eq!(outcome.label.as_deref(), Some("list-by-date"), "a rejected skill is never chosen again");
+}
+
+#[test]
+fn a_learned_phrasing_hides_every_value_and_jli_fix_finds_it_again() {
+    let scratch = Scratch::new("shape");
+    first_lines_skill(&scratch);
+    greeting_skill(&scratch);
+    let (models, _) = models(
+        |request| match request["state"]["request"].as_str().unwrap() {
+            text if text.starts_with("greet") => decision("greet", 0.6, 0.9, SAFE),
+            _ => decision("first-lines", 0.6, 0.9, SAFE),
+        },
+        no_language_model(),
+    );
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
+    for (request, learned) in [
+        ("show the first three lines of the notes", "show the first … lines of the notes"),
+        ("greet name=\"Ada L\" greeting=hello 3 times", "greet name=\"…\" greeting=… … times"),
+    ] {
+        let outcome = go(&scratch, &models, request, &mut Script::default(), &options);
+        assert!(outcome.ran, "{request}");
+        assert_eq!(outcome.learned, [format!("\"{learned}\" means {}", outcome.label.clone().unwrap())]);
+
+        // What `jli fix` works out from the event log is exactly what was stored.
+        let event = scratch.brain.events(1).unwrap().remove(0);
+        let label = event.label.clone().unwrap();
+        let skill = scratch.brain.skill(&label).unwrap().unwrap();
+        assert!(skill.examples.contains(&learned.to_string()));
+        let again = crate::slots::learned_phrase(&event.query, &skill.steps, &skill.slots, event.command.as_deref());
+        assert_eq!(again, learned);
+        assert!(scratch.brain.remove_example(&label, &again).unwrap());
+    }
+}
+
+#[test]
+fn exit_1_with_nothing_on_stderr_after_a_yes_still_teaches_a_new_skill() {
+    let grep = || new_proposal("find-todos", "grep -rn TODO .", json!([]), json!([]));
+    // Captured (--json) and streamed: in both, a new proposal's stderr is seen.
+    for capture in [true, false] {
+        let scratch = Scratch::new("exit-one");
+        let (models, _) = models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", grep())]);
+        let options = RouteOptions { capture, ..scratch.options(Mode::Semi) };
+        let outcome = go(&scratch, &models, "where are my todos", &mut Script::new(&[Some(true)], &[]), &options);
+        assert_eq!(outcome.exit_code, Some(1), "grep found nothing");
+        assert_eq!(outcome.learned, ["new skill find-todos"], "capture: {capture}");
+    }
+
+    // Under --yes nobody vouched for it, so only a clean exit counts.
+    let scratch = Scratch::new("exit-one-yes");
+    let (models, _) = models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", grep())]);
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "where are my todos", &mut Script::default(), &options);
+    assert_eq!(outcome.exit_code, Some(1));
+    assert!(outcome.learned.is_empty());
+    assert!(scratch.brain.skill("find-todos").unwrap().is_none());
+
+    // Exit 1 with an error on stderr is a failure, yes or not.
+    let cat = new_proposal("show-notes", "cat notes.txt", json!([]), json!([]));
+    let (models, _) = self::models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", cat)]);
+    let options = scratch.options(Mode::Semi);
+    let outcome = go(&scratch, &models, "show my notes", &mut Script::new(&[Some(true)], &[]), &options);
+    assert_eq!(outcome.exit_code, Some(1));
+    assert!(outcome.learned.is_empty());
+    assert!(scratch.brain.skill("show-notes").unwrap().is_none());
+}
+
+#[test]
+fn auto_mode_learns_a_new_skill_that_failed_where_it_ran() {
+    let scratch = Scratch::new("auto-env-new");
+    let proposal = new_proposal("git-branches", "git branch -a", json!([]), json!([]));
+    let suggestion = json!({
+        "verdict": "environment", "explanation": "This directory is not a git repository.", "options": [],
+    });
+    let (models, _) = models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", proposal), ("suggestion", suggestion)]);
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Auto) };
+    let outcome = go(&scratch, &models, "list every branch", &mut Script::default(), &options);
+    assert_eq!(outcome.exit_code, Some(128));
+    assert_eq!(outcome.learned, ["new skill git-branches"]);
+    let skill = scratch.brain.skill("git-branches").unwrap().unwrap();
+    assert_eq!(skill.examples, ["list every branch"]);
+}
+
 #[test]
 fn the_json_outcome_keeps_its_field_names_and_order() {
     let scratch = Scratch::new("json");
@@ -792,7 +942,10 @@ fn a_skill_one_user_taught_is_invisible_to_every_other_user() {
     assert_eq!(agent.events(10).unwrap().len(), 1);
     assert_eq!(agent.skill("du-sh").unwrap().unwrap().uses, 1);
     assert_eq!(scratch.brain.events(10).unwrap().len(), 1, "the default user's own requests only");
-    assert!(scratch.brain.last_executed().unwrap().is_none(), "so its fix cannot reach the agent's run");
+    assert!(
+        scratch.brain.last_executed(&scratch.work.to_string_lossy()).unwrap().is_none(),
+        "so its fix cannot reach the agent's run"
+    );
 }
 
 #[test]

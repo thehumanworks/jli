@@ -1,6 +1,7 @@
 # 8. A "no" or a failed command is a lesson, but only a diagnosis says what kind
 
-- Status: accepted
+- Status: accepted; superseded in part by [ADR 13](0013-learning-fixes.md): bare `jli fix`
+  unlearns this host's last route in this directory
 - Date: 2026-10-02
 - Origin: the TypeScript prototype; kept unchanged by the Rust port
 

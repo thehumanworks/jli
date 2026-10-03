@@ -863,11 +863,16 @@ impl Brain {
         )
     }
 
-    pub fn last_executed(&self) -> Result<Option<BrainEvent>> {
+    /// The newest route this user ran on this host in `cwd`. Other hosts and other directories share
+    /// the brain, and their last route is not the one the person here means.
+    pub fn last_executed(&self, cwd: &str) -> Result<Option<BrainEvent>> {
         let (table, rows) = (self.scope.events(), self.scope.rows());
         let rows = self.query(
-            &format!("SELECT {EVENT_COLUMNS} FROM {table} WHERE {rows} AND label IS NOT NULL AND accepted = 1 ORDER BY id DESC LIMIT 1"),
-            self.scope.args(vec![]),
+            &format!(
+                "SELECT {EVENT_COLUMNS} FROM {table} WHERE {rows} AND label IS NOT NULL AND accepted = 1 AND host = ? AND cwd = ?
+                 ORDER BY id DESC LIMIT 1"
+            ),
+            self.scope.args(vec![host().into(), cwd.into()]),
             to_event,
         )?;
         Ok(rows.into_iter().next())
@@ -1023,14 +1028,14 @@ mod tests {
         assert_eq!((skill.uses, skill.counter_examples.as_slice()), (3, ["free space".to_string()].as_slice()));
         assert_eq!(brain.setting("mode").unwrap().as_deref(), Some("manual"));
         assert_eq!(brain.events(10).unwrap().len(), 1);
-        assert_eq!(brain.last_executed().unwrap().unwrap().label.as_deref(), Some("du-sh"));
+        assert_eq!(brain.events(10).unwrap()[0].label.as_deref(), Some("du-sh"));
         assert!(!brain.location().contains(", user "), "the default user is not named");
 
         let agent = scratch.brain_as("agent");
         assert_eq!(agent.skills().unwrap().len(), 9, "a new user starts from the seeds");
         assert!(agent.skill("du-sh").unwrap().is_none());
         assert_eq!(agent.setting("mode").unwrap(), None, "settings are the user's own");
-        assert!(agent.events(10).unwrap().is_empty() && agent.last_executed().unwrap().is_none());
+        assert!(agent.events(10).unwrap().is_empty() && agent.last_executed("/tmp").unwrap().is_none());
         assert!(agent.location().ends_with(", user agent"));
         agent.learn_command("disk use", &["du -sh".into()], Risk::Safe).unwrap();
         agent.log_event(&event("du-sh")).unwrap();
@@ -1064,11 +1069,11 @@ mod tests {
 
         // Events have their own ids per user; one user's fix cannot reach another's.
         let theirs = a.log_event(&event("du-sh")).unwrap();
-        assert!(default.last_executed().unwrap().is_none() && b.last_executed().unwrap().is_none());
+        assert!(default.last_executed("/tmp").unwrap().is_none() && b.last_executed("/tmp").unwrap().is_none());
         let own = default.log_event(&event("git-status")).unwrap();
         assert_eq!(own, theirs, "both tables count from 1");
         default.mark_rejected(own).unwrap();
-        assert_eq!(a.last_executed().unwrap().unwrap().id, theirs);
+        assert_eq!(a.last_executed("/tmp").unwrap().unwrap().id, theirs);
         assert_eq!((a.events(10).unwrap().len(), default.events(10).unwrap().len(), b.events(10).unwrap().len()), (1, 1, 0));
 
         a.set_setting("confidence", "0.8").unwrap();
@@ -1432,10 +1437,15 @@ mod tests {
         assert_eq!(events[1].path, Path::System1);
         assert_eq!(events[1].ms_system2, None);
         assert_eq!(events[1].ts.len(), "2026-10-02T12:00:00.000Z".len());
-        let last = brain.last_executed().unwrap().unwrap();
+        // Newer routes run in another directory, and on another host in this one, are not this one's last.
+        brain.log_event(&NewEvent { cwd: "/elsewhere".into(), ..event.clone() }).unwrap();
+        let other_host = brain.log_event(&event).unwrap();
+        brain.execute("UPDATE events SET host = 'another-host' WHERE id = ?", vec![other_host.into()]).unwrap();
+        let last = brain.last_executed("/tmp").unwrap().unwrap();
         assert_eq!(last.id, first);
         brain.mark_rejected(first).unwrap();
-        assert!(brain.last_executed().unwrap().is_none());
+        assert!(brain.last_executed("/tmp").unwrap().is_none());
+        assert!(brain.last_executed("/elsewhere").unwrap().is_some());
         assert_eq!(brain.events(1).unwrap().len(), 1);
     }
 

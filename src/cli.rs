@@ -8,6 +8,7 @@ use crate::args;
 use crate::demo::run_demo;
 use crate::learn::{learn_phrase, LearnInput};
 use crate::router::{route, split_steps, Outcome, RouteOptions, DEFAULT_THRESHOLD};
+use crate::slots::learned_phrase;
 use crate::store::{user_id, Brain, BrainConfig, Shared, DEFAULT_USER};
 use crate::types::{BrainEvent, Mode, Path, Risk, DEFAULT_MODE};
 use crate::ui::{bar, c, duration, risk_tag, sparkline, Prompt, Terminal, Ui};
@@ -46,7 +47,7 @@ fn help() -> String {
   jli config                           show settings
   jli config confidence <0..1>         confidence System 1 needs before its pick is used (default 0.5)
   jli config mode <manual|semi|auto>   who does the teaching (default semi)
-  jli fix                              the last command was wrong: unlearn it and try again
+  jli fix                              the last command run here was wrong: unlearn it and try again
   jli forget <label>                   delete a skill
   jli share <label> --to <user>        give another user a copy of one of your skills
   jli sync                             sync the local replica with the cloud brain
@@ -414,18 +415,22 @@ impl App {
     }
 
     fn fix(&mut self, flags: &Flags) -> Result<i32> {
-        let last = self.brain.last_executed()?;
+        // The same text the router logs, so this directory's own events are the ones found.
+        let last = self.brain.last_executed(&cwd()?.to_string_lossy())?;
         let Some((last, label)) = last.and_then(|event| event.label.clone().map(|label| (event, label))) else {
-            say("Nothing to fix: no command has been run yet.");
+            say("Nothing to fix: no command has been run in this directory on this host yet.");
             return Ok(1);
         };
         if flags.dry_run {
             eprintln!("{}\n", c::dim(format!("  Dry run: would unlearn that \"{}\" means {label}.", last.query)));
         } else {
-            // What was learned is the request with its stated values hidden; older rows hold it whole.
-            let slots = self.brain.skill(&label)?.map(|skill| skill.slots).unwrap_or_default();
-            let phrase = args::phrase(&last.query, &slots);
+            // What was learned is the request with its values hidden: the stated ones (ADR 11), and every
+            // value the command ran with (ADR 13), read back from the command. Older rows hold less hidden.
+            let (steps, slots) = self.brain.skill(&label)?.map(|skill| (skill.steps, skill.slots)).unwrap_or_default();
+            let stated = args::phrase(&last.query, &slots);
+            let phrase = learned_phrase(&last.query, &steps, &slots, last.command.as_deref());
             self.brain.remove_example(&label, &last.query)?;
+            self.brain.remove_example(&label, &stated)?;
             self.brain.remove_example(&label, &phrase)?;
             self.brain.add_counter_example(&label, &phrase)?;
             self.brain.mark_rejected(last.id)?;

@@ -1,7 +1,8 @@
 # 11. Arguments stated in the request are read by a parser, before and instead of any model
 
 - Status: accepted; superseded in part by [ADR 12](0012-slot-aliases.md), which lets a key match a
-  slot's aliases and asks the agent about an unknown key before blocking
+  slot's aliases and asks the agent about an unknown key before blocking, and by
+  [ADR 13](0013-learning-fixes.md), which also hides every filled value in a learned phrasing
 - Date: 2026-10-02
 - Origin: the Rust version
 

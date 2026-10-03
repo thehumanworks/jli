@@ -28,7 +28,7 @@ Learning is writing to that database:
 
 | What happened | What is stored | Effect |
 | --- | --- | --- |
-| System 2 proposed a command and it ran | a new skill with the request as its first example | System 1 answers next time |
+| System 2 proposed a command and it ran, with exit 0 or a failure that was not the command's fault ([ADR 13](docs/adr/0013-learning-fixes.md)) | a new skill with the request as its first example, its values hidden; a command a skill already runs adds the phrasing to that skill instead | System 1 answers next time |
 | You said yes to "Run it?" | the phrasing, as an example of that skill | that phrasing becomes more confident |
 | You said no and typed the right command | a counter-example on the wrong skill, and the phrasing on the right one | it routes to your command next time |
 | You ran `jli teach` or `jli fix` | a phrasing, or a counter-example | same as above, by hand |
@@ -120,7 +120,7 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | `jli stats` | routing mix, latency, and the learning curve |
 | `jli history` | recent requests and how each was routed |
 | `jli teach "<phrase>" -- <command>` | link a phrase to a command; repeat to add more phrasings |
-| `jli fix` | the last command was wrong: unlearn it and ask the agent |
+| `jli fix` | the last command run here was wrong: unlearn it and ask the agent |
 | `jli forget <label>` | delete a skill |
 | `jli --user-id=<id> …` | any command, as another user with their own skills, history and settings (also `JLI_USER_ID`) |
 | `jli share <label> --to <user>` | give another user a copy of one of your skills |
@@ -154,6 +154,10 @@ slot as `{name}` in the command, with its other names below it. See
 Anything not stated is filled by the cheapest method that works: a number in the request, a System 1
 `choice` among the real files or branches, the agent, and last the slot's default. See
 [ADR 11](docs/adr/0011-stated-arguments.md).
+
+What is learned is the shape of a request, not the instance: every value the command ran with is
+hidden in the stored phrasing wherever it appears as a whole word, so `how many lines are in
+notes.txt` is kept as `how many lines are in …`. See [ADR 13](docs/adr/0013-learning-fixes.md).
 
 ## One brain for every host
 
@@ -204,7 +208,7 @@ sees only the default user. See [ADR 15](docs/adr/0015-user-scope.md).
 | `src/args.rs` | reads the arguments a request states: `name=value`, labels and quoted text |
 | `src/slots.rs` | fills and shell-quotes `{slot}` values |
 | `src/seed.rs` | the original hard-coded matrix, now only the seed for an empty brain |
-| `src/exec.rs` | runs the steps with `bash -c`, watching stderr in auto mode |
+| `src/exec.rs` | runs the steps with `bash -c`, watching stderr in auto mode and for a new proposal |
 | `src/cli.rs` | argument parsing, subcommands and the interactive session |
 | `src/ui.rs` | the trace on stderr, and the one owner of stdin |
 | `src/demo.rs` | the two-pass learning demo |
