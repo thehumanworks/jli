@@ -28,10 +28,10 @@ Learning is writing to that database:
 
 | What happened | What is stored | Effect |
 | --- | --- | --- |
-| System 2 proposed a command and it ran, with exit 0 or a failure that was not the command's fault ([ADR 13](docs/adr/0013-learning-fixes.md)) | a new skill with the request as its first example, its values hidden, once System 1 has checked it; a command a skill already runs adds the phrasing to that skill instead | System 1 answers next time |
-| You said yes to "Run it?" | the phrasing, as an example of that skill | that phrasing becomes more confident |
+| System 2 proposed a command and it ran, with exit 0 or a failure that was not the command's fault ([ADR 13](docs/adr/0013-learning-fixes.md)) | a new skill with the request as its first example, its values hidden, once System 1 has checked it; a command a skill already runs adds the phrasing to that skill instead, and drops it from that skill's counter-examples ([ADR 20](docs/adr/0020-write-back.md)) | System 1 answers next time |
+| You said yes to "Run it?" | the phrasing, as an example of that skill and no longer a counter-example of it | that phrasing becomes more confident |
 | You said no and typed the right command | a counter-example on the wrong skill, and the phrasing on the right one | it routes to your command next time |
-| You ran `jli teach` or `jli fix` | a phrasing, or a counter-example | same as above, by hand |
+| You ran `jli teach` or `jli fix` | a phrasing, or a counter-example; if the agent then proposes the rejected command again, it is refused (`already_rejected`) and nothing is stored | same as above, by hand |
 | You wrote `dir=src` for a slot called `directory` | `dir` as another name for that slot | `dir=` is read with no model next time |
 
 One command can hold many phrasings. Teaching a phrase for a command that a skill already runs adds
@@ -244,7 +244,9 @@ the request, not only in the working directory, can be picked for a file slot. S
 
 What is learned is the shape of a request, not the instance: every value the command ran with is
 hidden in the stored phrasing wherever it appears as a whole word, so `how many lines are in
-notes.txt` is kept as `how many lines are in …`. See [ADR 13](docs/adr/0013-learning-fixes.md).
+notes.txt` is kept as `how many lines are in …`. A file value is hidden as the request wrote it, so
+`~/notes/n.txt` goes too, though the command ran with `/Users/you/notes/n.txt`. See
+[ADR 13](docs/adr/0013-learning-fixes.md) and [ADR 20](docs/adr/0020-write-back.md).
 
 ## One brain for every host
 

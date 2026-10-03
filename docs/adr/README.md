@@ -29,6 +29,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [16](0016-measuring-the-matrix.md) | The matrix is measured against the brain's own evidence, optimised only where the measurement improves, and every new row is checked against its closest skills |
 | [17](0017-project-scope.md) | What is learned inside a project stays with it, global skills are still used there, and a project skill becomes global only with approval |
 | [18](0018-agent-contract.md) | A contract for agent callers: pinned plans, run in order, and corrections without a terminal |
+| [20](0020-write-back.md) | An accepted route links its phrasing, a rejected command is refused, and a path is hidden as it was typed |
 
 ## Known gaps, by record
 
@@ -43,9 +44,9 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   of live cases, not on the benchmark.
 - [12](0012-slot-aliases.md): one alias cannot be removed by hand, an unknown name is only noticed as
   `name=value`, and a skill with no slots still blocks on any argument.
-- [13](0013-learning-fixes.md): the duplicate check was verified offline only, a rejected skill can
-  come back as a second row, hiding is verbatim and case-sensitive, and hidden examples were
-  measured on the demo and six requests, not on a benchmark built for it.
+- [13](0013-learning-fixes.md): the duplicate check was verified offline only, hiding is verbatim
+  and case-sensitive, and hidden examples were measured on the demo and six requests, not on a
+  benchmark built for it.
 - [14](0014-shell-integration.md): handed-over steps that are not tried first count as a clean
   exit, the trial runs in bash whatever the calling shell is, fish has only been tested offline,
   jli's own session hands its steps over only when it ends, and `~user` is not expanded.
@@ -66,3 +67,8 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   skips the System 1 check; `jli run` refuses a plan with a `cd` even under the shell function; a plan
   blocked on an unknown argument runs without it once its slots are filled; `corrections` is shown
   nowhere; and the claim, like the rest of the cloud setup, has run only against local files.
+- [20](0020-write-back.md): a refused repeat ends the correction with no second chance for the agent;
+  a command that does the same thing in other words is not recognised as the rejected one; a
+  rejected `ls {directory}` also refuses `ls -la` until `match_template` stops a slot taking a flag; a
+  confident System 1 route leaves a counter-example of its skill in place; and a path's written form
+  is found with the environment as it is when the phrase is worked out, never for a bare `~` or `~user`.
