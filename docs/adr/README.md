@@ -32,6 +32,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [19](0019-one-row-per-command.md) | A flag is never a slot value, a literal skill is made general in place, and a label taken by the same command is joined |
 | [20](0020-write-back.md) | An accepted route links its phrasing, a rejected command is refused, and a path is hidden as it was typed |
 | [21](0021-hand-edits.md) | One slot name and one phrasing can be changed by hand, written where the router would write the same lesson |
+| [22](0022-project-scenarios.md) | A scenario rewritten inside a project is kept for that project, and the global row is left as it was |
 | [23](0023-shell-fixes-and-number-words.md) | The install line follows the running shell, the function cleans up after ctrl-c, and a hyphenated number word is not a count |
 
 ## Known gaps, by record
@@ -64,8 +65,8 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 - [17](0017-project-scope.md): an older jli ignores `.jlirc` and teaches the global skills inside a
   project; a lesson about a global skill blocks only the phrasing it was learned from, and has no
   path to global but `teach --global`; a stop between `generalize`'s two writes leaves both rows; a
-  project id cannot be renamed; there are no per-project settings; `eval --optimise` in a project
-  rewrites a global row in place; and the `generalization` prompt was measured on six live requests.
+  project id cannot be renamed; there are no per-project settings; and the `generalization` prompt
+  was measured on six live requests.
 - [18](0018-agent-contract.md): a dry run needs a writable brain; plan rows are never deleted; a plan
   does not notice that its skill changed after it was made; a proposal learned through `jli run`
   skips the System 1 check; `jli run` refuses a plan with a `cd` even under the shell function; a plan
@@ -89,6 +90,11 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   it stays a counter-example; `jli eval` still replays an accepted request in those words as evidence
   for the skill; there is no alias for one project only; and the edits have run only against local
   files.
+- [22](0022-project-scenarios.md): a project's scenario has no path to the global row; a project
+  with one does not see later global rewrites, and only `eval undo` or `forget --global` drops it; a
+  rewrite in a project cannot drop a global row's phrasing; a counter-example already listed as an
+  example in the project's lesson is not measured as it is written; a jli with ADR 17 but not ADR 22
+  still rewrites the global row from a project; and it was run live on one skill of one scratch brain.
 - [23](0023-shell-fixes-and-number-words.md): whether fish removes the hand-off file after a ctrl-c
   is not measured; with no shell among jli's ancestors the install line still follows `$SHELL`, as
   `jli shell-init` with no argument does; digits joined by `-` are still numbers; and the number-word

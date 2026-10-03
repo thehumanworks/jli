@@ -545,6 +545,78 @@ fn a_dry_run_optimisation_shows_the_change_and_applies_none() {
     assert!(scratch.brain.meta_with_prefix("").unwrap().iter().all(|(key, _)| key == "seeded"), "no meta at all");
 }
 
+/// What a project is shown for disk-usage: its scenario in the System 1 criteria, and as `skill` reads it.
+fn disk_usage_scenario(scratch: &Scratch, brain: &Brain) -> (Value, String) {
+    let shown = criteria(scratch, brain, "how big is it")["disk-usage"]["scenario"].clone();
+    (shown, brain.skill("disk-usage").unwrap().unwrap().scenario)
+}
+
+#[test]
+fn a_rewrite_measured_in_a_project_stays_in_that_project() {
+    let scratch = Scratch::new("optimise-project");
+    optimisable_brain(&scratch);
+    let (a, b) = (in_project(&scratch, "a"), in_project(&scratch, "b"));
+    let (old, new) = ("the user wants disk use", "the user wants the total size of the current directory");
+    let (models, _) = models(optimisable(false), vec![("matrix_rewrite", sharper())]);
+    let report = eval::run(&a, &models, &options(&scratch, false, bounds()), &quiet()).unwrap();
+    let change = &report.optimisation.unwrap().changes[0];
+    assert!(change.kept, "{:?}", change.problem);
+
+    // Project a routes with the rewrite.
+    assert_eq!(disk_usage_scenario(&scratch, &a), (json!(new), new.to_string()));
+    assert_eq!(a.skill("count-lines").unwrap().unwrap().counter_examples, ["how much disk this takes"]);
+
+    assert_eq!((change.project.as_deref(), change.project_had_scenario), (Some("a"), false));
+    assert_eq!(a.project_scenarios().unwrap(), ["disk-usage"]);
+
+    // Outside it, and in project b, nothing changed: the global row is as it was.
+    for elsewhere in [&scratch.brain, &b] {
+        assert_eq!(disk_usage_scenario(&scratch, elsewhere), (json!(old), old.to_string()));
+        assert!(elsewhere.skill("count-lines").unwrap().unwrap().counter_examples.is_empty());
+        assert!(elsewhere.project_scenarios().unwrap().is_empty());
+    }
+
+    // The change is on record in project a, so it is undone there and from nowhere else.
+    assert!(eval::undo(&scratch.brain, None, false).is_err());
+    assert!(eval::undo(&b, None, false).is_err());
+    let undone = eval::undo(&a, None, false).unwrap();
+    assert_eq!((undone.project.as_deref(), undone.scenario.as_str()), (Some("a"), old));
+    assert_eq!(disk_usage_scenario(&scratch, &a), (json!(old), old.to_string()));
+    assert!(a.project_scenarios().unwrap().is_empty(), "project a sees the global scenario again");
+    assert!(a.skill("count-lines").unwrap().unwrap().counter_examples.is_empty());
+}
+
+#[test]
+fn a_project_cannot_drop_a_global_phrasing_and_undo_puts_back_its_own_scenario() {
+    let scratch = Scratch::new("optimise-project-own");
+    optimisable_brain(&scratch);
+    let a = in_project(&scratch, "a");
+    let own = "the user wants disk use in this checkout";
+    assert!(a.set_scenario("disk-usage", own).unwrap());
+    let drop_only = json!({
+        "scenario": own, "dropExamples": ["space used here"], "counterExamples": [],
+        "explanation": "The phrasing was taught by mistake.",
+    });
+    let (models, replies) = models(optimisable(false), vec![("matrix_rewrite", drop_only), ("matrix_rewrite", sharper())]);
+    let report = eval::run(&a, &models, &options(&scratch, false, bounds()), &quiet()).unwrap();
+    let changes = report.optimisation.unwrap().changes;
+
+    // Dropping it would remove a phrasing from the global row, which every project reads.
+    let problem = "the rewrite changed nothing that can be kept here: \"space used here\" is a phrasing of the global \
+                   disk-usage, which a project cannot drop";
+    assert_eq!((changes[0].kept, changes[0].problem.as_deref()), (false, Some(problem)));
+    let retry: Value =
+        serde_json::from_str(replies.seen.lock().unwrap()[1]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(retry["previousAttemptProblem"], problem);
+    assert!(changes[1].kept && changes[1].project_had_scenario, "{:?}", changes[1].problem);
+    assert_eq!(scratch.brain.skill("disk-usage").unwrap().unwrap().examples, ["how big is this folder", "space used here"]);
+
+    let undone = eval::undo(&a, Some("disk-usage"), false).unwrap();
+    assert_eq!(undone.scenario, own);
+    assert_eq!(a.project_scenario("disk-usage").unwrap().as_deref(), Some(own), "the project's own, not the global one");
+    assert_eq!(scratch.brain.skill("disk-usage").unwrap().unwrap().scenario, "the user wants disk use");
+}
+
 #[test]
 fn the_call_budget_stops_the_loop_before_it_spends() {
     let scratch = Scratch::new("optimise-budget");

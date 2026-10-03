@@ -1,6 +1,7 @@
 # 16. The matrix is measured against the brain's own evidence, optimised only where the measurement improves, and every new row is checked against its closest skills
 
-- Status: accepted
+- Status: accepted; superseded in part by [ADR 22](0022-project-scenarios.md), on how a kept rewrite
+  is written and what `jli eval undo` puts back inside a project
 - Date: 2026-10-03
 - Origin: the Rust version
 - Supersedes in part: [ADR 5](0005-routing-loop.md), on the write-back of a proposed skill and on
