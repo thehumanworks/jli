@@ -27,6 +27,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [14](0014-shell-integration.md) | Steps such as `cd` are handed to the calling shell, and paths are expanded before they are quoted |
 | [15](0015-user-scope.md) | What is learned belongs to a user, a skill is shared by copy, and parallel writers lose nothing |
 | [16](0016-measuring-the-matrix.md) | The matrix is measured against the brain's own evidence, optimised only where the measurement improves, and every new row is checked against its closest skills |
+| [18](0018-agent-contract.md) | A contract for agent callers: pinned plans, run in order, and corrections without a terminal |
 
 ## Known gaps, by record
 
@@ -54,3 +55,8 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   be dropped through the gate; the gate checks a skill's competitors, not the whole matrix; rewrites are
   not repeatable; examples carry no context, and a replay in a directory that is gone runs in an
   inferred one; a `jli fix` made after other requests counts as a request of its own.
+- [18](0018-agent-contract.md): a dry run needs a writable brain; plan rows are never deleted; a plan
+  does not notice that its skill changed after it was made; a proposal learned through `jli run`
+  skips the System 1 check; `jli run` refuses a plan with a `cd` even under the shell function; a plan
+  blocked on an unknown argument runs without it once its slots are filled; `corrections` is shown
+  nowhere; and the claim, like the rest of the cloud setup, has run only against local files.

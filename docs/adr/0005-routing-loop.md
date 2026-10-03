@@ -5,7 +5,10 @@
   [ADR 14](0014-shell-integration.md), which hands steps such as `cd` to the calling shell and
   appends `callerShell` and `handedOff` to the `--json` outcome;
   and by [ADR 16](0016-measuring-the-matrix.md), which checks a proposed skill with System 1 before it is stored, logs a
-  declined route as its own event, and counts the suggester in `msSystem2`
+  declined route as its own event, and counts the suggester in `msSystem2`;
+  and by [ADR 18](0018-agent-contract.md), under which a dry run stores a plan (and still writes no
+  skill and logs no event), `jli run` and `jli fix <eventId>` join the CLI, the `--json` outcome gains
+  fields, and an error under `--json` prints one JSON object
 - Date: 2026-10-02
 - Origin: the TypeScript prototype; kept unchanged by the Rust port
 

@@ -29,7 +29,7 @@ fn help() -> String {
   jli                                  interactive session
 
 {}
-  -n, --dry-run    show what would run, execute nothing, learn nothing
+  -n, --dry-run    show what would run, execute nothing, learn nothing; keep it as a plan for jli run
   -y, --yes        run without asking (never approves destructive commands)
   -Y, --yolo       run without asking, destructive commands included
       --confidence=N   use System 1's pick at or above N for this run (0 to 1)
@@ -54,6 +54,12 @@ fn help() -> String {
   jli config confidence <0..1>         confidence System 1 needs before its pick is used (default 0.5)
   jli config mode <manual|semi|auto>   who does the teaching (default semi)
   jli fix                              the last command run here was wrong: unlearn it and try again
+  jli fix <eventId>                    the same for that event (eventId in --json), from anywhere
+  jli fix <eventId> -- <command>       that was wrong, this is right: learn it, and return a plan of it
+  jli fix <eventId> --expected <words> ask the agent again with what you expected, and return a plan
+                                       (add --run to either to run the correction instead)
+  jli run <planId> [<planId> …]        run plans (planId in --json) exactly as shown, in order, with no
+                                       model call; stops at the first that fails. name=value fills a gap
   jli forget <label>                   delete a skill
   jli eval [<label>] [--limit N]       route every stored example with itself held out, and replay accepted
                                        requests: how often each skill comes home (System 1 calls, priced first)
