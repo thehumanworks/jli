@@ -1190,9 +1190,14 @@ impl App {
     }
 
     pub(crate) fn dispatch(&mut self, flags: &Flags, words: &[String], rest: &[String]) -> Result<i32> {
-        // `jli skills --project=<id>` says so in its listing instead.
-        let listing = matches!(words, [only] if only == "skills") && rest.is_empty();
-        if let Some(note) = if listing { None } else { self.unknown_project(flags)? } {
+        // `jli skills --project=<id>` says so in its listing instead, and `jli project init` refuses the flag.
+        let no_note = rest.is_empty()
+            && match words {
+                [only] => only == "skills",
+                [first, init, ..] => first == "project" && init == "init",
+                _ => false,
+            };
+        if let Some(note) = if no_note { None } else { self.unknown_project(flags)? } {
             Ui::new(!flags.quiet).warn(note);
         }
         let Some((first, others)) = words.split_first() else {
