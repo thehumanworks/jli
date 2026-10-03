@@ -29,8 +29,7 @@ pub fn seed_skills() -> Vec<NewSkill> {
                 name: "message".into(),
                 kind: SlotKind::Text,
                 description: "the commit message".into(),
-                default: None,
-                aliases: vec![],
+                ..Slot::default()
             }],
             ..skill(
                 "git-commit",

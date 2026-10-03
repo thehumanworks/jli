@@ -255,11 +255,11 @@ pub fn read(query: &str, slots: &[Slot]) -> Reading {
             continue;
         }
         // Unquoted: a text slot takes the rest of the request, up to the next stated value.
-        // Any other kind takes one word.
+        // Any other kind takes one word, as does a slot whose choices are each one word (ADR 24).
         let next_label = found.get(position + 1).map(|next| next.start);
         let next_item = items.iter().map(|item| item.span.start).find(|start| *start >= label.value_at);
         let mut end = [next_label, next_item].into_iter().flatten().min().unwrap_or(query.len());
-        if slots[label.slot].kind != SlotKind::Text {
+        if slots[label.slot].kind != SlotKind::Text || !slots[label.slot].choices.is_empty() {
             end = query[label.value_at..end].find(char::is_whitespace).map_or(end, |n| label.value_at + n);
         }
         let raw = &query[label.value_at..end];
@@ -409,7 +409,7 @@ mod tests {
     use super::*;
 
     fn slot(name: &str, kind: SlotKind) -> Slot {
-        Slot { name: name.into(), kind, description: String::new(), default: None, aliases: vec![] }
+        Slot { name: name.into(), kind, ..Slot::default() }
     }
 
     fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {

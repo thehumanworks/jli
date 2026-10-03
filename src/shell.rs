@@ -419,6 +419,7 @@ mod tests {
         // Values are rendered quoted, so `; cd /` inside one stays a word of the command.
         let rendered = crate::slots::render(
             &steps(&["git commit -m {message}"]),
+            &[],
             &[("message".to_string(), "x'; cd / ; echo '".to_string())].into_iter().collect(),
         );
         assert!(!needs_caller(&rendered[0]), "{}", rendered[0]);

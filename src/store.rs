@@ -9,7 +9,7 @@ use libsql::{Builder, Connection, Database, Value};
 use tokio::runtime::Runtime;
 
 use crate::seed::seed_skills;
-use crate::slots::match_proposal;
+use crate::slots::{keep_settings, match_proposal};
 use crate::types::{add_alias, coded, remove_alias, BrainEvent, Origin, Path, Risk, Skill, Slot, STORAGE};
 
 /// Where the brain lives. One libSQL client covers every deployment:
@@ -976,7 +976,7 @@ impl Brain {
 
     /// Insert a skill, or change what an existing label runs. Re-teaching a label keeps
     /// what was learned about it: examples, counter-examples and uses are never replaced,
-    /// and a slot that keeps its name keeps its aliases.
+    /// and a slot that keeps its name keeps its aliases and what was set on it by hand (ADR 24).
     ///
     /// No command calls it (ADR 22): a new skill is stored with `add_new_skill`, a literal skill is
     /// made general with `upgrade_skill`, and a rewritten scenario goes through `set_scenario`. It is
@@ -985,11 +985,8 @@ impl Brain {
     /// `jli eval --optimise`, so a command run inside a project must not use it.
     pub fn add_skill(&self, skill: &NewSkill) -> Result<()> {
         let mut skill = skill.clone();
-        for known in self.skill(&skill.label)?.map(|known| known.slots).unwrap_or_default() {
-            for alias in &known.aliases {
-                add_alias(&mut skill.slots, &known.name, alias);
-            }
-        }
+        let known = self.skill(&skill.label)?.map(|known| known.slots).unwrap_or_default();
+        keep_settings(&mut skill.slots, &known, &skill.steps);
         let global = self.scope.base();
         let only_global = self.scope.has_project()
             && self.row(&self.scope, &skill.label)?.is_none()
@@ -1034,7 +1031,9 @@ impl Brain {
                 None if scope.has_project() => self.row(&scope.base(), &skill.label)?,
                 None => None,
             };
-            if holder.is_some_and(|holder| match_proposal(&holder.steps, &skill.steps, &HashMap::new()).is_some()) {
+            if holder
+                .is_some_and(|holder| match_proposal(&holder.steps, &holder.slots, &skill.steps, &HashMap::new()).is_some())
+            {
                 for phrase in &skill.examples {
                     self.link_in(scope, &skill.label, phrase)?;
                 }
@@ -1072,8 +1071,8 @@ impl Brain {
 
     /// Make a literal skill general in place (ADR 19): it runs `to`'s steps with `to`'s slots, scenario
     /// and risk, and keeps everything learned about it, as an upsert does (ADR 2): examples,
-    /// counter-examples, uses, origin, `created_at`, and the aliases of a slot that keeps its name.
-    /// Written only in this brain's own scope, and only if the row still runs `from`, with one
+    /// counter-examples, uses, origin, `created_at`, and the aliases and hand settings of a slot that
+    /// keeps its name (ADR 24). Written only in this brain's own scope, and only if the row still runs `from`, with one
     /// conditional statement on its steps and slots, as a list is written (ADR 15). Returns false when
     /// the row is not this scope's, has gone, or another writer changed it first.
     pub fn upgrade_skill(&self, label: &str, from: &[String], to: &NewSkill) -> Result<bool> {
@@ -1088,11 +1087,7 @@ impl Brain {
             return Ok(false);
         }
         let mut next = to.slots.clone();
-        for known in json::<Vec<Slot>>(slots.clone()) {
-            for alias in &known.aliases {
-                add_alias(&mut next, &known.name, alias);
-            }
-        }
+        keep_settings(&mut next, &json::<Vec<Slot>>(slots.clone()), &to.steps);
         let written = self.execute(
             &format!(
                 "UPDATE {table} SET steps = ?, slots = ?, scenario = ?, risk = ?
@@ -1302,6 +1297,27 @@ impl Brain {
             let mut slots: Vec<Slot> = json(stored);
             if !add_alias(&mut slots, slot, alias) {
                 return Ok(None);
+            }
+            Ok(Some(serde_json::to_string(&slots)?))
+        })
+    }
+
+    /// Write what a person set on one slot of `label` (`jli slot`, ADR 24): its kind, description,
+    /// default, whether it is optional, its flag and its choices. Its aliases stay as the row holds them,
+    /// so another writer's new name is not lost. A placeholder no slot declares gets this slot. It is
+    /// written where `add_alias` writes: the row that holds the skill. Returns false if nothing changed.
+    pub fn set_slot(&self, label: &str, slot: &Slot) -> Result<bool> {
+        self.edit_column(label, "slots", |stored| {
+            let mut slots: Vec<Slot> = json(stored);
+            match slots.iter_mut().find(|known| known.name == slot.name) {
+                Some(known) => {
+                    let next = Slot { aliases: known.aliases.clone(), ..slot.clone() };
+                    if *known == next {
+                        return Ok(None);
+                    }
+                    *known = next;
+                }
+                None => slots.push(slot.clone()),
             }
             Ok(Some(serde_json::to_string(&slots)?))
         })
@@ -1887,8 +1903,8 @@ mod tests {
             name: "directory".into(),
             kind: crate::types::SlotKind::File,
             description: "where".into(),
-            default: None,
             aliases: vec!["dir".into()],
+            ..Slot::default()
         };
         a.add_skill(&NewSkill {
             label: "count-files".into(),
@@ -2063,13 +2079,7 @@ mod tests {
         let scratch = Scratch::new("label-join");
         let (mine, theirs) = (scratch.brain(), scratch.brain());
         let template = |label: &str, step: &str, slot: &str, examples: &[&str]| NewSkill {
-            slots: vec![Slot {
-                name: slot.into(),
-                kind: SlotKind::Number,
-                description: String::new(),
-                default: None,
-                aliases: vec![],
-            }],
+            slots: vec![Slot { name: slot.into(), kind: SlotKind::Number, ..Slot::default() }],
             ..new_skill(label, step, examples)
         };
         // Both looked when du-sh was free, and both are teaching du -sh .; theirs was written first.
@@ -2273,9 +2283,8 @@ mod tests {
         let slot = |name: &str, aliases: &[&str]| Slot {
             name: name.into(),
             kind: crate::types::SlotKind::Text,
-            description: String::new(),
-            default: None,
             aliases: aliases.iter().map(|alias| alias.to_string()).collect(),
+            ..Slot::default()
         };
         brain
             .add_skill(&NewSkill {
@@ -2291,6 +2300,53 @@ mod tests {
         let slots = brain.skill("git-commit").unwrap().unwrap().slots;
         assert_eq!(slots[0].aliases, ["text", "msg"]);
         assert_eq!(slots[1].aliases, ["by"]);
+    }
+
+    #[test]
+    fn a_slots_settings_are_written_beside_its_aliases_and_leave_a_plain_slot_as_it_was() {
+        let scratch = Scratch::new("slot-settings");
+        let brain = scratch.brain();
+        let stored = |brain: &Brain| {
+            brain
+                .query("SELECT slots FROM skills WHERE label = 'git-commit'", vec![], |row| text(row.get_value(0).unwrap()))
+                .unwrap()
+                .remove(0)
+        };
+        assert_eq!(
+            stored(&brain),
+            r#"[{"name":"message","kind":"text","description":"the commit message"}]"#,
+            "a slot with no settings is written as before ADR 24"
+        );
+        assert!(brain.add_alias("git-commit", "message", "msg").unwrap());
+        let choices = vec![crate::types::Choice { value: "wip".into(), text: "wip".into() }];
+        let set = Slot {
+            name: "message".into(),
+            description: "the commit message".into(),
+            default: Some("wip".into()),
+            optional: true,
+            flag: Some("-m".into()),
+            choices: choices.clone(),
+            ..Slot::default()
+        };
+        assert!(brain.set_slot("git-commit", &set).unwrap());
+        assert!(!brain.set_slot("git-commit", &set).unwrap(), "nothing changed");
+        assert_eq!(
+            stored(&brain),
+            r#"[{"name":"message","kind":"text","description":"the commit message","default":"wip","aliases":["msg"],"optional":true,"flag":"-m","choices":[{"value":"wip","text":"wip"}]}]"#,
+            "the alias another writer added is kept, and the new fields come last"
+        );
+
+        // Re-teaching the label keeps what was set by hand, as it keeps the aliases.
+        let mut retaught = new_skill("git-commit", "git commit -m {message}", &[]);
+        retaught.slots = vec![Slot { name: "message".into(), ..Slot::default() }];
+        brain.add_skill(&retaught).unwrap();
+        let slot = brain.skill("git-commit").unwrap().unwrap().slots.remove(0);
+        assert_eq!((slot.optional, slot.flag.as_deref(), slot.default.as_deref()), (true, Some("-m"), Some("wip")));
+        assert_eq!((slot.choices, slot.aliases), (choices, vec!["msg".to_string()]));
+
+        // A placeholder no slot declares is declared.
+        assert!(brain.set_slot("git-commit", &Slot { name: "author".into(), ..Slot::default() }).unwrap());
+        assert_eq!(brain.skill("git-commit").unwrap().unwrap().slots.len(), 2);
     }
 
     #[test]

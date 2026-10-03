@@ -14,7 +14,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use crate::types::{coded, SlotKind, CONFIGURATION, MODEL};
+use crate::types::{coded, Slot, SlotKind, CONFIGURATION, MODEL};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
@@ -263,6 +263,14 @@ pub fn slots_schema() -> Value {
                 "items": { "type": "string" },
                 "description": "up to four other names a person might type for this value as name=value, such as dir and path for directory; none that could mean another slot",
             },
+            "optional": {
+                "type": "boolean",
+                "description": "true when the command also runs without this value and its flag, as git log runs without -n {count}",
+            },
+            "flag": nullable(
+                "string",
+                "the flag written just before the placeholder that goes with the value, such as -n in -n {count}, or --profile= in --profile={profile}; null when there is none",
+            ),
         })),
     })
 }
@@ -284,6 +292,39 @@ pub struct SlotDraft {
     pub default: Option<String>,
     #[serde(default)]
     pub aliases: Vec<String>,
+    #[serde(default)]
+    pub optional: bool,
+    #[serde(default)]
+    pub flag: Option<String>,
+}
+
+impl SlotDraft {
+    /// The slot as a model wrote it, before `slots::checked_slots` holds it to what a model may say.
+    pub fn to_slot(&self) -> Slot {
+        Slot {
+            name: self.name.clone(),
+            kind: self.kind,
+            description: self.description.clone(),
+            default: self.default.clone(),
+            aliases: self.aliases.clone(),
+            optional: self.optional,
+            flag: self.flag.clone(),
+            choices: vec![],
+        }
+    }
+
+    /// A stored slot as a model would have written it: everything but its choices, which no model writes.
+    pub fn of(slot: &Slot) -> SlotDraft {
+        SlotDraft {
+            name: slot.name.clone(),
+            kind: slot.kind,
+            description: slot.description.clone(),
+            default: slot.default.clone(),
+            aliases: slot.aliases.clone(),
+            optional: slot.optional,
+            flag: slot.flag.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

@@ -5,12 +5,12 @@ use anyhow::Result;
 
 use crate::context::{read_context, Context};
 use crate::eval::{closest, verify_row};
-use crate::llm::{AGENT_MODEL, TRANSLATOR_MODEL};
-use crate::slots::{is_flag, is_literal, match_proposal, match_template, render, undeclared};
+use crate::llm::{SlotDraft, AGENT_MODEL, TRANSLATOR_MODEL};
+use crate::slots::{checked_slots, is_flag, is_literal, match_proposal, match_skill, render, undeclared};
 use crate::store::{slug, Brain, NewSkill, MAX_EXAMPLES};
 use crate::system2::{rewrite_row, RewriteInput, WeakPhrasing};
 use crate::translator::{translate, TranslateInput};
-use crate::types::{with_checked_aliases, Mode, Origin, Risk, Skill, Slot};
+use crate::types::{Mode, Origin, Risk, Skill, Slot};
 use crate::ui::{c, duration, Ui};
 use crate::Models;
 
@@ -121,8 +121,10 @@ fn store(brain: &Brain, kept: &Kept, scenario: String, phrase: &str, translated:
             return Ok(Learned { label: literal.label.clone(), created: false, translated, upgraded: true });
         }
     }
-    let taught_meanwhile =
-        brain.skills()?.into_iter().find(|known| match_proposal(&known.steps, &row.steps, &HashMap::new()).is_some());
+    let taught_meanwhile = brain
+        .skills()?
+        .into_iter()
+        .find(|known| match_proposal(&known.steps, &known.slots, &row.steps, &HashMap::new()).is_some());
     if let Some(known) = taught_meanwhile {
         brain.link_phrase(&known.label, phrase)?;
         ui.note(format!("{} was taught this command while it was being checked, so the phrase joins it.", known.label));
@@ -153,7 +155,9 @@ fn with_defaults(slots: Vec<Slot>, values: &HashMap<String, String>) -> Vec<Slot
 pub fn learn_phrase(brain: &Brain, models: &Models, input: &LearnInput, ui: &Ui) -> Result<Learned> {
     let command = input.steps.join(" && ");
     let skills = brain.skills()?;
-    let runs_it = |skill: &&Skill| match_template(&skill.steps, &command).is_some();
+    // A skill whose optional slot this command leaves out runs it too: `git log --oneline` is
+    // `git log --oneline -n {count}` without the count (ADR 24).
+    let runs_it = |skill: &&Skill| match_skill(&skill.steps, &skill.slots, &command).is_some();
     let linked = |known: &Skill| -> Result<Learned> {
         brain.link_phrase(&known.label, &input.phrase)?;
         Ok(Learned { label: known.label.clone(), created: false, translated: false, upgraded: false })
@@ -198,24 +202,14 @@ pub fn learn_phrase(brain: &Brain, models: &Models, input: &LearnInput, ui: &Ui)
         let values: HashMap<String, String> =
             draft.slot_values.iter().map(|slot| (slot.name.clone(), slot.value.clone())).collect();
 
-        // Slots are kept only if filling them back in reproduces the command that was taught.
-        let slots: Vec<Slot> = draft
-            .slots
-            .iter()
-            .map(|slot| Slot {
-                name: slot.name.clone(),
-                kind: slot.kind,
-                description: slot.description.clone(),
-                default: slot.default.clone(),
-                aliases: slot.aliases.clone(),
-            })
-            .collect();
-        let slots = with_checked_aliases(slots);
+        // Slots are kept only if filling them back in reproduces the command that was taught. Every
+        // slot needs its value for that, an optional one too, so no slot is invented that the command lacks.
+        let slots = checked_slots(draft.slots.iter().map(SlotDraft::to_slot).collect(), &draft.steps);
         // A flag is part of what the skill does, never a value. Models sometimes slot one anyway.
         let slots_a_flag = values.values().any(|value| is_flag(value));
         let faithful = !slots_a_flag
             && undeclared(&draft.steps, &slots).is_empty()
-            && comparable(&render(&draft.steps, &values).join(" && ")) == comparable(&command);
+            && comparable(&render(&draft.steps, &[], &values).join(" && ")) == comparable(&command);
         // A template that gives back the command: more general than a literal skill that runs it.
         let general = faithful && !is_literal(&draft.steps);
 
@@ -225,7 +219,7 @@ pub fn learn_phrase(brain: &Brain, models: &Models, input: &LearnInput, ui: &Ui)
         let existing = draft.existing_label.as_ref().and_then(|label| skills.iter().find(|skill| &skill.label == label));
         let believed = |existing: &&Skill| !slots_a_flag && !(general && is_literal(&existing.steps));
         if let Some(existing) = existing.filter(believed) {
-            if comparable(&render(&existing.steps, &values).join(" && ")) == comparable(&command) {
+            if comparable(&render(&existing.steps, &existing.slots, &values).join(" && ")) == comparable(&command) {
                 brain.link_phrase(&existing.label, &input.phrase)?;
                 return Ok(Learned { label: existing.label.clone(), created: false, translated: true, upgraded: false });
             }

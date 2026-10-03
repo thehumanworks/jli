@@ -78,6 +78,10 @@ Rules:
   {slot}, with its value for this request in slotValues. Never quote placeholders; quoting is added for you.
 - Slot kinds: "file" is a path in the working directory, "branch" a git branch, "number" an integer,
   "text" free text such as a commit message.
+- A value given with a flag (-n {count}, --profile {profile}) is usually optional: set optional to true and
+  flag to the flag ("-n"), keep the flag right before its placeholder in steps, and give no default. When this
+  request does not name the value, leave it out of slotValues, and the flag is left out of the command with it.
+  A value the command cannot run without is not optional, and its flag is null.
 - Use several steps only when the task truly is a chain of commands.
 - Commands must be non-interactive: no editors, pagers or prompts (use flags such as --no-pager).
 - risk: "safe" only reads; "modifies" changes local state and can be undone; "destructive" deletes data,
@@ -151,6 +155,24 @@ pub fn propose(llm: &Llm, input: &ProposeInput) -> Result<(Proposal, u64)> {
     })
 }
 
+/// Slots as the agent's slot prompts were measured with them: the fields a slot had before ADR 24, in
+/// the same order, so a slot's flag or choices never change what the agent is shown.
+fn placeholders(slots: &[&Slot]) -> Vec<Value> {
+    slots
+        .iter()
+        .map(|slot| {
+            let mut shown = json!({ "name": slot.name, "kind": slot.kind, "description": slot.description });
+            if let Some(default) = &slot.default {
+                shown["default"] = json!(default);
+            }
+            if !slot.aliases.is_empty() {
+                shown["aliases"] = json!(slot.aliases);
+            }
+            shown
+        })
+        .collect()
+}
+
 fn values_schema() -> Value {
     object(json!({
         "values": {
@@ -188,7 +210,7 @@ pub fn extract(
         schema: values_schema(),
         timeout: Duration::from_secs(30),
         reasoning: Reasoning::Off,
-        input: json!({ "request": query, "command": steps, "purpose": scenario, "placeholders": slots }),
+        input: json!({ "request": query, "command": steps, "purpose": scenario, "placeholders": placeholders(slots) }),
     })?;
     let values = data
         .values
@@ -247,7 +269,7 @@ pub fn name_arguments(
         input: json!({
             "command": steps,
             "purpose": scenario,
-            "placeholders": slots,
+            "placeholders": placeholders(slots),
             "arguments": arguments.iter().map(|(name, value)| json!({ "name": name, "value": value })).collect::<Vec<_>>(),
         }),
     })?;

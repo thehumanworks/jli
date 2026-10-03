@@ -67,6 +67,10 @@ fn help() -> String {
   jli forget <label>                   delete a skill (inside a project, one of the project's: --global for the user's)
   jli forget-phrase <label> <phrase>   take one phrasing back from a skill; it is kept as a counter-example
   jli alias <label> <slot> <name>      give a slot another name for name=value (--remove takes one away)
+  jli slot <label> <slot> --default=<value>   the value a slot takes when the request names none (--default= for none)
+      --optional | --required          whether the slot, and its --flag=<flag>, may be left out of the command
+      --choice=<value>=<text> …        the only values it takes, each with what it puts in the command
+                                       (--choice=debug= puts nothing; --no-choices takes them away)
   jli eval [<label>] [--limit N]       route every stored example with itself held out, and replay accepted
                                        requests: how often each skill comes home (System 1 calls, priced first)
   jli eval --optimise                  the agent rewrites the weakest rows; a rewrite is kept only if the
@@ -401,6 +405,12 @@ impl App {
             }
             for slot in skill.slots.iter().filter(|slot| !slot.aliases.is_empty()) {
                 say(format!("  {}", c::dim(format!("{{{}}} is also {}", slot.name, slot.aliases.join(", ")))));
+            }
+            for slot in &skill.slots {
+                let settings = hand::describe(slot);
+                if !settings.is_empty() {
+                    say(format!("  {}", c::dim(format!("{{{}}}: {settings}", slot.name))));
+                }
             }
             say(format!("  {}", c::dim(&skill.scenario)));
             for example in &skill.examples {
@@ -841,7 +851,7 @@ impl App {
         let (wrong_steps, slots) =
             wrong.as_ref().map(|skill| (skill.steps.clone(), skill.slots.clone())).unwrap_or_default();
         let phrase = learned_phrase(&last.query, &wrong_steps, &slots, last.command.as_deref());
-        if let Some(wrong) = wrong.as_ref().filter(|wrong| is_another_command(&wrong.steps, steps)) {
+        if let Some(wrong) = wrong.as_ref().filter(|wrong| is_another_command(wrong, steps)) {
             unlearn_phrase(&self.brain, &ui, wrong, &phrase)?;
         }
         let taught = teach_instead(&self.brain, &self.models, &ui, &phrase, steps, &options)?;
@@ -1122,6 +1132,19 @@ impl App {
                 Some(edit) => return self.hand_edit(flags, |brain| hand::alias(brain, &edit)),
                 None if others.iter().any(|word| word == "--remove" || word == "--global") => {
                     return Ok(refuse(flags, USAGE, "Usage: jli alias [--remove] [--global] <label> <slot> <name>"))
+                }
+                None => {}
+            }
+        }
+        if first == "slot" && rest.is_empty() {
+            match hand::slot_shape(others, flags.dry_run) {
+                Some(edit) => return self.hand_edit(flags, |brain| hand::slot(brain, &edit)),
+                None if others.iter().any(|word| word.starts_with("--")) => {
+                    return Ok(refuse(
+                        flags,
+                        USAGE,
+                        "Usage: jli slot [--global] <label> <slot> [--default=<value>] [--optional|--required] [--flag=<flag>] [--choice=<value>[=<text>] …|--no-choices] [--kind=file|branch|number|text]",
+                    ))
                 }
                 None => {}
             }

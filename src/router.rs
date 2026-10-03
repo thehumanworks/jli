@@ -13,15 +13,15 @@ use crate::llm::{SlotDraft, AGENT_MODEL};
 use crate::plan::{self, CandidateInfo, PlanRecord, SlotInfo, SlotValue};
 use crate::shell::{first_caller_step, hand_off_text, safe_to_try, HandOff, Shell};
 use crate::slots::{
-    expand_path, fill_slots, is_flag, match_proposal, match_template, render, render_fish, undeclared, Filled, Source,
-    Template,
+    checked_slots, expand_path, fill_slots, is_flag, match_proposal, match_skill, render, render_fish, undeclared, Filled,
+    Source, Template,
 };
 use crate::store::{slug, Brain, NewEvent, NewSkill};
 use crate::suggest::{suggest, Failure, SuggestInput, Suggestion, Verdict};
 use crate::system1::Decision;
 use crate::system2::{propose, Proposal, ProposalKind, ProposeInput, Rejected};
 use crate::types::error_code;
-use crate::types::{add_alias, with_checked_aliases, Mode, Origin, Path, Risk, Skill, Slot, SlotKind};
+use crate::types::{add_alias, Mode, Origin, Path, Risk, Skill, Slot, SlotKind};
 use crate::ui::{c, fixed, Prompt, Ui};
 use crate::Models;
 
@@ -378,10 +378,11 @@ impl Route<'_> {
 
     /// Keep a plan of the route as it stands, so `jli run <planId>` can run exactly this later.
     fn prepare(&mut self, plan: &Plan, skill: &Skill, filled: &Filled) -> Result<()> {
+        // An optional slot with no value is left out of the plan's commands, not waiting for one (ADR 24).
         let mut missing: Vec<String> = skill
             .slots
             .iter()
-            .filter(|slot| filled.values.get(&slot.name).is_none_or(|value| value.is_empty()))
+            .filter(|slot| !slot.optional && filled.values.get(&slot.name).is_none_or(|value| value.is_empty()))
             .map(|slot| slot.name.clone())
             .collect();
         missing.extend(undeclared(&skill.steps, &skill.slots));
@@ -522,7 +523,8 @@ impl Route<'_> {
                     None if proposal.kind != ProposalKind::NotACommand => skills
                         .iter()
                         .find_map(|skill| {
-                            match_proposal(&skill.steps, &proposal.steps, &provided).map(|values| (skill.clone(), values))
+                            match_proposal(&skill.steps, &skill.slots, &proposal.steps, &provided)
+                                .map(|values| (skill.clone(), values))
                         })
                         .map_or((None, provided), |(skill, values)| {
                             ui.note(format!("{} already runs this command, so that skill is used.", c::bold(&skill.label)));
@@ -550,17 +552,19 @@ impl Route<'_> {
                     };
                     let files = proposal.slots.iter().filter(|slot| slot.kind == SlotKind::File);
                     let proposed = as_run(files.map(|slot| slot.name.as_str()).collect());
+                    let proposed_slots =
+                        checked_slots(proposal.slots.iter().map(SlotDraft::to_slot).collect(), &proposal.steps);
                     let again = self
                         .all_skills
                         .iter()
                         .filter(|skill| options.rejected.contains(&skill.label))
-                        .find(|skill| named(skill) || produces(&skill.steps, &proposal.steps, &proposed));
+                        .find(|skill| named(skill) || produces(skill, &proposal.steps, &proposed_slots, &proposed));
                     let again = again.map(|rejected| {
                         let commands = if named(&rejected) {
                             let files = rejected.slots.iter().filter(|slot| slot.kind == SlotKind::File);
-                            render(&rejected.steps, &as_run(files.map(|slot| slot.name.as_str()).collect()))
+                            render(&rejected.steps, &rejected.slots, &as_run(files.map(|slot| slot.name.as_str()).collect()))
                         } else {
-                            render(&proposal.steps, &proposed)
+                            render(&proposal.steps, &proposed_slots, &proposed)
                         };
                         (rejected.label.clone(), commands)
                     });
@@ -591,18 +595,7 @@ impl Route<'_> {
                         while self.all_skills.iter().any(|skill| skill.label == label) {
                             label.push_str("-x");
                         }
-                        let slots = proposal
-                            .slots
-                            .iter()
-                            .map(|slot| Slot {
-                                name: slot.name.clone(),
-                                kind: slot.kind,
-                                description: slot.description.clone(),
-                                default: slot.default.clone(),
-                                aliases: slot.aliases.clone(),
-                            })
-                            .collect();
-                        let slots = with_checked_aliases(slots);
+                        let slots = checked_slots(proposal.slots.iter().map(SlotDraft::to_slot).collect(), &proposal.steps);
                         // A proposal nobody has vetted yet: the request's own risk reading gets a vote too.
                         let intent = decision.as_ref().map_or(Risk::Safe, |decided| decided.intent_risk);
                         Plan {
@@ -638,7 +631,7 @@ impl Route<'_> {
         self.outcome.ms_system2 += filled.ms_system2;
         let mut unknown = filled.missing.clone();
         unknown.extend(undeclared(&skill.steps, &skill.slots));
-        self.outcome.commands = render(&skill.steps, &filled.values);
+        self.outcome.commands = render(&skill.steps, &skill.slots, &filled.values);
         self.outcome.phrase = Some(self.phrase.clone());
         self.outcome.values = filled
             .sources
@@ -654,7 +647,8 @@ impl Route<'_> {
         if let Some(at) = caller_at {
             // Read by the calling shell, so quoted for it.
             let fish = options.hand_off.as_ref().is_some_and(|hand_off| hand_off.shell == Shell::Fish);
-            let for_shell = if fish { render_fish(&skill.steps, &filled.values) } else { self.outcome.commands.clone() };
+            let for_shell =
+                if fish { render_fish(&skill.steps, &skill.slots, &filled.values) } else { self.outcome.commands.clone() };
             self.outcome.caller_shell = for_shell[at..].to_vec();
         }
         ui.command(&self.outcome.commands, plan.risk);
@@ -664,8 +658,20 @@ impl Route<'_> {
                 let read_as = filled.aliases.iter().find(|(slot, _)| slot == name);
                 let read_as = read_as.map(|(_, alias)| format!(", reading {alias}= as {name}=")).unwrap_or_default();
                 let written = written.map(|written| format!(", {written} expanded")).unwrap_or_default();
-                ui.note(format!("{{{name}}} = {} (from {source}{read_as}{written})", filled.values[name]));
+                let value = &filled.values[name];
+                // A choice says what it put in the command, which is not the word that chose it.
+                let chose = skill.slots.iter().find(|slot| &slot.name == name).and_then(|slot| slot.choice(value));
+                let chose = chose.map(|choice| match choice.text.trim() {
+                    "" => ", which writes nothing".to_string(),
+                    text => format!(", written {text}"),
+                });
+                ui.note(format!("{{{name}}} = {value}{} (from {source}{read_as}{written})", chose.unwrap_or_default()));
             }
+        }
+        for name in &filled.omitted {
+            let flag = skill.slots.iter().find(|slot| &slot.name == name).and_then(|slot| slot.flag.as_deref());
+            let flag = flag.map(|flag| format!(" with {flag}")).unwrap_or_default();
+            ui.note(format!("{{{name}}} is left out{flag}: it is optional, and nothing gave it a value."));
         }
         for (name, variable) in &filled.not_set {
             ui.note(format!("${variable} is not set, so {{{name}}} is passed as written."));
@@ -691,8 +697,31 @@ impl Route<'_> {
             self.prepare(&plan, &skill, &filled)?;
             return self.finish();
         }
+        if !filled.not_a_choice.is_empty() {
+            let each: Vec<String> = filled
+                .not_a_choice
+                .iter()
+                .filter_map(|(name, value)| {
+                    let slot = skill.slots.iter().find(|slot| &slot.name == name)?;
+                    Some(format!("{{{name}}} takes {}, not {value}", slot.choice_list()))
+                })
+                .collect();
+            let blocked = each.join("; ");
+            ui.warn(format!("{blocked}."));
+            self.outcome.block(blocked, MISSING_VALUE);
+            self.prepare(&plan, &skill, &filled)?;
+            return self.finish();
+        }
         if !unknown.is_empty() {
-            let names: Vec<String> = unknown.iter().map(|name| format!("{{{name}}}")).collect();
+            let names: Vec<String> = unknown
+                .iter()
+                .map(|name| {
+                    match skill.slots.iter().find(|slot| &slot.name == name).filter(|slot| !slot.choices.is_empty()) {
+                        Some(slot) => format!("{{{name}}} ({})", slot.choice_list()),
+                        None => format!("{{{name}}}"),
+                    }
+                })
+                .collect();
             let blocked = format!("could not work out a value for {}", names.join(", "));
             ui.warn(format!("{blocked}. Say it in the request, in quotes if it is text."));
             self.outcome.block(blocked, MISSING_VALUE);
@@ -1087,7 +1116,7 @@ impl Route<'_> {
 
         self.log_declined()?;
         let was_wrong = match &choice {
-            Correction::Steps(steps) => is_another_command(&skill.steps, steps),
+            Correction::Steps(steps) => is_another_command(skill, steps),
             Correction::Clarification(_) => unlearn,
         };
         if was_wrong && !plan.is_new {
@@ -1142,9 +1171,9 @@ impl Route<'_> {
 // ── What a correction teaches, shared by a "no" at the prompt and `jli fix` ──
 
 /// Choosing a different command is itself the verdict on the old one. The same command
-/// with another slot value is not: that skill was right.
-pub fn is_another_command(wrong: &[String], steps: &[String]) -> bool {
-    match_template(wrong, &steps.join(" && ")).is_none()
+/// with another slot value, or without an optional one, is not: that skill was right.
+pub fn is_another_command(wrong: &Skill, steps: &[String]) -> bool {
+    match_skill(&wrong.steps, &wrong.slots, &steps.join(" && ")).is_none()
 }
 
 /// A proposal that gives a flag for a slot's value, of the known skill it names or of its own template, as
@@ -1163,15 +1192,8 @@ fn flags_written_in(
         ProposalKind::New => None,
         ProposalKind::NotACommand => return None,
     };
-    let draft = |slot: &Slot| SlotDraft {
-        name: slot.name.clone(),
-        kind: slot.kind,
-        description: slot.description.clone(),
-        default: slot.default.clone(),
-        aliases: slot.aliases.clone(),
-    };
     let (steps, slots): (Vec<String>, Vec<SlotDraft>) = match named {
-        Some(skill) => (skill.steps.clone(), skill.slots.iter().map(draft).collect()),
+        Some(skill) => (skill.steps.clone(), skill.slots.iter().map(SlotDraft::of).collect()),
         None => (proposal.steps.clone(), proposal.slots.clone()),
     };
     let used = undeclared(&steps, &[]);
@@ -1181,7 +1203,7 @@ fn flags_written_in(
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
     let (name, value) = flags.iter().min_by_key(|(name, _)| used.iter().position(|seen| seen == *name))?;
-    let steps = render(&steps, &flags);
+    let steps = render(&steps, &[], &flags);
     let whose = named.map(|skill| format!(" of {}", c::bold(&skill.label))).unwrap_or_default();
     let why =
         format!("{value} is a flag, not a value for {{{name}}}{whose}, so {} is a command of its own.", steps.join(" && "));
@@ -1207,10 +1229,10 @@ fn flags_written_in(
 /// Whether a skill's steps run the proposed command: the same template (`match_proposal`), or, once
 /// the agent's values are in, the command a literal skill runs (`wc -l {file}` with `notes.txt` for
 /// `wc -l notes.txt`). The second is too broad to route by (ADR 13), but right for refusing a repeat.
-fn produces(steps: &[String], proposed: &[String], values: &HashMap<String, String>) -> bool {
+fn produces(skill: &Skill, proposed: &[String], slots: &[Slot], values: &HashMap<String, String>) -> bool {
     !proposed.is_empty()
-        && (match_proposal(steps, proposed, values).is_some()
-            || match_template(steps, &render(proposed, values).join(" && ")).is_some())
+        && (match_proposal(&skill.steps, &skill.slots, proposed, values).is_some()
+            || match_skill(&skill.steps, &skill.slots, &render(proposed, slots, values).join(" && ")).is_some())
 }
 
 /// `phrase` does not mean `skill`: it stops being one of its examples and becomes a counter-example.
@@ -1300,7 +1322,7 @@ pub fn run_plan(
     if is_new {
         let empty = HashMap::new();
         if let Some(known) =
-            route.all_skills.iter().find(|known| match_proposal(&known.steps, &record.steps, &empty).is_some())
+            route.all_skills.iter().find(|known| match_proposal(&known.steps, &known.slots, &record.steps, &empty).is_some())
         {
             ui.note(format!("{} already runs this command, so that skill is used.", c::bold(&known.label)));
             skill = known.clone();
