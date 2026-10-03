@@ -117,6 +117,17 @@ now escalates to the agent instead, so the share that came home stayed at 91%. S
 Answer no and it asks what it should have run: type the command, type `?` to ask the agent, or
 press enter to skip.
 
+`-q`, `--quiet` or `JLI_QUIET=1` hides the decision trace, System 1's table with it, but a question
+still shows what it asks about: the command and its risk before "Run it?", the numbered options
+before "Pick a number". Warnings stay, so a quiet run that does nothing says why. `--json` hides the
+warnings too, since its outcome says the same. See [ADR 27](docs/adr/0027-quiet.md).
+
+```
+$ JLI_QUIET=1 jli list the files here
+→ ls  risk: safe
+? Run it? [Y/n]
+```
+
 System 1's pick is used when its confidence reaches the threshold, 0.5 by default. Below that the
 agent is asked. Set the threshold with `jli config confidence 0.7` (stored in the brain, so shared
 across hosts), `JLI_THRESHOLD=0.7` (`JLI_CONFIDENCE` also works), or `--confidence=0.7` for one run.
@@ -411,7 +422,7 @@ say yes. Without a `.jlirc` nothing changes. See [ADR 17](docs/adr/0017-project-
 | `src/exec.rs` | runs the steps with `bash -c`, watching stderr in auto mode and for a new proposal, tries builtins before they are handed over, and reads the process table to find the shell jli was started from |
 | `src/cli.rs` | argument parsing, subcommands, the interactive session, and errors as JSON |
 | `src/help.rs` | the help, written once as a table of commands, options and variables, and which help a command line asks for |
-| `src/ui.rs` | the trace on stderr, and the one owner of stdin |
+| `src/ui.rs` | the trace and its warnings on stderr, and the one owner of stdin, which shows each question after what it asks about |
 | `src/demo.rs` | the two-pass learning demo |
 | `src/tests.rs` | the router and learning loop, offline, against fake models and a scripted prompt |
 | `src/tests/eval_tests.rs` | `jli eval`, the optimiser, undo, and the check a new row gets, offline |

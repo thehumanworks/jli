@@ -131,6 +131,8 @@ struct Script {
     confirms: VecDeque<Option<bool>>,
     asks: VecDeque<Option<String>>,
     questions: Vec<String>,
+    /// What each question was about, as (question, the lines shown before it).
+    shown: Vec<(String, Vec<String>)>,
 }
 
 impl Script {
@@ -138,8 +140,14 @@ impl Script {
         Script {
             confirms: confirms.iter().copied().collect(),
             asks: asks.iter().map(|answer| Some(answer.to_string())).collect(),
-            questions: vec![],
+            ..Script::default()
         }
+    }
+
+    /// The lines shown before the question that starts with `question`, joined.
+    fn about(&self, question: &str) -> String {
+        let shown = self.shown.iter().find(|(asked, _)| asked.starts_with(question));
+        shown.unwrap_or_else(|| panic!("never asked {question}")).1.join("\n")
     }
 }
 
@@ -148,13 +156,15 @@ impl Prompt for Script {
         None
     }
 
-    fn confirm(&mut self, question: &str) -> Option<bool> {
+    fn confirm(&mut self, about: &[String], question: &str) -> Option<bool> {
         self.questions.push(question.to_string());
+        self.shown.push((question.to_string(), about.to_vec()));
         self.confirms.pop_front().expect("an unexpected confirmation")
     }
 
-    fn ask(&mut self, question: &str) -> Option<String> {
+    fn ask(&mut self, about: &[String], question: &str) -> Option<String> {
         self.questions.push(question.to_string());
+        self.shown.push((question.to_string(), about.to_vec()));
         self.asks.pop_front().expect("an unexpected question")
     }
 }
@@ -3230,4 +3240,116 @@ fn a_slot_setting_that_cannot_hold_is_refused_and_changes_nothing() {
         "{profile} is joined to --profile= in cargo build --profile={profile}, so leaving it out would leave --profile= behind. Name it as its flag too: --flag=--profile="
     );
     assert_eq!(scratch.brain.skills().unwrap(), before);
+}
+
+// ── Quiet runs: no trace, but a question shows what it asks about (ADR 27) ─────
+
+/// The flags `JLI_QUIET=1` gives, with no flag on the command line.
+fn jli_quiet() -> Flags {
+    crate::cli::switches_from(Flags::default(), |name| (name == "JLI_QUIET").then(|| "1".to_string()))
+}
+
+#[test]
+fn a_quiet_confirmation_shows_the_command_and_its_risk() {
+    for (flags, why) in [(Flags::quiet(), "--quiet"), (jli_quiet(), "JLI_QUIET=1")] {
+        let scratch = Scratch::new("quiet-confirm");
+        let (models, _) = models(|_| decision("git-stage-all", 0.9, 0.9, [0.2, 0.8, 0.0]), no_language_model());
+        let mut script = Script::new(&[None], &[]);
+        let options = scratch.options(Mode::Semi);
+        let outcome = route(&scratch.brain, &models, "stage everything", &flags.ui(), &mut script, &options).unwrap();
+        assert_eq!(code(&outcome), Some("needs_confirmation"));
+        let about = script.about("Run it?");
+        assert!(about.contains("→ ") && about.contains("git add -A"), "{why}: {about}");
+        assert!(about.contains("risk:") && about.contains("modifies"), "{why}: {about}");
+        assert_eq!(script.questions, ["Run it?"], "{why}: the question itself is as it was");
+    }
+
+    // With the trace on, the command was shown above the question already, so it is not shown twice.
+    let scratch = Scratch::new("trace-confirm");
+    let (models, _) = models(|_| decision("git-stage-all", 0.9, 0.9, [0.2, 0.8, 0.0]), no_language_model());
+    let mut script = Script::new(&[None], &[]);
+    route(&scratch.brain, &models, "stage everything", &Ui::new(true), &mut script, &scratch.options(Mode::Semi)).unwrap();
+    assert_eq!(script.about("Run it?"), "");
+}
+
+#[test]
+fn a_quiet_correction_shows_the_options_it_offers() {
+    let suggestion = json!({
+        "verdict": "not_applicable", "explanation": "You said no.",
+        "options": [
+            { "command": "ls -la", "description": "everything, with details" },
+            { "command": "ls -ltr", "description": "newest last" },
+        ],
+    });
+    for (ui, shown) in [(Flags::quiet().ui(), true), (Ui::new(true), false)] {
+        let scratch = Scratch::new("quiet-correct");
+        let (models, _) = models(|_| decision("list-files", 0.9, 0.9, SAFE), vec![("suggestion", suggestion.clone())]);
+        let mut script = Script::new(&[Some(false)], &["2"]);
+        let options = scratch.options(Mode::Auto);
+        let outcome = route(&scratch.brain, &models, "recently changed files", &ui, &mut script, &options).unwrap();
+        assert_eq!(outcome.commands, ["ls -ltr"]);
+        let about = script.about("Pick a number");
+        if shown {
+            assert!(script.about("Run it?").contains("→ ") && script.about("Run it?").contains("ls"));
+            for part in ["1", "ls -la", "everything, with details", "2", "ls -ltr", "newest last"] {
+                assert!(about.contains(part), "{part} is not in {about}");
+            }
+        } else {
+            assert_eq!((script.about("Run it?"), about), (String::new(), String::new()), "the trace showed them");
+        }
+    }
+
+    // After a failed run under --yes nobody was asked "Run it?", so the diagnosis comes with the options.
+    let scratch = Scratch::new("quiet-diagnosis");
+    let wrong = json!({
+        "verdict": "wrong_command", "explanation": "This directory is not a git repository.",
+        "options": [{ "command": "ls", "description": "list the files instead" }],
+    });
+    let (models, _) = models(|_| decision("git-status", 0.9, 0.9, SAFE), vec![("suggestion", wrong)]);
+    let mut script = Script::new(&[], &[""]);
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Auto) };
+    let outcome = route(&scratch.brain, &models, "what changed here", &Flags::quiet().ui(), &mut script, &options).unwrap();
+    assert_eq!(outcome.exit_code, Some(128));
+    let about = script.about("Pick a number");
+    assert!(about.contains("diagnosis") && about.contains("wrong command"), "{about}");
+    assert!(about.contains("not a git repository") && about.contains("list the files instead"), "{about}");
+}
+
+#[test]
+fn a_quiet_destructive_plan_shows_what_it_would_delete() {
+    let scratch = Scratch::new("quiet-plan");
+    let log = scratch.work.join("old.log");
+    std::fs::write(&log, "noise\n").unwrap();
+    let proposal = new_proposal("delete-log-files", "rm -f *.log", json!([]), json!([]));
+    let (models, _) = models(|_| decision(NONE, 0.8, 0.95, [0.1, 0.3, 0.6]), vec![("proposal", proposal)]);
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
+    let blocked = go(&scratch, &models, "delete all the log files", &mut Script::new(&[None], &[]), &options);
+    let id = blocked.plan_id.unwrap();
+
+    let mut script = Script::new(&[Some(false)], &[]);
+    let flags = RunFlags { yolo: false, capture: true };
+    run_plans(&scratch.brain, &no_model_at_all(), &[id], &[], &Flags::quiet().ui(), &mut script, flags).unwrap();
+    let about = script.about("Run it?");
+    assert!(about.contains("rm -f *.log") && about.contains("destructive"), "{about}");
+    assert!(log.exists());
+}
+
+#[test]
+fn a_quiet_generalization_shows_what_would_be_written() {
+    for (ui, shown) in [(Ui::of(true, false), true), (Ui::new(true), false)] {
+        let scratch = Scratch::new("quiet-generalize");
+        let (rust, _node) = two_projects(&scratch);
+        let (models, _) =
+            self::models(routes_own_phrasing_to("cargo-test-package"), vec![("generalization", parameterized())]);
+        let mut script = Script::new(&[Some(false)], &[]);
+        generalize(&rust, &models, &options_for(&scratch), &ui, &mut script).unwrap();
+        let about = script.about("Make it global?");
+        if shown {
+            for part in ["cargo-test-package", "cargo test -p {package}", "If approved:", "removed from rust"] {
+                assert!(about.contains(part), "{part} is not in {about}");
+            }
+        } else {
+            assert_eq!(about, "", "the trace showed it");
+        }
+    }
 }

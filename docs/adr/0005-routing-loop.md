@@ -10,7 +10,9 @@
   skill and logs no event), `jli run` and `jli fix <eventId>` join the CLI, the `--json` outcome gains
   fields, and an error under `--json` prints one JSON object;
   and by [ADR 25](0025-command-help.md), under which a line with `--help` or `-h` before `--` is
-  jli's help and never a request, and each command has its own help
+  jli's help and never a request, and each command has its own help;
+  and by [ADR 27](0027-quiet.md), under which `JLI_QUIET=1` is `--quiet`, `--quiet` keeps the
+  warnings, and a question shows what it asks about when the trace is hidden
 - Date: 2026-10-02
 - Origin: the TypeScript prototype; kept unchanged by the Rust port
 

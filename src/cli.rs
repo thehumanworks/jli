@@ -42,6 +42,11 @@ pub(crate) struct Flags {
 }
 
 impl Flags {
+    /// The trace of a route: `--quiet` keeps its warnings, `--json` hides them too.
+    pub(crate) fn ui(&self) -> Ui {
+        Ui::of(self.quiet, self.json)
+    }
+
     /// No flags but `--quiet`, for tests that drive a subcommand.
     #[cfg(test)]
     pub(crate) fn quiet() -> Flags {
@@ -114,6 +119,14 @@ fn resolve_user(flags: &Flags, lookup: impl Fn(&str) -> Option<String>) -> Resul
 /// An on/off environment variable: 1 or true (any case) turns it on. Anything else is ignored.
 fn switched_on(lookup: impl Fn(&str) -> Option<String>, name: &str) -> bool {
     lookup(name).is_some_and(|value| matches!(value.trim().to_lowercase().as_str(), "1" | "true"))
+}
+
+/// `JLI_YES`, `JLI_YOLO` and `JLI_QUIET` turn on their flags. The environment never turns a flag off.
+pub(crate) fn switches_from(mut flags: Flags, lookup: impl Fn(&str) -> Option<String>) -> Flags {
+    flags.yes |= switched_on(&lookup, "JLI_YES");
+    flags.yolo |= switched_on(&lookup, "JLI_YOLO");
+    flags.quiet |= switched_on(&lookup, "JLI_QUIET");
+    flags
 }
 
 struct Parsed {
@@ -262,7 +275,7 @@ impl App {
         clarification: Option<String>,
         cwd: PathBuf,
     ) -> Result<Outcome> {
-        let ui = Ui::new(!flags.quiet && !flags.json);
+        let ui = flags.ui();
         let threshold = resolve_threshold(&self.brain, flags).map_err(configuration)?;
         let options = RouteOptions {
             yes: flags.yes,
@@ -490,7 +503,8 @@ impl App {
             threshold: resolve_threshold(&self.brain, flags)?,
             cwd: cwd()?,
         };
-        let (models, ui) = (&self.models, Ui::new(!flags.quiet));
+        // Teaching has no JSON outcome, so --json leaves its trace on.
+        let (models, ui) = (&self.models, Ui::of(flags.quiet, false));
         let teach = |brain: &Brain| -> Result<_> {
             let learned = learn_phrase(brain, models, &input, &ui)?;
             let skill = brain.skill(&learned.label)?;
@@ -630,7 +644,8 @@ impl App {
                 }
             }
         }
-        let ui = Ui::new(!flags.quiet);
+        // generalize has no JSON outcome, so --json leaves its trace on.
+        let ui = Ui::of(flags.quiet, false);
         let done = generalize(&self.brain, &self.models, &options, &ui, &mut self.terminal)?;
         Ok(if done.nothing { 1 } else { 0 })
     }
@@ -759,7 +774,7 @@ impl App {
             }
             return Ok(0);
         }
-        let ui = Ui::new(!flags.quiet && !flags.json);
+        let ui = flags.ui();
         let options = RouteOptions::new(
             at.clone(),
             resolve_threshold(&self.brain, flags).map_err(configuration)?,
@@ -837,7 +852,7 @@ impl App {
 
     /// `jli run <planId> …`: each plan as stored, in order, until one fails or is refused.
     fn run_plans(&mut self, ids: &[i64], values: &[(String, String)], flags: &Flags) -> Result<i32> {
-        let ui = Ui::new(!flags.quiet && !flags.json);
+        let ui = flags.ui();
         let outcomes = plan::run_plans(
             &self.brain,
             &self.models,
@@ -861,7 +876,7 @@ impl App {
     /// `jli eval …`. Returns None when the words do not fit its shape, so they are a request instead.
     fn measure(&self, args: &[String], flags: &Flags) -> Result<Option<i32>> {
         // The trace and the price go to stderr even with --json: stdout is the report alone.
-        let ui = Ui::new(!flags.quiet);
+        let ui = Ui::of(flags.quiet, false);
         if args.first().map(String::as_str) == Some("undo") {
             let label = match args {
                 [_] => None,
@@ -1139,9 +1154,8 @@ fn run(argv: &[String]) -> Result<i32> {
         say(text);
         return Ok(0);
     }
-    let Parsed { mut flags, words, rest } = parse(argv).map_err(|error| coded(USAGE, format!("{error:#}")))?;
-    flags.yes |= switched_on(env, "JLI_YES");
-    flags.yolo |= switched_on(env, "JLI_YOLO");
+    let Parsed { flags, words, rest } = parse(argv).map_err(|error| coded(USAGE, format!("{error:#}")))?;
+    let flags = switches_from(flags, env);
     let first = words.first().map(String::as_str);
     let user = resolve_user(&flags, env).map_err(configuration)?;
     if first == Some("demo") && words.len() == 1 {
@@ -1235,6 +1249,27 @@ mod tests {
             assert!(!with(Some(value)), "{value} does not switch it on");
         }
         assert!(!with(None));
+    }
+
+    #[test]
+    fn quiet_comes_from_the_flag_or_jli_quiet() {
+        for flag in ["-q", "--quiet"] {
+            assert!(parse(&args(&[flag, "list", "files"])).unwrap().flags.quiet, "{flag}");
+        }
+        let quiet = |value: &str| {
+            let value = value.to_string();
+            switches_from(Flags::default(), move |name| (name == "JLI_QUIET").then(|| value.clone())).quiet
+        };
+        for value in ["1", "true", "TRUE", " True "] {
+            assert!(quiet(value), "JLI_QUIET={value} is --quiet");
+        }
+        for value in ["0", "yes", "", "false"] {
+            assert!(!quiet(value), "JLI_QUIET={value} is not");
+        }
+        let only_quiet = switches_from(Flags::default(), |name| (name == "JLI_QUIET").then(|| "1".to_string()));
+        assert_eq!(only_quiet, Flags::quiet(), "it turns on nothing else");
+        let flagged = switches_from(Flags::quiet(), |_| Some("0".to_string()));
+        assert!(flagged.quiet, "the environment never turns a flag off");
     }
 
     #[test]
