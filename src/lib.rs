@@ -13,6 +13,7 @@ pub mod eval;
 pub mod exec;
 pub mod learn;
 pub mod llm;
+pub mod plan;
 pub mod router;
 pub mod seed;
 pub mod shell;

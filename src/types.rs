@@ -200,6 +200,45 @@ pub struct BrainEvent {
     pub ms_system2: Option<i64>,
 }
 
+/// What kind of error stopped a run, as `--json` reports it in `error`. The set is closed.
+pub const USAGE: &str = "usage";
+pub const CONFIGURATION: &str = "configuration";
+pub const MODEL: &str = "model";
+pub const STORAGE: &str = "storage";
+pub const INTERNAL: &str = "internal";
+
+/// An error that carries its kind for `--json` callers. It displays as its message alone, so the
+/// trace and `jli: …` read exactly as they did before errors had a kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Coded {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl fmt::Display for Coded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Coded {}
+
+pub fn coded(code: &'static str, message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(Coded { code, message: message.into() })
+}
+
+/// The kind of an error: the first kind found along its chain, storage when libSQL failed, and
+/// `internal` for anything nobody gave a kind.
+pub fn error_code(error: &anyhow::Error) -> &'static str {
+    if let Some(coded) = error.chain().find_map(|cause| cause.downcast_ref::<Coded>()) {
+        return coded.code;
+    }
+    if error.chain().any(|cause| cause.is::<libsql::Error>()) {
+        return STORAGE;
+    }
+    INTERNAL
+}
+
 /// Who does the teaching.
 ///   manual  you type phrase and command; they are stored as given
 ///   semi    the same, but a fast model rewrites what you taught into a general, checked matrix row

@@ -2,7 +2,9 @@
 
 - Status: accepted; superseded in part by [ADR 13](0013-learning-fixes.md): bare `jli fix`
   unlearns this host's last route in this directory; and by
-  [ADR 16](0016-measuring-the-matrix.md), which logs the declined route as its own event, marked `corrected`, before the correction
+  [ADR 16](0016-measuring-the-matrix.md), which logs the declined route as its own event, marked `corrected`, before the correction;
+  and by [ADR 18](0018-agent-contract.md), under which `jli fix <eventId> -- <command>` and
+  `--expected` make the same corrections with no terminal, and every `jli fix` records whether one was there
 - Date: 2026-10-02
 - Origin: the TypeScript prototype; kept unchanged by the Rust port
 

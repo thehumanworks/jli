@@ -7,13 +7,15 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
+use crate::cli::{App, Fix, FixHow, Flags};
 use crate::learn::{learn_phrase, LearnInput};
 use crate::llm::Llm;
+use crate::plan::{run_plans, RunFlags, SlotValue};
 use crate::router::{route, Outcome, RouteOptions, DRY_RUN, NEEDS_CALLER_SHELL, NOT_A_COMMAND};
 use crate::shell::{HandOff, Shell};
 use crate::store::{now_iso, Brain, BrainConfig, NewSkill};
 use crate::system1::{System1, NONE};
-use crate::types::{Mode, Origin, Path, Risk, Slot, SlotKind};
+use crate::types::{error_code, Coded, Mode, Origin, Path, Risk, Slot, SlotKind};
 use crate::ui::{Prompt, Ui};
 use crate::Models;
 
@@ -914,9 +916,28 @@ fn the_json_outcome_keeps_its_field_names_and_order() {
             "msSystem1",
             "msSystem2",
             "callerShell",
-            "handedOff"
+            "handedOff",
+            "eventId",
+            "planId",
+            "phrase",
+            "values",
+            "blockedCode",
+            "missing",
+            "unknownArguments",
+            "accepts",
+            "candidates",
+            "stdout",
+            "stderr",
+            "diagnosis",
+            "error",
+            "errorMessage"
         ]
     );
+    assert_eq!(value["eventId"], json!(scratch.brain.events(1).unwrap()[0].id));
+    assert_eq!(value["candidates"][0], json!({ "label": "print-working-directory", "probability": 0.99 }));
+    assert_eq!(value["stdout"], value["output"], "nothing on stderr, so stdout is all of the output");
+    assert_eq!(value["stderr"], "");
+    assert_eq!((value["blockedCode"].clone(), value["error"].clone()), (Value::Null, Value::Null));
     assert_eq!(value["path"], "system1");
     assert_eq!(value["risk"], "safe");
     assert!(value["output"].as_str().unwrap().trim_end().ends_with("work"));
@@ -1272,4 +1293,428 @@ fn a_label_taken_while_the_translator_was_writing_is_not_overwritten() {
     assert_eq!((learned.label.as_str(), learned.created, learned.translated), ("git-recent-commits-x", true, true));
     assert_eq!(scratch.brain.skill("git-recent-commits").unwrap().unwrap().scenario, "theirs");
     assert_eq!(scratch.brain.skill("git-recent-commits-x").unwrap().unwrap().steps, ["git log --oneline -n {count}"]);
+}
+
+// ── Plans, blocked codes and corrections without a terminal (ADR 18) ─────────
+
+fn plans(scratch: &Scratch, models: &Models, ids: &[i64], values: &[(&str, &str)], script: &mut Script) -> Vec<Outcome> {
+    plans_with(scratch, models, ids, values, script, RunFlags { yolo: false, capture: true })
+}
+
+fn plans_with(
+    scratch: &Scratch,
+    models: &Models,
+    ids: &[i64],
+    values: &[(&str, &str)],
+    script: &mut Script,
+    flags: RunFlags,
+) -> Vec<Outcome> {
+    let values: Vec<(String, String)> = values.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    run_plans(&scratch.brain, models, ids, &values, &quiet(), script, flags).unwrap()
+}
+
+fn no_model_at_all() -> Models {
+    models(|_| panic!("a plan runs with no System 1 call"), no_language_model()).0
+}
+
+fn code(outcome: &Outcome) -> Option<&str> {
+    outcome.blocked_code.as_deref()
+}
+
+#[test]
+fn a_planned_proposal_runs_as_planned_once_with_no_model_call() {
+    let scratch = Scratch::new("plan-run");
+    std::fs::write(scratch.work.join("notes.txt"), "one\ntwo\n").unwrap();
+    let proposal = new_proposal(
+        "count-lines",
+        "wc -l {file}",
+        json!([{ "name": "file", "kind": "file", "description": "the file to count", "default": null }]),
+        json!([{ "name": "file", "value": "notes.txt" }]),
+    );
+    let (models, _) = models(|_| decision(NONE, 0.7, 0.95, SAFE), vec![("proposal", proposal)]);
+    let dry = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let planned = go(&scratch, &models, "how many lines are in notes.txt", &mut Script::default(), &dry);
+    assert_eq!((code(&planned), planned.exit_code()), (Some("dry_run"), 0));
+    assert_eq!(planned.phrase.as_deref(), Some("how many lines are in …"));
+    assert_eq!(planned.values, [SlotValue { name: "file".into(), value: "notes.txt".into(), source: "agent".into() }]);
+    let id = planned.plan_id.expect("a dry run stores a plan");
+    assert!(scratch.brain.events(10).unwrap().is_empty(), "a dry run still logs no event");
+    assert!(scratch.brain.skill("count-lines").unwrap().is_none(), "and learns nothing");
+
+    // Every model call panics from here on.
+    let silent = no_model_at_all();
+    let ran = plans(&scratch, &silent, &[id], &[], &mut Script::default());
+    let [outcome] = ran.as_slice() else { panic!("one outcome per plan") };
+    assert!(outcome.ran && outcome.exit_code == Some(0));
+    assert_eq!(outcome.commands, planned.commands, "the commands run are the commands planned");
+    assert_eq!(outcome.stdout.as_deref().map(str::trim), Some("2 notes.txt"));
+    assert_eq!((outcome.path, outcome.plan_id), (Path::System2, Some(id)));
+    assert_eq!(
+        outcome.learned,
+        ["new skill count-lines", "count-lines was not checked with System 1"],
+        "a plan asks no model"
+    );
+    let skill = scratch.brain.skill("count-lines").unwrap().unwrap();
+    assert_eq!((skill.examples.as_slice(), skill.uses), (["how many lines are in …".to_string()].as_slice(), 1));
+    let event = scratch.brain.events(1).unwrap().remove(0);
+    assert_eq!((Some(event.id), event.cwd.as_str()), (outcome.event_id, scratch.work.to_str().unwrap()));
+    assert_eq!(event.command.as_deref(), Some("wc -l notes.txt"));
+
+    let again = plans(&scratch, &silent, &[id], &[], &mut Script::default());
+    assert_eq!((code(&again[0]), again[0].ran, again[0].exit_code()), (Some("plan_already_run"), false, 3));
+    assert_eq!(scratch.brain.events(10).unwrap().len(), 1);
+}
+
+#[test]
+fn a_plan_is_refused_after_it_expires_and_to_another_user() {
+    let scratch = Scratch::new("plan-refused");
+    let (models, _) = models(|_| decision("list-files-by-time", 0.98, 0.9, SAFE), no_language_model());
+    let dry = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let first = go(&scratch, &models, "newest files", &mut Script::default(), &dry).plan_id.unwrap();
+    let second = go(&scratch, &models, "newest files", &mut Script::default(), &dry).plan_id.unwrap();
+
+    let other = Brain::open_as(BrainConfig::file(&scratch.root.join("brain.db")), "other").unwrap();
+    let outcomes =
+        run_plans(&other, &no_model_at_all(), &[first], &[], &quiet(), &mut Script::default(), RunFlags::default()).unwrap();
+    assert_eq!(code(&outcomes[0]), Some("plan_not_found"), "another user's plan is not theirs to see");
+    assert!(other.events(10).unwrap().is_empty());
+
+    scratch.brain.expire_plan(second).unwrap();
+    let outcomes = plans(&scratch, &no_model_at_all(), &[second, 999], &[], &mut Script::default());
+    assert_eq!(code(&outcomes[0]), Some("plan_expired"));
+    assert_eq!(code(&outcomes[1]), Some("not_run"), "nothing after a refusal runs");
+    let outcomes = plans(&scratch, &no_model_at_all(), &[999], &[], &mut Script::default());
+    assert_eq!(code(&outcomes[0]), Some("plan_not_found"));
+
+    // The owner can still run the one that has not expired.
+    let outcomes = plans(&scratch, &no_model_at_all(), &[first], &[], &mut Script::default());
+    assert!(outcomes[0].ran);
+}
+
+#[test]
+fn a_destructive_plan_still_needs_yolo() {
+    let scratch = Scratch::new("plan-destructive");
+    let log = scratch.work.join("old.log");
+    std::fs::write(&log, "noise\n").unwrap();
+    let proposal = new_proposal("delete-log-files", "rm -f *.log", json!([]), json!([]));
+    let (models, _) = models(|_| decision(NONE, 0.8, 0.95, [0.1, 0.3, 0.6]), vec![("proposal", proposal)]);
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
+    let blocked = go(&scratch, &models, "delete all the log files", &mut Script::new(&[None], &[]), &options);
+    assert_eq!(code(&blocked), Some("destructive"));
+    let id = blocked.plan_id.expect("a run nobody could confirm stores a plan");
+    assert_eq!(scratch.brain.events(10).unwrap().len(), 1, "a blocked run is logged as before");
+
+    let refused = plans(&scratch, &no_model_at_all(), &[id], &[], &mut Script::new(&[None], &[]));
+    assert_eq!((code(&refused[0]), refused[0].ran), (Some("destructive"), false));
+    assert!(log.exists());
+    let declined = plans(&scratch, &no_model_at_all(), &[id], &[], &mut Script::new(&[Some(false)], &[]));
+    assert_eq!(code(&declined[0]), Some("declined"));
+
+    let yolo = RunFlags { yolo: true, capture: true };
+    let ran = plans_with(&scratch, &no_model_at_all(), &[id], &[], &mut Script::default(), yolo);
+    assert!(ran[0].ran && ran[0].exit_code == Some(0), "refusing it did not use it up");
+    assert!(!log.exists());
+}
+
+#[test]
+fn plans_run_in_order_and_stop_at_the_first_failure() {
+    let scratch = Scratch::new("plan-chain");
+    for (label, step) in
+        [("say-one", "echo one >> trail"), ("show-missing", "cat missing.txt"), ("say-three", "echo three >> trail")]
+    {
+        scratch
+            .brain
+            .add_skill(&NewSkill {
+                label: label.into(),
+                steps: vec![step.into()],
+                scenario: format!("runs {step}"),
+                risk: Risk::Safe,
+                origin: Origin::Taught,
+                examples: vec![],
+                slots: vec![],
+            })
+            .unwrap();
+    }
+    let (models, _) =
+        models(|request| decision(request["state"]["request"].as_str().unwrap(), 0.99, 0.9, SAFE), no_language_model());
+    let dry = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let id = |label: &str| go(&scratch, &models, label, &mut Script::default(), &dry).plan_id.unwrap();
+    let (one, missing, three) = (id("say-one"), id("show-missing"), id("say-three"));
+
+    let outcomes = plans(&scratch, &no_model_at_all(), &[one, three], &[], &mut Script::default());
+    assert!(outcomes.iter().all(|outcome| outcome.ran && outcome.exit_code == Some(0)));
+    assert_eq!(std::fs::read_to_string(scratch.work.join("trail")).unwrap(), "one\nthree\n", "in the order given");
+
+    let (one, three) = (id("say-one"), id("say-three"));
+    let outcomes = plans(&scratch, &no_model_at_all(), &[one, missing, three], &[], &mut Script::default());
+    assert_eq!(outcomes.len(), 3, "every plan gets an outcome");
+    assert_eq!((outcomes[1].ran, outcomes[1].exit_code), (true, Some(1)));
+    assert!(outcomes[1].stderr.as_deref().unwrap().contains("missing.txt"));
+    assert_eq!((code(&outcomes[2]), outcomes[2].ran, outcomes[2].plan_id), (Some("not_run"), false, Some(three)));
+    assert_eq!(outcomes[2].commands, ["echo three >> trail"]);
+    assert_eq!(std::fs::read_to_string(scratch.work.join("trail")).unwrap(), "one\nthree\none\n");
+    assert!(
+        plans(&scratch, &no_model_at_all(), &[three], &[], &mut Script::default())[0].ran,
+        "a plan not run is still there"
+    );
+}
+
+#[test]
+fn missing_values_are_given_to_jli_run_without_routing() {
+    let scratch = Scratch::new("plan-missing");
+    greeting_skill(&scratch);
+    let nothing = json!({ "values": [{ "name": "name", "value": null }] });
+    let (models, _) = models(|_| decision("greet", 0.9, 0.9, SAFE), vec![("slot_values", nothing)]);
+    let blocked = go(&scratch, &models, "greet greeting=hello", &mut Script::default(), &scratch.options(Mode::Semi));
+    assert_eq!((code(&blocked), blocked.exit_code()), (Some("missing_value"), 3));
+    let names: Vec<&str> = blocked.missing.iter().map(|slot| slot.name.as_str()).collect();
+    assert_eq!(names, ["name"]);
+    assert_eq!(blocked.accepts.len(), 3, "every slot the skill takes");
+    let id = blocked.plan_id.expect("an incomplete plan is stored too");
+
+    let silent = no_model_at_all();
+    let wrong = vec![("nobody".to_string(), "x".to_string())];
+    let refused = run_plans(&scratch.brain, &silent, &[id], &wrong, &quiet(), &mut Script::default(), RunFlags::default());
+    assert!(refused.is_err(), "a value no plan is missing is refused before anything runs");
+    let still = plans(&scratch, &silent, &[id], &[], &mut Script::default());
+    assert_eq!((code(&still[0]), still[0].missing.len()), (Some("missing_value"), 1));
+    let ran = plans(&scratch, &silent, &[id], &[("name", "Ada 'L'")], &mut Script::default());
+    assert_eq!(ran[0].output.as_deref(), Some("hello Ada 'L' x1\n"), "the caller's value, as written");
+    let given = ran[0].values.iter().find(|value| value.name == "name").unwrap();
+    assert_eq!(given.source, "caller");
+    assert_eq!(scratch.brain.skill("greet").unwrap().unwrap().examples, ["greet greeting=…"]);
+}
+
+#[test]
+fn an_unknown_argument_is_a_plan_waiting_for_its_values() {
+    let scratch = Scratch::new("plan-unknown");
+    greeting_skill(&scratch);
+    let no_slot = json!({ "arguments": [{ "name": "who", "placeholder": null }] });
+    let (models, _) = models(|_| decision("greet", 0.9, 0.9, SAFE), vec![("argument_names", no_slot)]);
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
+    let blocked = go(&scratch, &models, "greet who=Ada greeting=hi", &mut Script::default(), &options);
+    assert_eq!(code(&blocked), Some("unknown_argument"));
+    assert_eq!(blocked.unknown_arguments, ["who"]);
+    let names: Vec<&str> = blocked.missing.iter().map(|slot| slot.name.as_str()).collect();
+    assert_eq!(names, ["name", "count"], "fill_slots stops at the unknown argument, so these never got a value");
+    let id = blocked.plan_id.unwrap();
+    let ran = plans(&scratch, &no_model_at_all(), &[id], &[("name", "Ada"), ("count", "two")], &mut Script::default());
+    assert_eq!(ran[0].output.as_deref(), Some("hi Ada x2\n"), "a number slot reads a number word, as in a request");
+}
+
+#[test]
+fn every_way_of_not_running_has_its_code() {
+    let scratch = Scratch::new("codes");
+    let (models, _) = models(|_| decision(NONE, 0.9, 0.05, SAFE), no_language_model());
+    let outcome = go(&scratch, &models, "how much is 2 + 2", &mut Script::default(), &scratch.options(Mode::Semi));
+    assert_eq!((code(&outcome), outcome.plan_id), (Some("not_a_command"), None));
+
+    let (models, _) = self::models(|_| decision("git-stage-all", 0.9, 0.9, [0.2, 0.8, 0.0]), no_language_model());
+    let outcome = go(&scratch, &models, "stage everything", &mut Script::new(&[None], &[]), &scratch.options(Mode::Semi));
+    assert_eq!(code(&outcome), Some("needs_confirmation"));
+    assert!(outcome.plan_id.is_some() && outcome.event_id.is_some());
+    let mut declining = Script::new(&[Some(false)], &[""]);
+    let outcome = go(&scratch, &models, "stage everything", &mut declining, &scratch.options(Mode::Semi));
+    assert_eq!((code(&outcome), outcome.plan_id), (Some("declined"), None), "a no is an answer, not a plan");
+
+    let (models, _) = self::models(|_| decision("git-commit", 0.9, 0.9, [0.2, 0.8, 0.0]), no_language_model());
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "commit message=wip msg=other", &mut Script::default(), &options);
+    assert_eq!(code(&outcome), Some("unknown_argument"));
+    // missing_value, dry_run, destructive and the plan codes have their own tests above.
+}
+
+#[test]
+fn auto_mode_reports_its_diagnosis_when_nobody_can_answer() {
+    let scratch = Scratch::new("diagnosis");
+    let suggestion = json!({
+        "verdict": "wrong_command", "explanation": "That shows the status; the request was about branches.",
+        "options": [{ "command": "git branch", "description": "the local branches" }],
+    });
+    let (models, _) = models(|_| decision("git-status", 0.9, 0.9, SAFE), vec![("suggestion", suggestion)]);
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Auto) };
+    let mut script = Script::default();
+    script.asks.push_back(None);
+    let outcome = go(&scratch, &models, "which branches are there", &mut script, &options);
+    assert!(outcome.ran);
+    let diagnosis = outcome.diagnosis.expect("the diagnosis that was paid for is returned");
+    assert_eq!(diagnosis.options[0].command, "git branch");
+    let value = serde_json::to_value(&diagnosis).unwrap();
+    assert_eq!(value["verdict"], "wrong_command");
+}
+
+#[test]
+fn a_storage_failure_after_the_command_ran_does_not_hide_that_it_ran() {
+    let scratch = Scratch::new("after-run");
+    let root = scratch.root.display().to_string();
+    // The command takes away write permission on the brain's directory, so the writes after it fail.
+    scratch
+        .brain
+        .add_skill(&NewSkill {
+            label: "lock-up".into(),
+            steps: vec![format!("chmod 555 '{root}' && echo locked")],
+            scenario: "the user wants it locked".into(),
+            risk: Risk::Safe,
+            origin: Origin::Taught,
+            examples: vec![],
+            slots: vec![],
+        })
+        .unwrap();
+    let (models, _) = models(|_| decision("lock-up", 0.6, 0.9, SAFE), no_language_model());
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
+    let result = route(&scratch.brain, &models, "lock it up", &quiet(), &mut Script::default(), &options);
+    let _ = std::fs::set_permissions(&scratch.root, std::os::unix::fs::PermissionsExt::from_mode(0o755));
+    let outcome = result.expect("the outcome comes back, not an error");
+    assert!(outcome.ran && outcome.exit_code == Some(0));
+    assert_eq!(outcome.stdout.as_deref(), Some("locked\n"));
+    assert_eq!(outcome.error.as_deref(), Some("storage"), "{:?}", outcome.error_message);
+    assert!(outcome.event_id.is_none(), "the event could not be logged either");
+}
+
+#[test]
+fn errors_have_a_kind() {
+    let tagged = anyhow::Error::new(Coded { code: "model", message: "Mercury did not answer".into() }).context("asking");
+    assert_eq!(error_code(&tagged), "model");
+    assert_eq!(error_code(&anyhow::anyhow!("something else")), "internal");
+    let offline = Models { llm: Llm::with_transport(|_| Err("connection refused".into())), ..no_model_at_all() };
+    let scratch = Scratch::new("model-error");
+    let options = RouteOptions { agent_only: true, ..scratch.options(Mode::Semi) };
+    let error = route(&scratch.brain, &offline, "anything", &quiet(), &mut Script::default(), &options).unwrap_err();
+    assert_eq!(error_code(&error), "model");
+    let missing = crate::llm::endpoint_from(|_| None).unwrap_err();
+    assert_eq!(error_code(&missing), "configuration");
+}
+
+/// An `App` on the scratch brain, as `jli fix` runs with no terminal.
+fn app(scratch: &Scratch, user: &str, models: Models) -> App {
+    App {
+        brain: Brain::open_as(BrainConfig::file(&scratch.root.join("brain.db")), user).unwrap(),
+        models,
+        terminal: crate::ui::Terminal::not_a_terminal(),
+    }
+}
+
+fn quiet_flags() -> Flags {
+    Flags::quiet()
+}
+
+fn lists(scratch: &Scratch, label: &str) -> (Vec<String>, Vec<String>) {
+    let skill = scratch.brain.skill(label).unwrap().unwrap();
+    (skill.examples, skill.counter_examples)
+}
+
+fn yes(scratch: &Scratch) -> RouteOptions {
+    RouteOptions { yes: true, ..scratch.options(Mode::Semi) }
+}
+
+#[test]
+fn fixing_an_event_with_a_command_teaches_what_a_no_at_the_prompt_teaches() {
+    // At the prompt: declining_and_typing_a_known_command_relinks_the_phrase.
+    let typed = Scratch::new("fix-parity-typed");
+    let (models, _) = models(|_| decision("list-files", 0.9, 0.9, SAFE), no_language_model());
+    go(&typed, &models, "newest files", &mut Script::new(&[Some(false)], &["ls -ltr"]), &typed.options(Mode::Semi));
+
+    // With no terminal: the route ran, then `jli fix <eventId> -- ls -ltr`.
+    let fixed = Scratch::new("fix-parity-fixed");
+    let (models, _) = self::models(|_| decision("list-files", 0.9, 0.9, SAFE), no_language_model());
+    let ran = go(&fixed, &models, "newest files", &mut Script::default(), &yes(&fixed));
+    assert_eq!(lists(&fixed, "list-files").0, ["newest files"], "at 0.9 the phrasing was learned");
+    let fix = Fix { event: ran.event_id, how: FixHow::Command(vec!["ls -ltr".into()]), run: false };
+    assert_eq!(app(&fixed, "default", no_model_at_all()).fix(&quiet_flags(), fix).unwrap(), 0);
+
+    for label in ["list-files", "list-files-by-time"] {
+        assert_eq!(lists(&fixed, label), lists(&typed, label), "{label}");
+    }
+    assert_eq!(lists(&fixed, "list-files").1, ["newest files"]);
+    let correction = fixed.brain.corrections().unwrap().remove(0);
+    assert_eq!(
+        (correction.event_id, correction.terminal, correction.how.as_str()),
+        (ran.event_id.unwrap(), false, "command")
+    );
+    assert_eq!(correction.result_event_id, None, "learned, not run");
+    assert!(!fixed.brain.events(1).unwrap()[0].accepted, "the corrected event is not this directory's last route any more");
+
+    // It returned a plan of the right command; running it runs that, with no model, and counts a use.
+    let outcomes = plans(&fixed, &no_model_at_all(), &[1], &[], &mut Script::default());
+    assert!(outcomes[0].ran && outcomes[0].commands == ["ls -ltr"]);
+    let uses = |scratch: &Scratch| scratch.brain.skill("list-files-by-time").unwrap().unwrap().uses;
+    assert_eq!(uses(&fixed), uses(&typed));
+    assert_eq!(lists(&fixed, "list-files-by-time"), lists(&typed, "list-files-by-time"));
+}
+
+#[test]
+fn fixing_an_event_with_the_same_command_and_another_value_is_not_a_counter_example() {
+    let scratch = Scratch::new("fix-same-skill");
+    let (models, _) = models(|_| decision("git-commit", 0.9, 0.9, [0.2, 0.8, 0.0]), no_language_model());
+    let ran = go(&scratch, &models, "commit as \"wip\"", &mut Script::default(), &yes(&scratch));
+    assert!(ran.ran, "it ran, and failed outside a repository");
+    let fix = Fix { event: ran.event_id, how: FixHow::Command(vec!["git commit -m other".into()]), run: false };
+    app(&scratch, "default", no_model_at_all()).fix(&quiet_flags(), fix).unwrap();
+    let (examples, counter) = lists(&scratch, "git-commit");
+    assert!(counter.is_empty());
+    assert_eq!(examples, ["commit as \"…\""], "as the_same_command_with_another_value_is_not_a_counter_example stores it");
+}
+
+#[test]
+fn fixing_an_event_with_what_was_expected_returns_a_plan_from_the_agent() {
+    let scratch = Scratch::new("fix-expected");
+    let (models, _) = models(|_| decision("list-files", 0.9, 0.9, SAFE), no_language_model());
+    let ran = go(&scratch, &models, "files by date", &mut Script::default(), &yes(&scratch));
+    let proposal = json!({
+        "kind": "existing", "existingLabel": "list-files-by-time", "label": null, "steps": [],
+        "scenario": "", "slots": [], "slotValues": [], "risk": "safe", "explanation": "Newest last.", "answer": null,
+    });
+    let (models, replies) = self::models(|_| panic!("only the agent is asked"), vec![("proposal", proposal)]);
+    let fix = Fix { event: ran.event_id, how: FixHow::Expected("the newest last".into()), run: false };
+    assert_eq!(app(&scratch, "default", models).fix(&quiet_flags(), fix).unwrap(), 0, "a plan, not a run");
+    let input: Value =
+        serde_json::from_str(replies.seen.lock().unwrap()[0]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(input["clarification"], "the newest last");
+    assert_eq!(input["rejectedSkills"], json!([{ "label": "list-files", "steps": ["ls"] }]));
+    assert_eq!(lists(&scratch, "list-files").1, ["files by date"]);
+    assert_eq!(scratch.brain.events(10).unwrap().len(), 1, "the agent's answer was not run");
+
+    let outcomes = plans(&scratch, &no_model_at_all(), &[1], &[], &mut Script::default());
+    assert_eq!((outcomes[0].label.as_deref(), outcomes[0].ran), (Some("list-files-by-time"), true));
+    assert_eq!(
+        lists(&scratch, "list-files-by-time").0,
+        ["files by date"],
+        "an agent route teaches its phrasing when it runs"
+    );
+    let correction = scratch.brain.corrections().unwrap().remove(0);
+    assert_eq!((correction.how.as_str(), correction.detail.as_deref()), ("expected", Some("the newest last")));
+}
+
+#[test]
+fn another_users_event_cannot_be_fixed() {
+    let scratch = Scratch::new("fix-other-user");
+    let (models, _) = models(|_| decision("list-files", 0.9, 0.9, SAFE), no_language_model());
+    let ran = go(&scratch, &models, "what is here", &mut Script::default(), &yes(&scratch));
+    let fix = Fix { event: ran.event_id, how: FixHow::Command(vec!["ls -ltr".into()]), run: false };
+    assert_eq!(app(&scratch, "other", no_model_at_all()).fix(&quiet_flags(), fix).unwrap(), 1);
+    assert!(lists(&scratch, "list-files").1.is_empty());
+}
+
+#[test]
+fn a_plan_that_must_run_in_the_calling_shell_is_not_run_by_jli_run() {
+    let scratch = Scratch::new("plan-cd");
+    std::fs::create_dir(scratch.work.join("src")).unwrap();
+    scratch
+        .brain
+        .add_skill(&NewSkill {
+            label: "into-src".into(),
+            steps: vec!["cd src".into()],
+            scenario: "the user wants to be in src".into(),
+            risk: Risk::Safe,
+            origin: Origin::Taught,
+            examples: vec![],
+            slots: vec![],
+        })
+        .unwrap();
+    let (models, _) = models(|_| decision("into-src", 0.99, 0.9, SAFE), no_language_model());
+    let dry = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let id = go(&scratch, &models, "go into src", &mut Script::default(), &dry).plan_id.unwrap();
+    let outcomes = plans(&scratch, &no_model_at_all(), &[id], &[], &mut Script::default());
+    assert_eq!((code(&outcomes[0]), outcomes[0].ran), (Some("needs_caller_shell"), false));
+    assert_eq!(outcomes[0].caller_shell, ["cd src"]);
 }

@@ -9,7 +9,7 @@ use libsql::{Builder, Connection, Database, Value};
 use tokio::runtime::Runtime;
 
 use crate::seed::seed_skills;
-use crate::types::{add_alias, BrainEvent, Origin, Path, Risk, Skill, Slot};
+use crate::types::{add_alias, coded, BrainEvent, Origin, Path, Risk, Skill, Slot, STORAGE};
 
 /// Where the brain lives. One libSQL client covers every deployment:
 ///
@@ -144,6 +144,32 @@ const SCHEMA: &str = "
      created_at  TEXT NOT NULL,
      from_user   TEXT NOT NULL,
      PRIMARY KEY (user_id, project_id, label, created_at)
+   );
+  CREATE TABLE IF NOT EXISTS plans (
+     id            INTEGER PRIMARY KEY AUTOINCREMENT,
+     user_id       TEXT NOT NULL,
+     project_id    TEXT NOT NULL DEFAULT '',
+     created_at    TEXT NOT NULL,
+     expires_at    TEXT NOT NULL,
+     host          TEXT NOT NULL,
+     cwd           TEXT NOT NULL,
+     state         TEXT NOT NULL,
+     body          TEXT NOT NULL,
+     commands_hash TEXT NOT NULL,
+     ran_at        TEXT,
+     event_id      INTEGER
+   );
+  CREATE TABLE IF NOT EXISTS corrections (
+     id              INTEGER PRIMARY KEY AUTOINCREMENT,
+     user_id         TEXT NOT NULL,
+     project_id      TEXT NOT NULL DEFAULT '',
+     event_id        INTEGER NOT NULL,
+     ts              TEXT NOT NULL,
+     host            TEXT NOT NULL,
+     terminal        INTEGER NOT NULL,
+     how             TEXT NOT NULL,
+     detail          TEXT,
+     result_event_id INTEGER
    );
 ";
 
@@ -344,7 +370,12 @@ fn to_event(row: libsql::Row) -> BrainEvent {
 
 /// UTC with millisecond precision, `2026-10-02T12:00:00.000Z`: the format every brain holds.
 pub fn now_iso() -> String {
-    let millis = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+    iso_after(Duration::ZERO)
+}
+
+/// The same format, `later` from now. Text in this format sorts as the times it holds.
+pub fn iso_after(later: Duration) -> String {
+    let millis = (SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default() + later).as_millis() as i64;
     let (seconds, millis) = (millis.div_euclid(1000), millis.rem_euclid(1000));
     let (days, of_day) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
     // Howard Hinnant's days-to-civil.
@@ -388,6 +419,34 @@ pub struct NewEvent {
     pub learned: Option<String>,
     pub ms_system1: Option<i64>,
     pub ms_system2: Option<i64>,
+}
+
+/// A stored plan, as `jli run` reads it back. `body` is the plan itself, as JSON written by `plan.rs`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanRow {
+    pub id: i64,
+    pub created_at: String,
+    pub expires_at: String,
+    pub cwd: String,
+    /// `ready`, `incomplete`, `running` once claimed, `ran` once its event is logged.
+    pub state: String,
+    pub body: String,
+    pub commands_hash: String,
+}
+
+/// One `jli fix`, kept beside the event log so an audit can tell who corrected what.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Correction {
+    /// The event that was corrected.
+    pub event_id: i64,
+    /// Whether a terminal was there to answer: false for an agent or a script.
+    pub terminal: bool,
+    /// `unlearn`, `command` or `expected`.
+    pub how: String,
+    /// The command given, or the words of what was expected.
+    pub detail: Option<String>,
+    /// The event the correction itself logged, if it logged one.
+    pub result_event_id: Option<i64>,
 }
 
 #[derive(Clone, Copy)]
@@ -618,7 +677,7 @@ impl Brain {
             }
             skill.label.push_str("-x");
         }
-        Err(anyhow!("could not find a free label for {}", skill.label))
+        Err(coded(STORAGE, format!("could not find a free label for {}", skill.label)))
     }
 
     /// Returns how many rows were written: 0 when the label was taken and `conflict` does nothing.
@@ -829,7 +888,10 @@ impl Brain {
             // Another writer got there first. A replica reads its local copy, so catch up before reading again.
             self.sync()?;
         }
-        Err(anyhow!("{label} kept changing while its {column} were being written, so nothing was written. Try again."))
+        Err(coded(
+            STORAGE,
+            format!("{label} kept changing while its {column} were being written, so nothing was written. Try again."),
+        ))
     }
 
     pub fn record_use(&self, label: &str) -> Result<()> {
@@ -897,6 +959,133 @@ impl Brain {
             to_event,
         )?;
         Ok(rows.into_iter().next())
+    }
+
+    /// One of this user's events by id. Another user's id is not found: event ids count per table.
+    pub fn event(&self, id: i64) -> Result<Option<BrainEvent>> {
+        let (table, rows) = (self.scope.events(), self.scope.rows());
+        let rows = self.query(
+            &format!("SELECT {EVENT_COLUMNS} FROM {table} WHERE {rows} AND id = ?"),
+            self.scope.args(vec![id.into()]),
+            to_event,
+        )?;
+        Ok(rows.into_iter().next())
+    }
+
+    /// Keep a plan for `ttl`. One table holds every user's plans, keyed by user and project as the
+    /// `scoped_*` tables are; an older jli never reads it. Returns the plan's id.
+    pub fn save_plan(&self, cwd: &str, state: &str, body: &str, commands_hash: &str, ttl: Duration) -> Result<i64> {
+        self.execute(
+            "INSERT INTO plans (user_id, project_id, created_at, expires_at, host, cwd, state, body, commands_hash)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            vec![
+                self.scope.user.clone().into(),
+                self.scope.project.clone().into(),
+                now_iso().into(),
+                iso_after(ttl).into(),
+                host().into(),
+                cwd.into(),
+                state.into(),
+                body.into(),
+                commands_hash.into(),
+            ],
+        )?;
+        Ok(self.conn().last_insert_rowid())
+    }
+
+    /// One of this user's plans. Another user's plan is not found.
+    pub fn plan(&self, id: i64) -> Result<Option<PlanRow>> {
+        let rows = self.query(
+            "SELECT id, created_at, expires_at, cwd, state, body, commands_hash FROM plans
+             WHERE id = ? AND user_id = ? AND project_id = ?",
+            vec![id.into(), self.scope.user.clone().into(), self.scope.project.clone().into()],
+            |row| {
+                let mut c = Columns::new(row);
+                PlanRow {
+                    id: opt_int(c.take()).unwrap_or(0),
+                    created_at: text(c.take()),
+                    expires_at: text(c.take()),
+                    cwd: text(c.take()),
+                    state: text(c.take()),
+                    body: text(c.take()),
+                    commands_hash: text(c.take()),
+                }
+            },
+        )?;
+        Ok(rows.into_iter().next())
+    }
+
+    /// Take a plan for running. One conditional statement: of two callers only one sees true, and a
+    /// plan that expired, ran, or changed state since it was read is not taken.
+    pub fn claim_plan(&self, id: i64, from_state: &str) -> Result<bool> {
+        let now = now_iso();
+        let written = self.execute(
+            "UPDATE plans SET state = 'running', ran_at = ?
+             WHERE id = ? AND user_id = ? AND project_id = ? AND state = ? AND expires_at > ?",
+            vec![
+                now.clone().into(),
+                id.into(),
+                self.scope.user.clone().into(),
+                self.scope.project.clone().into(),
+                from_state.into(),
+                now.into(),
+            ],
+        )?;
+        Ok(written > 0)
+    }
+
+    /// A claimed plan has run; `event_id` is the event its run logged.
+    pub fn finish_plan(&self, id: i64, event_id: Option<i64>) -> Result<()> {
+        self.execute(
+            "UPDATE plans SET state = 'ran', event_id = ? WHERE id = ? AND user_id = ? AND project_id = ?",
+            vec![event_id.into(), id.into(), self.scope.user.clone().into(), self.scope.project.clone().into()],
+        )?;
+        Ok(())
+    }
+
+    /// Let a plan's time run out, for tests.
+    #[cfg(test)]
+    pub fn expire_plan(&self, id: i64) -> Result<()> {
+        self.execute("UPDATE plans SET expires_at = ? WHERE id = ?", vec![now_iso().into(), id.into()])?;
+        Ok(())
+    }
+
+    pub fn log_correction(&self, correction: &Correction) -> Result<()> {
+        self.execute(
+            "INSERT INTO corrections (user_id, project_id, event_id, ts, host, terminal, how, detail, result_event_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            vec![
+                self.scope.user.clone().into(),
+                self.scope.project.clone().into(),
+                correction.event_id.into(),
+                now_iso().into(),
+                host().into(),
+                i64::from(correction.terminal).into(),
+                correction.how.clone().into(),
+                correction.detail.clone().into(),
+                correction.result_event_id.into(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// This user's corrections, oldest first.
+    pub fn corrections(&self) -> Result<Vec<Correction>> {
+        self.query(
+            "SELECT event_id, terminal, how, detail, result_event_id FROM corrections
+             WHERE user_id = ? AND project_id = ? ORDER BY id",
+            vec![self.scope.user.clone().into(), self.scope.project.clone().into()],
+            |row| {
+                let mut c = Columns::new(row);
+                Correction {
+                    event_id: opt_int(c.take()).unwrap_or(0),
+                    terminal: opt_int(c.take()) == Some(1),
+                    how: text(c.take()),
+                    detail: opt_text(c.take()),
+                    result_event_id: opt_int(c.take()),
+                }
+            },
+        )
     }
 }
 

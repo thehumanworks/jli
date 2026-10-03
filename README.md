@@ -138,12 +138,13 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | Command | What it does |
 | --- | --- |
 | `jli <request>` | route, run, learn |
-| `jli -n <request>` | dry run: show the command, execute and learn nothing |
+| `jli -n <request>` | dry run: show the command, execute and learn nothing, and keep it as a plan for `jli run` |
 | `jli -y <request>` | run without asking; never approves destructive commands (also `--yes`, `JLI_YES=1`) |
 | `jli -Y <request>` | run without asking, destructive commands included (also `--yolo`, `JLI_YOLO=1`) |
 | `jli config confidence <0..1>` | set the confidence threshold |
 | `jli config mode <manual\|semi\|auto>` | set the learning mode |
-| `jli --json <request>` | machine-readable outcome with captured output, for agents |
+| `jli --json <request>` | machine-readable outcome with captured output, for agents; an error is one JSON object too |
+| `jli run <planId> [<planId> …] [name=value …]` | run stored plans exactly as shown, in order, with no model call; stop at the first that fails |
 | `jli skills` | every skill, with learned phrasings and counter-examples |
 | `jli stats` | routing mix, latency, the learning curve, how often routes were right first time, and the `jli eval` trend |
 | `jli eval [<label>] [--limit N]` | route every stored example with itself held out, and replay accepted requests; priced before it spends |
@@ -153,12 +154,35 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | `jli history` | recent requests and how each was routed |
 | `jli teach "<phrase>" -- <command>` | link a phrase to a command; repeat to add more phrasings |
 | `jli fix` | the last command run here was wrong: unlearn it and ask the agent |
+| `jli fix <eventId>` | the same for one of your events, from anywhere |
+| `jli fix <eventId> -- <command>` | that was wrong, this is right: learn it as a "no" and the command at the prompt would, and return a plan of it (`--run` runs it) |
+| `jli fix <eventId> --expected "<words>"` | unlearn it and ask the agent with what you expected; returns a plan (`--run` runs it) |
 | `jli forget <label>` | delete a skill |
 | `jli shell-init [zsh\|bash\|fish]` | print the shell function that lets `cd`, `export` and `source` change your shell |
 | `jli --user-id=<id> …` | any command, as another user with their own skills, history and settings (also `JLI_USER_ID`) |
 | `jli share <label> --to <user>` | give another user a copy of one of your skills |
 
 The decision trace goes to stderr and the command's output to stdout, so `jli` composes in pipes.
+
+## For agents
+
+An agent drives `jli` with `--json` and no terminal. It can review a route, then run exactly that:
+
+```sh
+jli --json -n how many words are in notes.txt   # {"commands": ["wc -w notes.txt"], "planId": 1, "blockedCode": "dry_run", …}
+jli --json run 1                                 # [{"ran": true, "exitCode": 0, "stdout": "6 notes.txt\n", "eventId": 1, …}]
+jli --json run 2 3 4                             # in order; after the first failure the rest say "not_run"
+jli --json run 5 message="fix the parser"        # a value the plan was missing (see "missing" in its outcome)
+jli --json fix 6 -- ls -la                       # event 6 was wrong, ls -la was right: learned, and a plan of it returned
+```
+
+A dry run, and a run that stopped for lack of a yes or a value, stores a plan for an hour. `jli run`
+asks no model and routes nothing; running a plan by id approves it as `--yes` does, so a destructive
+plan still needs `--yolo`, and a plan runs once. Every outcome says why nothing ran as a code
+(`blockedCode`), gives the event and plan ids, the phrase that is learned, each slot's value and
+source, System 1's runners-up, stdout and stderr apart, and auto mode's diagnosis. An error is
+`{"error": "<kind>", "errorMessage": …}`, and a failure after the command ran is reported beside
+`ran: true`, never instead of it. See [ADR 18](docs/adr/0018-agent-contract.md).
 
 ## Commands that change your shell
 
@@ -263,14 +287,15 @@ sees only the default user. See [ADR 15](docs/adr/0015-user-scope.md).
 | `src/eval.rs` | measures the matrix against its own examples and history, optimises it, and checks a new row against its closest skills |
 | `src/suggest.rs` | auto mode: diagnoses a failure and offers alternatives |
 | `src/llm.rs` | the one HTTP call every language model request goes through |
-| `src/router.rs` | the loop: decide, escalate, confirm, run, write back |
-| `src/store.rs` | the brain: skills, events and settings per user in libSQL, behind a runtime that never leaves the module |
+| `src/router.rs` | the loop: decide, escalate, confirm, run, write back; and a stored plan through the same confirmation and write-back |
+| `src/plan.rs` | plans: what a route pins, and `jli run` |
+| `src/store.rs` | the brain: skills, events, settings, plans and corrections per user in libSQL, behind a runtime that never leaves the module |
 | `src/args.rs` | reads the arguments a request states: `name=value`, labels and quoted text |
 | `src/slots.rs` | fills, expands and shell-quotes `{slot}` values |
 | `src/shell.rs` | the shell function, and which steps it must run in your shell |
 | `src/seed.rs` | the original hard-coded matrix, now only the seed for an empty brain |
 | `src/exec.rs` | runs the steps with `bash -c`, watching stderr in auto mode and for a new proposal, and tries builtins before they are handed over |
-| `src/cli.rs` | argument parsing, subcommands and the interactive session |
+| `src/cli.rs` | argument parsing, subcommands, the interactive session, and errors as JSON |
 | `src/ui.rs` | the trace on stderr, and the one owner of stdin |
 | `src/demo.rs` | the two-pass learning demo |
 | `src/tests.rs` | the router and learning loop, offline, against fake models and a scripted prompt |
