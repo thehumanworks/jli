@@ -1,0 +1,47 @@
+amends "package://github.com/jdx/hk/releases/download/v2.4.0/hk@2.4.0#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v2.4.0/hk@2.4.0#/Builtins.pkl"
+
+// Fast checks: they run on every commit, and `hk fix` applies what can be fixed.
+local linters = new Mapping<String, Step> {
+    ["cargo_fmt"] = Builtins.cargo_fmt
+    ["cargo_clippy"] = (Builtins.cargo_clippy) {
+        check = "cargo clippy --all-targets --quiet -- -D warnings"
+        fix = "cargo clippy --all-targets --quiet --fix --allow-dirty --allow-staged -- -D warnings"
+    }
+    // The architecture rules in rules/: each one is a decision from docs/adr.
+    ["ast_grep"] {
+        glob = List("**/*.rs", "rules/*.yml", "sgconfig.yml")
+        check = "ast-grep scan --error"
+    }
+    ["check_merge_conflict"] = Builtins.check_merge_conflict
+    ["trailing_whitespace"] = Builtins.trailing_whitespace
+}
+
+// The offline suite: the router and the learning loop against fake models. No network, no keys.
+local tests = new Mapping<String, Step> {
+    ["cargo_test"] {
+        glob = List("**/*.rs", "Cargo.toml", "Cargo.lock")
+        check = "cargo test --quiet"
+    }
+}
+
+hooks {
+    ["pre-commit"] {
+        fix = true
+        stash = "git"
+        steps = linters
+    }
+    ["pre-push"] {
+        steps {
+            ...linters
+            ...tests
+        }
+    }
+    ["check"] {
+        steps = linters
+    }
+    ["fix"] {
+        fix = true
+        steps = linters
+    }
+}

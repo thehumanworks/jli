@@ -1,0 +1,9 @@
+id: http-stays-in-llm
+language: rust
+severity: error
+message: Every language model request goes through the one HTTP call in src/llm.rs (ADR 4).
+rule:
+  kind: scoped_identifier
+  regex: ^ureq
+ignores:
+  - src/llm.rs

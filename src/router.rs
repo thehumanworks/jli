@@ -356,7 +356,8 @@ impl Route<'_> {
                         Plan { skill: existing, path: Path::System2, confidence, is_new: false, provided, risk }
                     }
                     None => {
-                        let base = proposal.label.as_deref().or(proposal.steps.first().map(String::as_str)).unwrap_or("skill");
+                        let base =
+                            proposal.label.as_deref().or(proposal.steps.first().map(String::as_str)).unwrap_or("skill");
                         let mut label = slug(base);
                         while self.all_skills.iter().any(|skill| skill.label == label) {
                             label.push_str("-x");
@@ -376,7 +377,13 @@ impl Route<'_> {
                         // A proposal nobody has vetted yet: the request's own risk reading gets a vote too.
                         let intent = decision.as_ref().map_or(Risk::Safe, |decided| decided.intent_risk);
                         Plan {
-                            skill: draft_skill(label, proposal.steps.clone(), proposal.scenario.clone(), proposal.risk, slots),
+                            skill: draft_skill(
+                                label,
+                                proposal.steps.clone(),
+                                proposal.scenario.clone(),
+                                proposal.risk,
+                                slots,
+                            ),
                             path: Path::System2,
                             confidence,
                             is_new: true,
@@ -448,7 +455,8 @@ impl Route<'_> {
         let approved = if options.yolo || (options.yes && !destructive) { Some(true) } else { prompt.confirm("Run it?") };
         let Some(approved) = approved else {
             self.outcome.blocked = Some(
-                if destructive { "destructive commands need an interactive yes or --yolo" } else { "needs confirmation" }.into(),
+                if destructive { "destructive commands need an interactive yes or --yolo" } else { "needs confirmation" }
+                    .into(),
             );
             ui.warn(if destructive {
                 "Not run: it is destructive, which needs an interactive yes or --yolo."
@@ -494,7 +502,9 @@ impl Route<'_> {
                 // An environment problem says nothing about the route, so nothing is unlearned or offered.
                 let verdict = diagnosis.verdict;
                 if matches!(verdict, Verdict::WrongCommand | Verdict::WrongValue) {
-                    if let Some(corrected) = self.correct(prompt, &plan, Some(diagnosis), verdict == Verdict::WrongCommand)? {
+                    if let Some(corrected) =
+                        self.correct(prompt, &plan, Some(diagnosis), verdict == Verdict::WrongCommand)?
+                    {
                         return Ok(corrected);
                     }
                 }
@@ -528,7 +538,10 @@ impl Route<'_> {
                 })?;
                 self.brain.record_use(&skill.label)?;
                 self.outcome.learned.push(format!("new skill {}", skill.label));
-                ui.learned(format!("new skill {}. Next time System 1 handles this without the agent.", c::bold(&skill.label)));
+                ui.learned(format!(
+                    "new skill {}. Next time System 1 handles this without the agent.",
+                    c::bold(&skill.label)
+                ));
             } else {
                 ui.note("The command failed, so the proposal was not learned.");
             }
@@ -616,10 +629,8 @@ impl Route<'_> {
                 None => Correction::Clarification((answer != "?").then_some(answer)),
             }
         } else {
-            let question = format!(
-                "What should it run instead? {}",
-                c::dim("a command, \"?\" to ask the agent, or enter to skip")
-            );
+            let question =
+                format!("What should it run instead? {}", c::dim("a command, \"?\" to ask the agent, or enter to skip"));
             let Some(answer) = prompt.ask(&question).map(|answer| answer.trim().to_string()) else { return Ok(None) };
             if answer.is_empty() {
                 return Ok(None);

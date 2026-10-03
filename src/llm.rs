@@ -47,9 +47,8 @@ pub fn endpoint() -> Result<Endpoint> {
 }
 
 /// Fast model: rewrites what was taught and suggests alternatives.
-pub static TRANSLATOR_MODEL: LazyLock<String> = LazyLock::new(|| {
-    clean(std::env::var("JLI_TRANSLATOR_MODEL").ok()).unwrap_or_else(|| "inception/mercury-2.5".into())
-});
+pub static TRANSLATOR_MODEL: LazyLock<String> =
+    LazyLock::new(|| clean(std::env::var("JLI_TRANSLATOR_MODEL").ok()).unwrap_or_else(|| "inception/mercury-2.5".into()));
 /// Reasoning agent: proposes commands for requests nothing in the matrix fits.
 pub static AGENT_MODEL: LazyLock<String> =
     LazyLock::new(|| clean(std::env::var("JLI_AGENT_MODEL").ok()).unwrap_or_else(|| "inception/mercury-2.5".into()));
@@ -98,11 +97,8 @@ const RETRY_STATUSES: [u16; 6] = [408, 429, 500, 502, 503, 504];
 const ATTEMPTS: usize = 2;
 
 fn post(call: &HttpCall) -> std::result::Result<(u16, String), String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(call.timeout))
-        .build()
-        .into();
+    let agent: ureq::Agent =
+        ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(call.timeout)).build().into();
     let mut response = agent
         .post(call.url)
         .header("authorization", &format!("Bearer {}", call.api_key))
@@ -130,7 +126,8 @@ pub fn strip_fence(content: &str) -> &str {
 /// JSON indented by one space: the shape of the user message the prompts were tuned with.
 fn one_space_json(value: &Value) -> String {
     let mut out = Vec::new();
-    let mut serializer = serde_json::Serializer::with_formatter(&mut out, serde_json::ser::PrettyFormatter::with_indent(b" "));
+    let mut serializer =
+        serde_json::Serializer::with_formatter(&mut out, serde_json::ser::PrettyFormatter::with_indent(b" "));
     value.serialize(&mut serializer).expect("a JSON value serializes");
     String::from_utf8(out).expect("JSON is UTF-8")
 }
@@ -212,10 +209,8 @@ impl Llm {
 
 fn read_reply<T: DeserializeOwned>(text: &str) -> Result<T> {
     let reply: Value = serde_json::from_str(text)?;
-    let content = reply
-        .pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("no message content"))?;
+    let content =
+        reply.pointer("/choices/0/message/content").and_then(Value::as_str).ok_or_else(|| anyhow!("no message content"))?;
     Ok(serde_json::from_str(strip_fence(content))?)
 }
 

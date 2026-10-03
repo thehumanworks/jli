@@ -115,12 +115,9 @@ mod tests {
 
     #[test]
     fn watched_stderr_is_forwarded_and_its_tail_kept() {
-        let result = run(
-            &steps(&["echo watched >&2; exit 2"]),
-            Path::new("/"),
-            RunOptions { capture: false, watch_stderr: true },
-        )
-        .unwrap();
+        let result =
+            run(&steps(&["echo watched >&2; exit 2"]), Path::new("/"), RunOptions { capture: false, watch_stderr: true })
+                .unwrap();
         assert_eq!((result.exit_code, result.output, result.stderr.as_str()), (2, None, "watched\n"));
 
         let long = format!("{}é{}", "a".repeat(50_000), "b".repeat(STDERR_KEPT - 1));

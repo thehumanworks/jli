@@ -197,10 +197,25 @@ fn stated_arguments_reach_their_slots_without_a_language_model() {
     let options = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
     let command = |request: &str| go(&scratch, &models, request, &mut Script::default(), &options).commands.join(" && ");
     assert_eq!(command("greet name=\"Ada L\" greeting=hello 3 times"), "printf '%s %s x%s\\n' hello 'Ada L' 3");
-    assert_eq!(command("greet name: Grace Hopper greeting: 'good day' count=two"), "printf '%s %s x%s\\n' 'good day' 'Grace Hopper' 2");
-    assert_eq!(command("greet \"hi\" and then \"Bob\""), "printf '%s %s x%s\\n' hi Bob 1", "unnamed values follow the template");
-    assert_eq!(command("greet \"Bob\" greeting=hey"), "printf '%s %s x%s\\n' hey Bob 1", "a named value leaves the unnamed one for the other slot");
-    assert_eq!(command("greet name='4 of us' greeting=yo"), "printf '%s %s x%s\\n' yo '4 of us' 1", "a number inside a value is not the count");
+    assert_eq!(
+        command("greet name: Grace Hopper greeting: 'good day' count=two"),
+        "printf '%s %s x%s\\n' 'good day' 'Grace Hopper' 2"
+    );
+    assert_eq!(
+        command("greet \"hi\" and then \"Bob\""),
+        "printf '%s %s x%s\\n' hi Bob 1",
+        "unnamed values follow the template"
+    );
+    assert_eq!(
+        command("greet \"Bob\" greeting=hey"),
+        "printf '%s %s x%s\\n' hey Bob 1",
+        "a named value leaves the unnamed one for the other slot"
+    );
+    assert_eq!(
+        command("greet name='4 of us' greeting=yo"),
+        "printf '%s %s x%s\\n' yo '4 of us' 1",
+        "a number inside a value is not the count"
+    );
 }
 
 #[test]
@@ -261,7 +276,8 @@ fn another_name_for_a_slot_is_worked_out_once_and_kept() {
         let seen = replies.seen.lock().unwrap();
         let input: Value = serde_json::from_str(seen[0]["messages"][1]["content"].as_str().unwrap()).unwrap();
         assert_eq!(input["arguments"], json!([{ "name": "who", "value": "Ada L" }]));
-        let offered: Vec<&str> = input["placeholders"].as_array().unwrap().iter().map(|slot| slot["name"].as_str().unwrap()).collect();
+        let offered: Vec<&str> =
+            input["placeholders"].as_array().unwrap().iter().map(|slot| slot["name"].as_str().unwrap()).collect();
         assert_eq!(offered, ["name", "count"], "a slot the request already names is not on offer");
     }
 
@@ -334,7 +350,11 @@ fn a_phrasing_is_learned_without_its_values() {
     assert_eq!(outcome.output.as_deref(), Some("good evening Ada L x1\n"));
     assert_eq!(outcome.learned, ["\"say greeting: … name=\"…\"\" means greet"]);
     assert_eq!(scratch.brain.skill("greet").unwrap().unwrap().examples, ["say greeting: … name=\"…\""]);
-    assert_eq!(scratch.brain.events(1).unwrap()[0].query, "say greeting: good evening name=\"Ada L\"", "history keeps the request whole");
+    assert_eq!(
+        scratch.brain.events(1).unwrap()[0].query,
+        "say greeting: good evening name=\"Ada L\"",
+        "history keeps the request whole"
+    );
 }
 
 #[test]
@@ -547,7 +567,13 @@ fn teaching_a_template_variant_needs_no_model() {
             risk: Risk::Safe,
             origin: Origin::Taught,
             examples: vec!["show the last 3 commits".into()],
-            slots: vec![Slot { name: "count".into(), kind: SlotKind::Number, description: "how many".into(), default: None, aliases: vec![] }],
+            slots: vec![Slot {
+                name: "count".into(),
+                kind: SlotKind::Number,
+                description: "how many".into(),
+                default: None,
+                aliases: vec![],
+            }],
         })
         .unwrap();
     let (models, _) = models(|_| panic!("System 1 must not be asked"), no_language_model());
@@ -693,7 +719,22 @@ fn the_json_outcome_keeps_its_field_names_and_order() {
     let keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
     assert_eq!(
         keys,
-        ["query", "path", "label", "commands", "confidence", "risk", "ran", "exitCode", "blocked", "learned", "answer", "output", "msSystem1", "msSystem2"]
+        [
+            "query",
+            "path",
+            "label",
+            "commands",
+            "confidence",
+            "risk",
+            "ran",
+            "exitCode",
+            "blocked",
+            "learned",
+            "answer",
+            "output",
+            "msSystem1",
+            "msSystem2"
+        ]
     );
     assert_eq!(value["path"], "system1");
     assert_eq!(value["risk"], "safe");

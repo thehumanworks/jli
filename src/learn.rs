@@ -51,10 +51,7 @@ fn decide_all(models: &Models, phrases: &[&str], skills: &[Skill], cwd: &std::pa
                 scope.spawn(move || models.system1.decide(phrase, context, skills))
             })
             .collect();
-        calls
-            .into_iter()
-            .map(|call| call.join().unwrap_or_else(|_| Err(anyhow!("a System 1 check panicked"))))
-            .collect()
+        calls.into_iter().map(|call| call.join().unwrap_or_else(|_| Err(anyhow!("a System 1 check panicked")))).collect()
     })
 }
 
@@ -88,9 +85,7 @@ fn verify(brain: &Brain, models: &Models, label: &str, input: &LearnInput) -> Re
     }
     for (decision, (example, owner)) in others.iter().zip(&neighbours) {
         if decision.skill.as_ref().is_some_and(|skill| skill.label == label) {
-            return Ok(Err(format!(
-                "the scenario is too broad: it captured \"{example}\", which belongs to {owner}"
-            )));
+            return Ok(Err(format!("the scenario is too broad: it captured \"{example}\", which belongs to {owner}")));
         }
     }
     let mut summary = format!("the phrase routes to it at {}", fixed(own.confidence, 2));

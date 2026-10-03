@@ -209,7 +209,11 @@ impl App {
 
     fn show_skills(&self) -> Result<()> {
         let skills = self.brain.skills()?;
-        say(format!("{} {}\n", c::bold(format!("{} skills", skills.len())), c::dim(format!("in {}", self.brain.location()))));
+        say(format!(
+            "{} {}\n",
+            c::bold(format!("{} skills", skills.len())),
+            c::dim(format!("in {}", self.brain.location()))
+        ));
         for skill in skills {
             let origin = match skill.origin {
                 crate::types::Origin::Seed => c::dim("seed"),
@@ -296,7 +300,8 @@ impl App {
         let slow: Vec<&BrainEvent> = events.iter().filter(|event| event.path == Path::System2).collect();
         let taught = events.iter().filter(|event| matches!(event.path, Path::Taught | Path::System1Confirmed)).count();
         say(format!("\n{} over {} requests", c::bold("Routing"), events.len()));
-        for (name, count) in [("system 1, instant", fast.len()), ("taught by you", taught), ("system 2, agent", slow.len())] {
+        for (name, count) in [("system 1, instant", fast.len()), ("taught by you", taught), ("system 2, agent", slow.len())]
+        {
             say(format!("  {name:<22} {} {count:>4}", bar(count as f64 / events.len() as f64)));
         }
         let mean = |group: &[&BrainEvent]| {
@@ -321,16 +326,8 @@ impl App {
                 instant as f64 / chunk.len().max(1) as f64
             })
             .collect();
-        say(format!(
-            "\n{} {}",
-            c::bold("Learning curve"),
-            c::dim("share of requests answered instantly, oldest to newest")
-        ));
-        say(format!(
-            "  {}  {}% now",
-            c::cyan(sparkline(&curve)),
-            (curve.last().copied().unwrap_or(0.0) * 100.0).round()
-        ));
+        say(format!("\n{} {}", c::bold("Learning curve"), c::dim("share of requests answered instantly, oldest to newest")));
+        say(format!("  {}  {}% now", c::cyan(sparkline(&curve)), (curve.last().copied().unwrap_or(0.0) * 100.0).round()));
 
         let mut seen = HashSet::new();
         let hosts: Vec<&str> = skills
@@ -391,12 +388,7 @@ impl App {
             self.brain.remove_example(&label, &phrase)?;
             self.brain.add_counter_example(&label, &phrase)?;
             self.brain.mark_rejected(last.id)?;
-            eprintln!(
-                "{} \"{}\" does {} mean {label}. Trying again.\n",
-                c::green("✚ learned"),
-                last.query,
-                c::bold("not")
-            );
+            eprintln!("{} \"{}\" does {} mean {label}. Trying again.\n", c::green("✚ learned"), last.query, c::bold("not"));
         }
         let again = Flags { agent: true, ..flags.clone() };
         Ok(self.ask(&last.query, &again, vec![label])?.exit_code())
@@ -533,7 +525,8 @@ fn run(argv: &[String]) -> Result<i32> {
         return run_demo();
     }
 
-    let mut app = App { brain: Brain::open(BrainConfig::from_env())?, models: Models::from_env(), terminal: Terminal::new() };
+    let mut app =
+        App { brain: Brain::open(BrainConfig::from_env())?, models: Models::from_env(), terminal: Terminal::new() };
     let code = app.dispatch(&flags, &words, &rest);
     let _ = app.brain.sync();
     code
@@ -561,7 +554,8 @@ mod tests {
 
     #[test]
     fn flags_are_taken_out_of_the_request() {
-        let parsed = parse(&args(&["-n", "show", "--risk=bad", "files", "--json", "--mode=auto", "--confidence=0.7"])).unwrap();
+        let parsed =
+            parse(&args(&["-n", "show", "--risk=bad", "files", "--json", "--mode=auto", "--confidence=0.7"])).unwrap();
         assert_eq!(parsed.words, ["show", "--risk=bad", "files"], "an unknown risk stays in the request");
         assert!(parsed.flags.dry_run && parsed.flags.json);
         assert_eq!((parsed.flags.mode, parsed.flags.threshold), (Some(Mode::Auto), Some(0.7)));
@@ -578,7 +572,8 @@ mod tests {
 
     #[test]
     fn yes_comes_from_the_flag_or_the_environment() {
-        for (flag, yes, yolo) in [("-y", true, false), ("--yes", true, false), ("-Y", false, true), ("--yolo", false, true)] {
+        for (flag, yes, yolo) in [("-y", true, false), ("--yes", true, false), ("-Y", false, true), ("--yolo", false, true)]
+        {
             let parsed = parse(&args(&[flag, "stage", "everything"])).unwrap();
             assert_eq!((parsed.flags.yes, parsed.flags.yolo), (yes, yolo), "{flag}");
             assert_eq!(parsed.words, ["stage", "everything"]);

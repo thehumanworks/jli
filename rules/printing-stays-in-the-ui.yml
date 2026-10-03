@@ -1,0 +1,11 @@
+id: printing-stays-in-the-ui
+language: rust
+severity: error
+message: Print through Ui (the trace, on stderr) or cli's `say` (stdout). Stray prints break `jli` in pipes (ADR 5).
+rule:
+  kind: macro_invocation
+  regex: ^(println|eprintln|print|eprint)!
+ignores:
+  - src/ui.rs
+  - src/cli.rs
+  - examples/**

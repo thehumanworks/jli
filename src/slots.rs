@@ -166,8 +166,7 @@ pub fn fill_slots(
             continue;
         }
         if matches!(slot.kind, SlotKind::File | SlotKind::Branch) {
-            let options =
-                if slot.kind == SlotKind::File { list_entries(&context.cwd) } else { list_branches(&context.cwd) };
+            let options = if slot.kind == SlotKind::File { list_entries(&context.cwd) } else { list_branches(&context.cwd) };
             if !options.is_empty() {
                 let picked = models.system1.pick(query, &slot.description, &options)?;
                 filled.ms_system1 += picked.ms;
@@ -243,8 +242,7 @@ fn parts(template: &str) -> Vec<Part<'_>> {
 }
 
 fn shell_quote(value: &str) -> String {
-    let plain = !value.is_empty()
-        && value.chars().all(|ch| ch.is_ascii_alphanumeric() || "_-.,/:=@%+".contains(ch));
+    let plain = !value.is_empty() && value.chars().all(|ch| ch.is_ascii_alphanumeric() || "_-.,/:=@%+".contains(ch));
     if plain {
         value.to_string()
     } else {
@@ -371,7 +369,10 @@ mod tests {
         let template = steps(&["git commit -m {message}"]);
         assert_eq!(render(&template, &values(&[("message", "first draft")])), ["git commit -m 'first draft'"]);
         assert_eq!(render(&template, &values(&[("message", "it's")])), [r"git commit -m 'it'\''s'"]);
-        assert_eq!(render(&template, &values(&[("message", "a/b.c:d=e@f%g+h,i-j_k")])), ["git commit -m a/b.c:d=e@f%g+h,i-j_k"]);
+        assert_eq!(
+            render(&template, &values(&[("message", "a/b.c:d=e@f%g+h,i-j_k")])),
+            ["git commit -m a/b.c:d=e@f%g+h,i-j_k"]
+        );
         assert_eq!(render(&template, &values(&[("message", "")])), ["git commit -m ''"]);
     }
 
@@ -396,7 +397,13 @@ mod tests {
 
     #[test]
     fn undeclared_placeholders_are_found_once() {
-        let slots = vec![Slot { name: "file".into(), kind: SlotKind::File, description: String::new(), default: None, aliases: vec![] }];
+        let slots = vec![Slot {
+            name: "file".into(),
+            kind: SlotKind::File,
+            description: String::new(),
+            default: None,
+            aliases: vec![],
+        }];
         assert_eq!(undeclared(&steps(&["cp {file} {dest}", "ls {dest} ${HOME}"]), &slots), ["dest"]);
     }
 }
