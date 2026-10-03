@@ -618,6 +618,8 @@ pub struct SkillReport {
     /// The least confident phrasings, even those that route home.
     pub lowest: Vec<Line>,
     pub steals: Vec<Line>,
+    /// Every phrasing measured, least confident first.
+    pub phrasings: Vec<Line>,
 }
 
 /// The rank `--optimise` works down.
@@ -805,6 +807,7 @@ pub fn run(brain: &Brain, models: &Models, options: &EvalOptions, ui: &Ui) -> Re
                     .filter(|(_, routed)| matches!(routed.verdict, Verdict::Stolen(_)))
                     .map(|(probe, routed)| line(probe, routed))
                     .collect(),
+                phrasings: own.iter().map(|(probe, routed)| line(probe, routed)).collect(),
             })
         })
         .collect();

@@ -1,6 +1,7 @@
 # 8. A "no" or a failed command is a lesson, but only a diagnosis says what kind
 
-- Status: accepted
+- Status: accepted; superseded in part by [ADR 16](0016-measuring-the-matrix.md), which logs the declined route as its own
+  event, marked `corrected`, before the correction
 - Date: 2026-10-02
 - Origin: the TypeScript prototype; kept unchanged by the Rust port
 
