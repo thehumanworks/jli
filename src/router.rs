@@ -895,7 +895,8 @@ impl Route<'_> {
             "Not run: {} has to run in your own shell, and jli can only run commands in a shell of its own, where this would change nothing.",
             self.outcome.caller_shell.join(" && ")
         ));
-        let shells = Shell::of_user().map_or_else(|| Shell::ALL.to_vec(), |shell| vec![shell]);
+        let running = Shell::running(|name| std::env::var(name).ok(), crate::exec::process_table);
+        let shells = running.map_or_else(|| Shell::ALL.to_vec(), |shell| vec![shell]);
         for shell in shells {
             let (line, file) = shell.install_hint();
             ui.note(format!("To let jli hand it to your shell, add this line to {file} and open a new terminal:"));

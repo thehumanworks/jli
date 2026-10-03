@@ -42,6 +42,16 @@ impl Shell {
         std::env::var("SHELL").ok().as_deref().and_then(Shell::parse)
     }
 
+    /// The shell jli is running under, which may not be the login shell: a bash started from zsh
+    /// is bash. The shell the function names, else the nearest shell among jli's ancestors, else
+    /// `$SHELL` (ADR 23).
+    pub fn running(lookup: impl Fn(&str) -> Option<String>, processes: impl FnOnce() -> Option<String>) -> Option<Shell> {
+        let parse = |value: Option<String>| value.as_deref().and_then(Shell::parse);
+        parse(lookup(HANDOFF_SHELL_VAR))
+            .or_else(|| processes().and_then(|table| nearest_shell(&table, std::process::id())))
+            .or_else(|| parse(lookup("SHELL")))
+    }
+
     /// The line that installs the function, and where it goes.
     pub fn install_hint(self) -> (&'static str, &'static str) {
         match self {
@@ -50,6 +60,33 @@ impl Shell {
             Shell::Fish => ("jli shell-init fish | source", "~/.config/fish/config.fish"),
         }
     }
+}
+
+/// How far up the process tree to look for a shell: past a shim, `env`, `sudo` or `time`, not
+/// round a loop in a table that changed while it was read.
+const ANCESTORS_SEEN: usize = 8;
+
+/// The nearest shell above `pid` in a process table of `pid ppid program` lines, as
+/// `ps -A -o pid=,ppid=,comm=` prints them. A program's path may contain spaces.
+fn nearest_shell(table: &str, pid: u32) -> Option<Shell> {
+    let rows: Vec<(u32, u32, &str)> = table
+        .lines()
+        .filter_map(|line| {
+            let (pid, rest) = line.trim_start().split_once(char::is_whitespace)?;
+            let (parent, program) = rest.trim_start().split_once(char::is_whitespace)?;
+            Some((pid.parse().ok()?, parent.parse().ok()?, program.trim()))
+        })
+        .collect();
+    let parent_of = |pid: u32| rows.iter().find(|row| row.0 == pid).map(|row| row.1);
+    let mut at = parent_of(pid)?;
+    for _ in 0..ANCESTORS_SEEN {
+        let (_, parent, program) = rows.iter().find(|row| row.0 == at)?;
+        if let Some(shell) = Shell::parse(program) {
+            return Some(shell);
+        }
+        at = *parent;
+    }
+    None
 }
 
 impl fmt::Display for Shell {
@@ -61,14 +98,45 @@ impl fmt::Display for Shell {
 /// The shell function `jli shell-init` prints. It gives jli a file to write to, runs jli with its
 /// arguments untouched, and afterwards sources what jli wrote, in the calling shell. jli's own
 /// exit code is kept unless something was handed over, and then it is the status of what ran.
+///
+/// A ctrl-c while jli runs must not leave the file behind (ADR 23). zsh stops a function when its
+/// command is interrupted, unless an INT trap is set, so each function sets one for as long as it
+/// runs, and the function then goes on to its own clean-up: jli's status is 130, nothing is
+/// sourced, and the file is removed. bash keeps the user's own INT trap and puts it back; zsh does
+/// that itself with `local_traps`, which is set only while the trap is (`local_options` would also
+/// undo a `setopt` that was handed over). fish runs no signal handler for a ctrl-c that reaches only the
+/// command in the foreground, so its file is also removed once the command line is done.
 pub fn init_script(shell: Shell) -> String {
     match shell {
-        Shell::Zsh | Shell::Bash => format!(
+        Shell::Bash => format!(
             r#"# jli: commands such as cd and export are handed back to this shell to run (ADR 14).
 jli() {{
-  local __jli_handoff __jli_status
+  local __jli_handoff __jli_status __jli_trap
   __jli_handoff="$(command mktemp "${{TMPDIR:-/tmp}}/jli-handoff.XXXXXX")" || return 1
-  {HANDOFF_VAR}="$__jli_handoff" {HANDOFF_SHELL_VAR}={shell} command jli "$@"
+  __jli_trap="$(trap -p INT)"
+  trap 'command rm -f -- "$__jli_handoff"' INT
+  {HANDOFF_VAR}="$__jli_handoff" {HANDOFF_SHELL_VAR}=bash command jli "$@"
+  __jli_status=$?
+  if [ "$__jli_status" -eq 0 ] && [ -s "$__jli_handoff" ]; then
+    . "$__jli_handoff"
+    __jli_status=$?
+  fi
+  command rm -f -- "$__jli_handoff"
+  trap - INT
+  eval "$__jli_trap"
+  return "$__jli_status"
+}}
+"#
+        ),
+        Shell::Zsh => format!(
+            r#"# jli: commands such as cd and export are handed back to this shell to run (ADR 14).
+jli() {{
+  local __jli_handoff __jli_status __jli_local_traps
+  __jli_handoff="$(command mktemp "${{TMPDIR:-/tmp}}/jli-handoff.XXXXXX")" || return 1
+  if [[ -o local_traps ]]; then __jli_local_traps=1; else setopt local_traps; fi
+  trap 'command rm -f -- "$__jli_handoff"' INT
+  [[ -n $__jli_local_traps ]] || unsetopt local_traps
+  {HANDOFF_VAR}="$__jli_handoff" {HANDOFF_SHELL_VAR}=zsh command jli "$@"
   __jli_status=$?
   if [ "$__jli_status" -eq 0 ] && [ -s "$__jli_handoff" ]; then
     . "$__jli_handoff"
@@ -84,6 +152,7 @@ jli() {{
 function jli --wraps jli --description 'jli, able to change this shell'
     set -l __jli_handoff (command mktemp)
     or return 1
+    set -g __jli_handoffs $__jli_handoffs $__jli_handoff
     command env {HANDOFF_VAR}=$__jli_handoff {HANDOFF_SHELL_VAR}=fish jli $argv
     set -l __jli_status $status
     if test $__jli_status -eq 0; and test -s $__jli_handoff
@@ -92,6 +161,12 @@ function jli --wraps jli --description 'jli, able to change this shell'
     end
     command rm -f -- $__jli_handoff
     return $__jli_status
+end
+# A ctrl-c stops the function before its own rm; this removes the file once the line is done.
+function __jli_remove_handoffs --on-event fish_postexec
+    set -q __jli_handoffs; or return
+    command rm -f -- $__jli_handoffs
+    set -e __jli_handoffs
 end
 "#
         ),
@@ -418,5 +493,54 @@ mod tests {
         }
         let fish = init_script(Shell::Fish);
         assert!(fish.contains("jli $argv") && fish.contains("source $__jli_handoff"));
+    }
+
+    #[test]
+    fn an_interrupted_function_still_removes_its_file() {
+        // Issue #22: a ctrl-c stopped zsh's function before its rm. The trap is set before jli
+        // runs, and bash and zsh put back the user's own INT trap afterwards.
+        let remove = "trap 'command rm -f -- \"$__jli_handoff\"' INT";
+        let bash = init_script(Shell::Bash);
+        let order = ["__jli_trap=\"$(trap -p INT)\"", remove, "command jli", "trap - INT", "eval \"$__jli_trap\""];
+        let at: Vec<usize> = order.iter().map(|part| bash.find(part).unwrap_or_else(|| panic!("{part}\n{bash}"))).collect();
+        assert!(at.windows(2).all(|pair| pair[0] < pair[1]), "{bash}");
+        assert!(!bash.contains("return 130"), "the function runs on to its own clean-up");
+
+        let zsh = init_script(Shell::Zsh);
+        let order = ["setopt local_traps", remove, "unsetopt local_traps", "command jli"];
+        let at: Vec<usize> = order.iter().map(|part| zsh.find(part).unwrap_or_else(|| panic!("{part}\n{zsh}"))).collect();
+        assert!(at.windows(2).all(|pair| pair[0] < pair[1]), "{zsh}");
+        assert!(!zsh.contains("local_options"), "a handed-over setopt must outlast the function");
+
+        let fish = init_script(Shell::Fish);
+        assert!(fish.contains("set -g __jli_handoffs $__jli_handoffs $__jli_handoff"), "{fish}");
+        assert!(fish.contains("--on-event fish_postexec") && fish.contains("command rm -f -- $__jli_handoffs"), "{fish}");
+    }
+
+    #[test]
+    fn the_running_shell_is_the_function_s_then_the_nearest_ancestor_then_the_login_shell() {
+        // Issue #22: in a bash started from zsh, the hint named ~/.zshrc.
+        let me = std::process::id();
+        let table = format!(
+            "    1     0 /sbin/launchd\n  500     1 /Applications/Some Terminal.app/Contents/MacOS/term\n  \
+             600   500 -zsh\n  700   600 /bin/bash\n  800   700 /opt/homebrew/bin/mise\n {me}   800 jli\n"
+        );
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| pairs.iter().find(|(key, _)| *key == name).map(|(_, value)| value.to_string())
+        };
+        let login_zsh: &[(&str, &str)] = &[("SHELL", "/bin/zsh")];
+        assert_eq!(Shell::running(env(login_zsh), || Some(table.clone())), Some(Shell::Bash), "past the shim to bash");
+        assert_eq!(
+            Shell::running(env(&[("SHELL", "/bin/zsh"), (HANDOFF_SHELL_VAR, "fish")]), || Some(table.clone())),
+            Some(Shell::Fish)
+        );
+        assert_eq!(Shell::running(env(login_zsh), || None), Some(Shell::Zsh), "no ps: the login shell");
+        let no_shell = format!("  1 0 launchd\n 42 1 node\n {me} 42 jli\n");
+        assert_eq!(Shell::running(env(login_zsh), || Some(no_shell)), Some(Shell::Zsh));
+        assert_eq!(Shell::running(env(&[]), || None), None);
+        assert_eq!(nearest_shell(&table, 600), None, "the shell's own parent is a terminal");
+        assert_eq!(nearest_shell(&table, 700), Some(Shell::Zsh), "a login shell shows as -zsh");
+        let looped = format!("  5 6 env\n  6 5 env\n {me} 5 jli\n");
+        assert_eq!(nearest_shell(&looped, me), None, "a loop ends");
     }
 }

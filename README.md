@@ -202,10 +202,12 @@ Then a step such as `cd`, `pushd`, `export`, `unset`, `source` or `alias`, and e
 is handed to your shell, which runs it once jli exits: `jli go to src` leaves you in `src`. jli
 passes it through a temp file, not stdout, so output still goes down a pipe, and the function
 returns jli's exit code, or the status of what your shell ran. A plain `cd` to a directory that does
-not exist fails in jli, with the shell's own message, before anything is handed over.
+not exist fails in jli, with the shell's own message, before anything is handed over. A ctrl-c while
+jli runs leaves no temp file behind.
 Without the function such a step is not run and nothing is learned from it: jli says how to install
-the function and exits 3, and `--json` lists the steps in `callerShell` for an agent to run itself.
-See [ADR 14](docs/adr/0014-shell-integration.md).
+the function in the shell it was started from (a bash started from zsh gets `~/.bashrc`) and exits 3,
+and `--json` lists the steps in `callerShell` for an agent to run itself.
+See [ADR 14](docs/adr/0014-shell-integration.md) and [ADR 23](docs/adr/0023-shell-fixes-and-number-words.md).
 
 ## Slots
 
@@ -320,9 +322,9 @@ say yes. Without a `.jlirc` nothing changes. See [ADR 17](docs/adr/0017-project-
 | `src/generalize.rs` | `jli generalize`: checks the agent's proposal for a project skill and writes it once approved |
 | `src/args.rs` | reads the arguments a request states: `name=value`, labels and quoted text |
 | `src/slots.rs` | fills, expands and shell-quotes `{slot}` values |
-| `src/shell.rs` | the shell function, and which steps it must run in your shell |
+| `src/shell.rs` | the shell function, which steps it must run in your shell, and which shell jli is running under |
 | `src/seed.rs` | the original hard-coded matrix, now only the seed for an empty brain |
-| `src/exec.rs` | runs the steps with `bash -c`, watching stderr in auto mode and for a new proposal, and tries builtins before they are handed over |
+| `src/exec.rs` | runs the steps with `bash -c`, watching stderr in auto mode and for a new proposal, tries builtins before they are handed over, and reads the process table to find the shell jli was started from |
 | `src/cli.rs` | argument parsing, subcommands, the interactive session, and errors as JSON |
 | `src/ui.rs` | the trace on stderr, and the one owner of stdin |
 | `src/demo.rs` | the two-pass learning demo |
