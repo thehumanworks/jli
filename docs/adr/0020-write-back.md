@@ -162,6 +162,20 @@ terminal driven by `expect`. Check 12, `jli demo`: exit 0, instantly 2 of 5 then
 5.1 s then 1.3 s. Check 13 needs the TypeScript version, which is not in this repository, and was not
 run.
 
+Later on 2026-10-03, on the merged build of ADRs 19 to 23 (the integration branch), with fresh scratch
+brains:
+
+- `-y how many lines are in notes.txt` went to the agent (System 1 at `none-of-these` 1.00), which
+  proposed the new `count-lines` (`wc -l {file}`), verified at 0.99. `--json -y fix` unlearned the
+  phrasing, and the agent proposed `wc -l notes.txt` again: `blockedCode: already_rejected`, `label:
+  count-lines`, `ran: false`, exit 3. `jli skills` showed `count-lines` with `− "how many lines are in
+  …"` and no `count-lines-x`.
+- With `HOME` set to a scratch directory, `-y 'how many lines are in ~/notes/n.txt'` went to the agent,
+  which gave `~/notes/n.txt`; it ran expanded, and `jli skills` showed the new `count-lines` with
+  `+ "how many lines are in …"`, the scratch home path nowhere in it. `-y 'count the lines of
+  ~/notes/n.txt'` then went to `count-lines` at 1.00 and, being confident, wrote nothing.
+- A rejected `ls {directory}` not refusing `ls -la` was checked offline only.
+
 ## Consequences
 
 - A skill never lists one phrasing as both an example and a counter-example after a route; System 1

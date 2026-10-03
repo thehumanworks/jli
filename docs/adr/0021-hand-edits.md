@@ -170,6 +170,19 @@ interactive session of two confirmed requests left with ctrl-d, exit 0; `jli dem
 instantly 2 of 5 then 5 of 5, deciding 4.9 s then 1.3 s. Check 13 was not run: the TypeScript version
 is not available.
 
+**Later on 2026-10-03, on the merged build** of ADRs 19 to 23 (the integration branch), with
+[ADR 20](0020-write-back.md)'s write-back in place, on a fresh scratch brain. `du -sh .` was taught as
+`get-folder-size` with "how big is this folder", "size of everything in here" and "total disk space
+used by this directory".
+
+| Step | Result |
+| --- | --- |
+| `forget-phrase get-folder-size "size of everything in here"`, then `-y size of everything in here` | System 1 picked `list-files-with-sizes` at 0.71 (`get-folder-size` 0.26) and the phrasing was learned there; on `get-folder-size` it stayed a counter-example only. The same request with `--agent` also went to `list-files-with-sizes` |
+| `forget-phrase get-folder-size "total disk space used by this directory"`, then `-y` that request, twice | System 1 picked `get-folder-size` at 0.84, then 0.83; `du -sh .` ran, and each time the phrasing was an example again and was gone from the counter-examples: the yes undid the edit, and no phrasing was in both lists |
+
+A route back to the skill at 0.95 or above, which writes nothing, was not reproduced live; the offline
+test covers it.
+
 ## Consequences
 
 - A wrong alias or a mis-taught phrasing costs one command, not the skill and everything else it

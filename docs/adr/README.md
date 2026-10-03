@@ -80,7 +80,8 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   writer that joins a row drops its own scenario and slot names; a value that begins with `-` is never
   read back out of a command; a seed that names a value is never made general; once a skill is
   chosen, a flag still reaches its slot as a value the agent works out, a System 1 pick of an entry
-  named `-…`, or a default; and the compare-and-swap has run only against local files.
+  named `-…`, or a default; the router writing an agent's flag into its command was verified offline
+  only; and the compare-and-swap has run only against local files.
 - [20](0020-write-back.md): a refused repeat ends the correction with no second chance for the agent;
   a command that does the same thing in other words is not recognised as the rejected one; a
   confident System 1 route leaves a counter-example of its skill in place; and a path's written form
@@ -97,5 +98,4 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   still rewrites the global row from a project; and it was run live on one skill of one scratch brain.
 - [23](0023-shell-fixes-and-number-words.md): whether fish removes the hand-off file after a ctrl-c
   is not measured; with no shell among jli's ancestors the install line still follows `$SHELL`, as
-  `jli shell-init` with no argument does; digits joined by `-` are still numbers; and the number-word
-  fix was tested offline only.
+  `jli shell-init` with no argument does; and digits joined by `-` are still numbers.

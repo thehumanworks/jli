@@ -70,7 +70,7 @@ What follows, by caller:
   `ls {options} {directory}` with `-la` becomes `ls -la {directory}`, keeping its other slot. The trace
   says `- is a flag, not a value for {directory} of go-to-directory, so cd - is a command of its own.`
   From there the proposal goes the way of any new one: if a known skill runs `cd -` it is that skill,
-  if a rejected skill runs it it is refused ([ADR 20](0020-write-back.md)), and otherwise it is learned
+  if a rejected skill runs it, it is refused ([ADR 20](0020-write-back.md)), and otherwise it is learned
   as a new skill after a yes. A proposal named as a rejected template with a flag for its value is
   therefore not refused, since the command it renders is not the rejected one. The kind `existing`
   carries no scenario of its own, so an empty one becomes `the user wants: <request>` before System 1
@@ -233,6 +233,35 @@ two requests with confirmations and left on ctrl-d. Check 12, `jli demo`, exited
 instantly 2 of 5 then 5 of 5, and spent 5.0 s deciding, then 1.3 s; a second run spent 65.0 s, then
 1.4 s, on two agent calls of 31 s each. Check 13 needs the TypeScript version, which is not here.
 
+### Measured on the merged build, 2026-10-03
+
+ADRs 19 to 23 were built in parallel and first ran together on `dev` at `04da992`. With the release
+binary of the integration branch (the router path above added), on fresh scratch brains in scratch
+directories that were not git repositories:
+
+| Step | What happened |
+| --- | --- |
+| `teach "go to the src folder" -- cd src`, then `teach "go back" -- cd -` | `change-directory` (`cd {directory}`, verified at 0.97), then a new skill `return-to-previous-dir` (`cd -`, verified at 1.00); `change-directory` kept its one phrasing |
+| on that brain, `--agent --json -n return to the previous directory` | the agent named `return-to-previous-dir`: `cd -` |
+| on a brain with only `change-directory`, `--agent -n` for "go back to the previous directory", "cd back to where I was" and "take me to the last directory I was in" | each time the agent proposed `cd -` as a new literal skill, not `cd {directory}` with `-`, so the router path above was not reached live. For "go back" it proposed `cd ..`, which `change-directory` runs with `{directory} = ..` |
+
+The path in which the agent gives a flag as a known skill's value was not reproduced live; it is
+covered by the offline test only.
+
+The acceptance checks of ADR 9, on the same build: check 1 printed `ls -ltr`; check 2 `git commit -m
+'first draft'`; check 3 was not a command, exit 0; check 4 gave `git add -A`, not run, exit 3; in check
+5 the agent proposed `rm '*.log'`, destructive, refused with exit 3, and the three `.log` files were
+untouched; check 6 printed valid `--json`, `path` `system1`, with the directory in `output`. Check 7:
+`teach "show the last 3 commits" -- git log --oneline -n 3` made `git-log-latest`
+(`git log --oneline -n {count}`, verified at 0.82), and `teach "last 10 commits please" -- git log
+--oneline -n 10` with every API key unset joined it. Check 8 rendered `git log --oneline -n 7`, `{count}
+= 7 (from pattern)`. Under `expect`: check 9 routed to `git-status` at 0.90, the command exited 128,
+the diagnosis put the problem on where it ran, and there was no counter-example; check 10 offered three
+numbered options after a no, and picking `ls -lt` learned it as a new skill and ran it; check 11 took
+two requests with confirmations (`pwd`, then a new `tail -n 3 notes.txt`) and left on ctrl-d, exit 0.
+Check 12, `jli demo`, exited 0, answered instantly 2 of 5 then 5 of 5, and spent 5.0 s deciding, then
+1.4 s. Check 13 was not run: it needs the TypeScript version, which is not here.
+
 ## Consequences
 
 - A command keeps one row in more of the cases that used to split it: a literal skill and the template
@@ -259,6 +288,8 @@ instantly 2 of 5 then 5 of 5, and spent 5.0 s deciding, then 1.3 s; a second run
   agent works out for a skill System 1 picked, a System 1 pick of an entry whose name begins with `-`,
   and a default that is a flag. Only the first is likely, and it links the phrasing to the template as
   #17 did. A stated value is passed as written on purpose (ADR 11).
+- **Known gap:** the router writing a flag the agent gives into its command was verified offline only.
+  Live, the agent proposed `cd -` as a literal command each time, and the path was not reached.
 - **Known gap:** the claim compares only the row under its label, and only `learn_phrase` reads the
   matrix again. Two agents' proposals for one command, named differently and stored at once, still make
   two rows, and so can two teaches whose last read and insert interleave within milliseconds.
@@ -266,7 +297,8 @@ instantly 2 of 5 then 5 of 5, and spent 5.0 s deciding, then 1.3 s; a second run
   aliases: the row stays as the first writer wrote it.
 - **Known gap:** a value that begins with `-` is never read back out of a command. A negative number
   the agent gave (`head -n -5`) is not hidden in the learned phrase, and a correction to the same skill
-  with another such value counts as another command.
+  with another such value counts as another command. In the router it is written into the command:
+  the agent's `head -n {count}` with `-5` becomes a literal `head -n -5`, a skill of its own.
 - **Known gap:** a seed that names a value, `git push -u origin main`, is never made general by teaching.
 - **Known gap:** the compare-and-swap that makes a literal skill general, like the rest of the store,
   has run only against local files.
