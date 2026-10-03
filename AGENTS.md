@@ -79,5 +79,4 @@ scratch brain. They cost a few cents. Checks 9 to 11 need a terminal (`expect`).
 
 ## Branches
 
-Work lands on `dev` through pull requests from feature branches; `dev` is merged to `main` by pull
-request.
+Work lands on `main` through pull requests from feature branches.
