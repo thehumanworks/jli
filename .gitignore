@@ -3,3 +3,4 @@ target/
 *.db-*
 .env*
 .claude/
+.DS_Store
