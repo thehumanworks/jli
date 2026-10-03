@@ -23,6 +23,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [10](0010-synchronous-rust.md) | The Rust version is synchronous, with async confined to the store |
 | [11](0011-stated-arguments.md) | Arguments stated in the request are read by a parser, before and instead of any model |
 | [12](0012-slot-aliases.md) | A slot answers to several names, and a new name is worked out once and kept |
+| [15](0015-user-scope.md) | What is learned belongs to a user, a skill is shared by copy, and parallel writers lose nothing |
 
 ## Known gaps, by record
 
@@ -37,3 +38,6 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   of live cases, not on the benchmark.
 - [12](0012-slot-aliases.md): one alias cannot be removed by hand, an unknown name is only noticed as
   `name=value`, and a skill with no slots still blocks on any argument.
+- [15](0015-user-scope.md): an older jli ignores `--user-id` and `JLI_USER_ID` (and routes the flag
+  as words of a request), two writers teaching the same new command at once get two skills, a share
+  cannot be undone except by `forget`, and the safe writes have not run against a live remote.
