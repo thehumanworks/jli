@@ -14,6 +14,23 @@ path = "src/main.rs"
 name = "bench-translator"
 path = "examples/bench-translator.rs"
 
+[[example]]
+name = "bench-context"
+path = "examples/bench-context.rs"
+
+# Strict by default: a warning fails the build in the hooks and in CI (`-D warnings`).
+[lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+panic = "deny"
+
 [dependencies]
 anyhow = "1"
 gethostname = "1"

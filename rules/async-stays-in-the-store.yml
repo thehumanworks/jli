@@ -1,0 +1,14 @@
+id: async-stays-in-the-store
+language: rust
+severity: error
+message: Async code is confined to src/store.rs (ADR 10). Block on the brain's runtime there instead.
+rule:
+  any:
+    - kind: await_expression
+    - kind: async_block
+    - kind: function_item
+      has:
+        kind: function_modifiers
+        regex: async
+ignores:
+  - src/store.rs

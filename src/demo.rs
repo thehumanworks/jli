@@ -62,11 +62,8 @@ fn make_sandbox(dir: &FsPath) -> Result<PathBuf> {
     let repo = dir.join("repo");
     std::fs::create_dir_all(&repo)?;
     git(&repo, &["init", "-q", "-b", "main"])?;
-    let files = [
-        ("notes.txt", "one\ntwo\nthree\nfour\n"),
-        ("todo.md", "- learn\n- adapt\n"),
-        ("app.ts", "console.log('hello');\n"),
-    ];
+    let files =
+        [("notes.txt", "one\ntwo\nthree\nfour\n"), ("todo.md", "- learn\n- adapt\n"), ("app.ts", "console.log('hello');\n")];
     for (name, body) in files {
         std::fs::write(repo.join(name), body)?;
         git(&repo, &["add", name])?;
@@ -94,10 +91,10 @@ impl Drop for Sandbox {
 }
 
 /// Teach a fresh brain in a throwaway git repository, then ask again in other words.
-pub fn run_demo() -> Result<i32> {
+pub fn run_demo(user: &str) -> Result<i32> {
     let sandbox = Sandbox(temp_dir("jli-demo-")?);
     let cwd = make_sandbox(&sandbox.0)?;
-    let brain = Brain::open(BrainConfig::file(&sandbox.0.join("brain.db")))?;
+    let brain = Brain::open_as(BrainConfig::file(&sandbox.0.join("brain.db")), user)?;
     let models = Models::from_env();
     let mut terminal = Terminal::new();
     let ui = Ui::new(true);

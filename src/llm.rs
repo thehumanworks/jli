@@ -9,12 +9,12 @@
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use crate::types::SlotKind;
+use crate::types::{coded, SlotKind, CONFIGURATION, MODEL};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
@@ -39,7 +39,7 @@ pub fn endpoint_from(get: impl Fn(&str) -> Option<String>) -> Result<Endpoint> {
     if let Some(api_key) = var("AI_GATEWAY_API_KEY") {
         return Ok(Endpoint { base_url: "https://ai-gateway.vercel.sh/v1".into(), api_key });
     }
-    bail!("No language model key found. Set OPENROUTER_API_KEY or AI_GATEWAY_API_KEY.")
+    Err(coded(CONFIGURATION, "No language model key found. Set OPENROUTER_API_KEY or AI_GATEWAY_API_KEY."))
 }
 
 pub fn endpoint() -> Result<Endpoint> {
@@ -47,9 +47,8 @@ pub fn endpoint() -> Result<Endpoint> {
 }
 
 /// Fast model: rewrites what was taught and suggests alternatives.
-pub static TRANSLATOR_MODEL: LazyLock<String> = LazyLock::new(|| {
-    clean(std::env::var("JLI_TRANSLATOR_MODEL").ok()).unwrap_or_else(|| "inception/mercury-2.5".into())
-});
+pub static TRANSLATOR_MODEL: LazyLock<String> =
+    LazyLock::new(|| clean(std::env::var("JLI_TRANSLATOR_MODEL").ok()).unwrap_or_else(|| "inception/mercury-2.5".into()));
 /// Reasoning agent: proposes commands for requests nothing in the matrix fits.
 pub static AGENT_MODEL: LazyLock<String> =
     LazyLock::new(|| clean(std::env::var("JLI_AGENT_MODEL").ok()).unwrap_or_else(|| "inception/mercury-2.5".into()));
@@ -98,11 +97,8 @@ const RETRY_STATUSES: [u16; 6] = [408, 429, 500, 502, 503, 504];
 const ATTEMPTS: usize = 2;
 
 fn post(call: &HttpCall) -> std::result::Result<(u16, String), String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(call.timeout))
-        .build()
-        .into();
+    let agent: ureq::Agent =
+        ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(call.timeout)).build().into();
     let mut response = agent
         .post(call.url)
         .header("authorization", &format!("Bearer {}", call.api_key))
@@ -130,7 +126,8 @@ pub fn strip_fence(content: &str) -> &str {
 /// JSON indented by one space: the shape of the user message the prompts were tuned with.
 fn one_space_json(value: &Value) -> String {
     let mut out = Vec::new();
-    let mut serializer = serde_json::Serializer::with_formatter(&mut out, serde_json::ser::PrettyFormatter::with_indent(b" "));
+    let mut serializer =
+        serde_json::Serializer::with_formatter(&mut out, serde_json::ser::PrettyFormatter::with_indent(b" "));
     value.serialize(&mut serializer).expect("a JSON value serializes");
     String::from_utf8(out).expect("JSON is UTF-8")
 }
@@ -206,16 +203,14 @@ impl Llm {
                 Err(error) => last_error = format!("{} returned an unreadable reply: {error}", request.model),
             }
         }
-        Err(anyhow!(last_error))
+        Err(coded(MODEL, last_error))
     }
 }
 
 fn read_reply<T: DeserializeOwned>(text: &str) -> Result<T> {
     let reply: Value = serde_json::from_str(text)?;
-    let content = reply
-        .pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("no message content"))?;
+    let content =
+        reply.pointer("/choices/0/message/content").and_then(Value::as_str).ok_or_else(|| anyhow!("no message content"))?;
     Ok(serde_json::from_str(strip_fence(content))?)
 }
 
@@ -263,6 +258,11 @@ pub fn slots_schema() -> Value {
             },
             "description": { "type": "string", "description": "what the value is, e.g. 'the file to count lines in'" },
             "default": nullable("string", "value to use when the request does not give one"),
+            "aliases": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "up to four other names a person might type for this value as name=value, such as dir and path for directory; none that could mean another slot",
+            },
         })),
     })
 }
@@ -282,6 +282,8 @@ pub struct SlotDraft {
     pub description: String,
     #[serde(default)]
     pub default: Option<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

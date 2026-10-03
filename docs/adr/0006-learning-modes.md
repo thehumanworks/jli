@@ -1,6 +1,7 @@
 # 6. Three learning modes, and translated rows are verified by System 1 before they are kept
 
-- Status: accepted
+- Status: accepted; superseded in part by [ADR 16](0016-measuring-the-matrix.md), which checks a row in memory against the
+  skills closest to it, not the most used, and also rejects a row that knocks a neighbour off
 - Date: 2026-10-02
 - Origin: the TypeScript prototype; kept unchanged by the Rust port
 

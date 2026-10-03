@@ -5,6 +5,9 @@
 //!   `name: "some words"` or `name: rest`  the same in plainer words, once the skill is known
 //!   `"some words"`                        a value with no name, given to text slots in order
 //!
+//! A slot answers to its name and to its aliases, so `dir=src` reaches `{directory}` once `dir` is
+//! known as another name for it. See docs/adr/0012-slot-aliases.md.
+//!
 //! Stated values are hidden from routing: System 1 sees `commit message=…`, so the words of a
 //! commit message cannot change which command is picked or how risky it looks.
 
@@ -113,12 +116,11 @@ fn scan(text: &str) -> Vec<Stated> {
     out
 }
 
-/// Slot names and argument keys compare without case, and `-` is the same as `_`.
-fn normal(name: &str) -> String {
-    name.to_ascii_lowercase().replace('-', "_")
-}
+/// An alias shorter than this is only read as `key=value`. As a label, `d:` or `n "…"` is too
+/// easily ordinary prose.
+const SHORTEST_LABEL: usize = 3;
 
-fn as_number(value: &str) -> String {
+pub(crate) fn as_number(value: &str) -> String {
     let lower = value.to_lowercase();
     NUMBER_WORDS.iter().find(|(word, _)| *word == lower).map_or_else(|| value.to_string(), |(_, digits)| digits.to_string())
 }
@@ -137,7 +139,7 @@ fn numbers_in(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// A slot's name used as a label in the request: `message: …` or `message "…"`.
+/// A slot's name or alias used as a label in the request: `message: …` or `message "…"`.
 struct Label {
     slot: usize,
     start: usize,
@@ -154,28 +156,36 @@ fn labels(text: &str, items: &[Stated], slots: &[Slot], skip: &[bool]) -> Vec<La
         if skip[slot] {
             continue;
         }
-        let name = wanted.name.to_ascii_lowercase();
-        let mut from = 0;
-        while let Some(offset) = lower[from..].find(&name) {
-            let start = from + offset;
-            let end = start + name.len();
-            from = end;
-            let boundary = !lower[..start].chars().next_back().is_some_and(|ch| ch.is_alphanumeric() || ch == '_');
-            if !boundary || inside(start) {
-                continue;
-            }
-            let rest = &text[end..];
-            let after_name = rest.trim_start();
-            let colon = after_name.starts_with(':');
-            let value = if colon { after_name[1..].trim_start() } else { after_name };
-            let value_at = text.len() - value.len();
-            // Without a colon, only a quoted string right after the name counts.
-            let quoted_next = items.iter().any(|item| item.key.is_none() && item.span.start == value_at);
-            if colon || (quoted_next && value_at > end) {
-                found.push(Label { slot, start, value_at, colon });
-                break;
+        let aliases = wanted.aliases.iter().filter(|alias| alias.len() >= SHORTEST_LABEL);
+        // The slot's label is the first place any of its names is used as one.
+        let mut first: Option<Label> = None;
+        for name in std::iter::once(&wanted.name).chain(aliases).filter(|name| !name.is_empty()) {
+            let name = name.to_ascii_lowercase();
+            let mut from = 0;
+            while let Some(offset) = lower[from..].find(&name) {
+                let start = from + offset;
+                let end = start + name.len();
+                from = end;
+                let boundary = !lower[..start].chars().next_back().is_some_and(|ch| ch.is_alphanumeric() || ch == '_');
+                if !boundary || inside(start) {
+                    continue;
+                }
+                let rest = &text[end..];
+                let after_name = rest.trim_start();
+                let colon = after_name.starts_with(':');
+                let value = if colon { after_name[1..].trim_start() } else { after_name };
+                let value_at = text.len() - value.len();
+                // Without a colon, only a quoted string right after the name counts.
+                let quoted_next = items.iter().any(|item| item.key.is_none() && item.span.start == value_at);
+                if colon || (quoted_next && value_at > end) {
+                    if first.as_ref().is_none_or(|label| start < label.start) {
+                        first = Some(Label { slot, start, value_at, colon });
+                    }
+                    break;
+                }
             }
         }
+        found.extend(first);
     }
     found.sort_by_key(|label| label.start);
     found
@@ -190,8 +200,8 @@ pub struct Reading {
     pub quoted: Vec<String>,
     /// Numbers outside any stated value, in order.
     pub numbers: Vec<String>,
-    /// `key=value` arguments whose key is not a slot of the skill.
-    pub unmatched: Vec<String>,
+    /// `key=value` arguments whose key is no slot's name or alias, as (key, value).
+    pub unmatched: Vec<(String, String)>,
     /// The request with every stated value hidden. This is what gets routed and learned.
     pub phrase: String,
 }
@@ -209,10 +219,10 @@ pub fn read(query: &str, slots: &[Slot]) -> Reading {
     for (index, item) in items.iter().enumerate() {
         let Some(key) = &item.key else { continue };
         used[index] = true;
-        match slots.iter().position(|slot| normal(&slot.name) == normal(key)) {
+        match slots.iter().position(|slot| slot.answers_to(key)) {
             Some(slot) if value_of[slot].is_none() => value_of[slot] = Some(item.value.clone()),
             Some(_) => {}
-            None => reading.unmatched.push(key.clone()),
+            None => reading.unmatched.push((key.clone(), item.value.clone())),
         }
     }
 
@@ -264,6 +274,63 @@ pub fn read(query: &str, slots: &[Slot]) -> Reading {
 /// The request as it is routed and learned: stated values hidden.
 pub fn phrase(query: &str, slots: &[Slot]) -> String {
     read(query, slots).phrase
+}
+
+/// Part of a word, for finding a value as a whole word: `src` is not hidden inside `src/main.rs`.
+fn in_word(ch: char) -> bool {
+    ch.is_alphanumeric() || "_-/.".contains(ch)
+}
+
+/// Whether a value is worth hiding wherever it appears: a number, or something with two
+/// characters or more that has a letter or digit in it. `.` and `a` are not.
+fn hideable(value: &str) -> bool {
+    let digits = !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
+    digits || (value.chars().count() >= 2 && value.chars().any(char::is_alphanumeric))
+}
+
+/// The phrase with each value hidden wherever it appears verbatim as a whole word, and a number
+/// also where it is written as a word: `notes.txt` and `three` become `…`. A value the request
+/// does not contain, such as one the agent wrote, hides nothing. Whatever filled the values, this
+/// gives the same text, so `jli fix` can work it out again from the command that ran.
+pub fn hide_values<'a>(phrase: &str, values: impl IntoIterator<Item = &'a str>) -> String {
+    let mut words: Vec<String> = Vec::new();
+    for value in values.into_iter().map(str::trim).filter(|value| hideable(value)) {
+        words.push(value.to_string());
+        let named = NUMBER_WORDS.iter().filter(|(_, digits)| *digits == value);
+        words.extend(named.flat_map(|(word, _)| [word.to_string(), capitalised(word)]));
+    }
+    // Longest first, so `notes.txt` is hidden whole before `notes` could be.
+    words.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    for word in &words {
+        let mut from = 0;
+        while let Some(offset) = phrase[from..].find(word.as_str()) {
+            let start = from + offset;
+            let end = start + word.len();
+            from = end;
+            let before = phrase[..start].chars().next_back();
+            let mut after = phrase[end..].chars();
+            let next = after.next();
+            // A full stop ends a sentence unless a word goes on after it.
+            let stops = next == Some('.') && !after.next().is_some_and(char::is_alphanumeric);
+            let whole = !before.is_some_and(in_word) && (!next.is_some_and(in_word) || stops);
+            if whole && !ranges.iter().any(|taken| taken.start < end && start < taken.end) {
+                ranges.push(start..end);
+            }
+        }
+    }
+    let hidden = replace(phrase, &ranges, HIDDEN);
+    // As with stated values, a request that would be nothing but hidden values stays as it is.
+    if hidden.chars().any(char::is_alphanumeric) {
+        hidden
+    } else {
+        phrase.to_string()
+    }
+}
+
+fn capitalised(word: &str) -> String {
+    let mut chars = word.chars();
+    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
 /// The `name=value` arguments of a request, whatever skill it turns out to be for.
@@ -325,7 +392,7 @@ mod tests {
     use super::*;
 
     fn slot(name: &str, kind: SlotKind) -> Slot {
-        Slot { name: name.into(), kind, description: String::new(), default: None }
+        Slot { name: name.into(), kind, description: String::new(), default: None, aliases: vec![] }
     }
 
     fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -356,8 +423,9 @@ mod tests {
     fn an_argument_for_no_slot_is_reported() {
         let reading = read("commit msg=wip", &[slot("message", SlotKind::Text)]);
         assert!(reading.named.is_empty());
-        assert_eq!(reading.unmatched, ["msg"]);
-        let dashed = read("tag it tag-name=v1 count=three", &[slot("tag_name", SlotKind::Text), slot("count", SlotKind::Number)]);
+        assert_eq!(reading.unmatched, pairs(&[("msg", "wip")]));
+        let dashed =
+            read("tag it tag-name=v1 count=three", &[slot("tag_name", SlotKind::Text), slot("count", SlotKind::Number)]);
         assert_eq!(dashed.named, pairs(&[("tag_name", "v1"), ("count", "3")]));
     }
 
@@ -385,6 +453,30 @@ mod tests {
     }
 
     #[test]
+    fn a_slot_answers_to_its_aliases() {
+        let mut directory = slot("directory", SlotKind::File);
+        directory.aliases = vec!["dir".into(), "d".into(), "target_path".into()];
+        let slots = [directory, slot("count", SlotKind::Number)];
+        for request in ["go dir=src", "go D=src", "go target-path=src", "go directory=src"] {
+            let reading = read(request, &slots);
+            assert_eq!(reading.named, pairs(&[("directory", "src")]), "{request}");
+            assert!(reading.unmatched.is_empty(), "{request}");
+        }
+        assert_eq!(read("go dir=src", &slots).phrase, "go dir=…");
+        assert_eq!(read("go dir=a directory=b", &slots).named, pairs(&[("directory", "a")]), "the first one stated wins");
+        assert_eq!(read("go folder=src", &slots).unmatched, pairs(&[("folder", "src")]));
+
+        assert_eq!(read("go to dir: src please", &slots).named, pairs(&[("directory", "src")]));
+        assert_eq!(read("go to dir \"my files\"", &slots).named, pairs(&[("directory", "my files")]));
+        assert_eq!(
+            read("open dir: a, not directory: b", &slots).named,
+            pairs(&[("directory", "a,")]),
+            "the first label wins"
+        );
+        assert!(read("plan d: go home", &slots).named.is_empty(), "a short alias is not read as a label");
+    }
+
+    #[test]
     fn quoted_strings_and_numbers_are_positional() {
         let reading = read(r#"replace "foo" with “bar baz” in the 3 newest files, don't ask"#, &[]);
         assert_eq!(reading.quoted, ["foo", "bar baz"]);
@@ -406,12 +498,40 @@ mod tests {
     }
 
     #[test]
+    fn a_value_is_hidden_wherever_it_is_a_whole_word() {
+        let hide = |phrase: &str, values: &[&str]| hide_values(phrase, values.iter().copied());
+        assert_eq!(hide("how many lines are in notes.txt", &["notes.txt"]), "how many lines are in …");
+        assert_eq!(hide("count the lines of todo.md.", &["todo.md"]), "count the lines of ….", "a full stop ends it");
+        assert_eq!(hide("show the last 3 commits", &["3"]), "show the last … commits");
+        assert_eq!(hide("show the last three commits", &["3"]), "show the last … commits", "a number written as a word");
+        assert_eq!(hide("Three commits please", &["3"]), "… commits please");
+        assert_eq!(hide("push main to origin", &["main"]), "push … to origin");
+
+        assert_eq!(hide("list src/main.rs and src2", &["src"]), "list src/main.rs and src2", "never inside a word");
+        assert_eq!(hide("open .gitignore", &["gitignore"]), "open .gitignore");
+        assert_eq!(hide("show 13 commits", &["3"]), "show 13 commits");
+        assert_eq!(hide("size of this folder", &["."]), "size of this folder", "no letter or digit: not hidden");
+        assert_eq!(hide("make a branch", &["a"]), "make a branch", "one letter is not hidden");
+        assert_eq!(hide("commit my work", &["fix the parser"]), "commit my work", "a value the agent wrote hides nothing");
+        assert_eq!(hide("notes.txt", &["notes.txt"]), "notes.txt", "a request that is only a value stays whole");
+        assert_eq!(hide("cat notes and notes.txt", &["notes", "notes.txt"]), "cat … and …");
+        assert_eq!(hide("commit message=\"…\" about wip", &["wip"]), "commit message=\"…\" about …");
+    }
+
+    #[test]
     fn command_line_words_get_their_quotes_back() {
-        assert_eq!(request_from(&["commit", "this", "with", "a", "message:", "the message"]), "commit this with a message: \"the message\"");
+        assert_eq!(
+            request_from(&["commit", "this", "with", "a", "message:", "the message"]),
+            "commit this with a message: \"the message\""
+        );
         assert_eq!(request_from(&["commit", "message=fix the bug"]), "commit message=\"fix the bug\"");
         assert_eq!(request_from(&["commit", "message=say \"hi\" now"]), "commit message='say \"hi\" now'");
         assert_eq!(request_from(&["commit", "message=wip"]), "commit message=wip");
-        assert_eq!(request_from(&["commit with message 'x y'"]), "commit with message 'x y'", "one word is the whole request");
+        assert_eq!(
+            request_from(&["commit with message 'x y'"]),
+            "commit with message 'x y'",
+            "one word is the whole request"
+        );
         assert_eq!(request_from(&["echo", ""]), "echo \"\"");
         let typed = "commit message=\"fix the bug\"";
         let message = [slot("message", SlotKind::Text)];

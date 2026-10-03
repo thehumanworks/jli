@@ -1,6 +1,7 @@
 # 7. Skills are templates with `{slot}` placeholders, filled cheapest first and always shell-quoted
 
-- Status: accepted
+- Status: accepted; superseded in part by [ADR 14](0014-shell-integration.md), which expands `~`
+  and `$NAME` in a file value before it is quoted, and quotes a value that starts with `=`
 - Date: 2026-10-02
 - Origin: the TypeScript prototype; kept unchanged by the Rust port
 
@@ -16,7 +17,7 @@ found for each request, cheaply, and dropped into a shell command safely.
   preceded by `$`. So `${HOME}` stays shell syntax, and `{}` in `find -exec` is not a placeholder.
   The Rust version tokenizes this by hand, because the `regex` crate has no lookbehind.
 - **A slot** has a name, a kind (`file`, `branch`, `number`, `text`), a description and an optional
-  default.
+  default. [ADR 12](0012-slot-aliases.md) adds a list of other names it answers to.
 - **Values are found cheapest method first:**
   1. a value the agent already gave with its proposal;
   2. for a number slot, the first number in the request, in digits or as a word from one to ten;

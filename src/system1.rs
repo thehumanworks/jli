@@ -4,12 +4,12 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use serde_json::{json, Map, Value};
 use typesafe_jev::{Choice, Client, Config, Content, Error, Noul, Questions, Reply, Score};
 
 use crate::context::Context;
-use crate::types::{Risk, Skill};
+use crate::types::{coded, Risk, Skill, CONFIGURATION, MODEL};
 
 /// Label for "nothing in the matrix fits". Gives low-fit requests somewhere to land.
 pub const NONE: &str = "none-of-these";
@@ -53,10 +53,7 @@ impl System1 {
     }
 
     fn client(&self) -> Result<&Client> {
-        self.client
-            .get_or_init(|| Client::from_env(interactive()))
-            .as_ref()
-            .map_err(|error| explain(error.clone()))
+        self.client.get_or_init(|| Client::from_env(interactive())).as_ref().map_err(|error| explain(error.clone()))
     }
 
     /// Requests, tokens and an estimated cost so far, when a client has been made.
@@ -75,16 +72,18 @@ fn interactive() -> Config {
 
 fn explain(error: Error) -> anyhow::Error {
     match error {
-        Error::Auth(message) if message.contains(typesafe_jev::API_KEY_VAR) => anyhow!("System 1: {message}"),
-        Error::Auth(message) => anyhow!("System 1: {message}. Check {}.", typesafe_jev::API_KEY_VAR),
-        Error::TokenLimit(message) => anyhow!("System 1: the request is too large for the model: {message}"),
-        Error::InvalidRequest(message) => anyhow!("System 1 refused the request: {message}"),
-        other => anyhow!("System 1: {other}"),
+        Error::Auth(message) if message.contains(typesafe_jev::API_KEY_VAR) => {
+            coded(CONFIGURATION, format!("System 1: {message}"))
+        }
+        Error::Auth(message) => coded(CONFIGURATION, format!("System 1: {message}. Check {}.", typesafe_jev::API_KEY_VAR)),
+        Error::TokenLimit(message) => coded(MODEL, format!("System 1: the request is too large for the model: {message}")),
+        Error::InvalidRequest(message) => coded(MODEL, format!("System 1 refused the request: {message}")),
+        other => coded(MODEL, format!("System 1: {other}")),
     }
 }
 
 fn missing(id: &str) -> anyhow::Error {
-    anyhow!("System 1 returned no answer to `{id}`")
+    coded(MODEL, format!("System 1 returned no answer to `{id}`"))
 }
 
 fn content(value: Value) -> Content {

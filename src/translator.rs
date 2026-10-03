@@ -67,6 +67,9 @@ steps and slots
 - Substituting slotValues into steps must reproduce the original command exactly.
 - Flags, subcommands and fixed arguments are part of the skill. Do not turn them into slots.
 - If nothing is instance-specific, return the command unchanged with no slots.
+- Name each slot with the plain, full word for its value ("directory", not "d"). In aliases, list up to
+  four other names a person might type for it as name=value ("dir", "path"). An alias must not be able
+  to mean another slot of this command.
 
 existingLabel
 - Set it only when a known skill's steps, with some slot values, are exactly this command.

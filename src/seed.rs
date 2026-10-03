@@ -30,6 +30,7 @@ pub fn seed_skills() -> Vec<NewSkill> {
                 kind: SlotKind::Text,
                 description: "the commit message".into(),
                 default: None,
+                aliases: vec![],
             }],
             ..skill(
                 "git-commit",
@@ -38,12 +39,7 @@ pub fn seed_skills() -> Vec<NewSkill> {
                 Risk::Modifies,
             )
         },
-        skill(
-            "git-push",
-            "git push",
-            "the user wants to push the committed work to the default remote",
-            Risk::Modifies,
-        ),
+        skill("git-push", "git push", "the user wants to push the committed work to the default remote", Risk::Modifies),
         skill(
             "git-push-main",
             "git push -u origin main",
@@ -68,11 +64,6 @@ pub fn seed_skills() -> Vec<NewSkill> {
             "the user wants files listed with the size of each file in human readable format",
             Risk::Safe,
         ),
-        skill(
-            "print-working-directory",
-            "pwd",
-            "the user wants to know which directory they are in",
-            Risk::Safe,
-        ),
+        skill("print-working-directory", "pwd", "the user wants to know which directory they are in", Risk::Safe),
     ]
 }

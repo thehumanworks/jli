@@ -1,0 +1,9 @@
+id: jev-stays-in-system1
+language: rust
+severity: error
+message: Only src/system1.rs talks to typesafe-jev (ADR 3). Add a method to System1 instead.
+rule:
+  kind: use_declaration
+  regex: typesafe_jev
+ignores:
+  - src/system1.rs

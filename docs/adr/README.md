@@ -22,6 +22,13 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [9](0009-port-to-rust.md) | Port jli from TypeScript to Rust, keeping its behaviour and its brain |
 | [10](0010-synchronous-rust.md) | The Rust version is synchronous, with async confined to the store |
 | [11](0011-stated-arguments.md) | Arguments stated in the request are read by a parser, before and instead of any model |
+| [12](0012-slot-aliases.md) | A slot answers to several names, and a new name is worked out once and kept |
+| [13](0013-learning-fixes.md) | One row per command, the shape of a request, this host's own fix, and failures that are not the command's fault |
+| [14](0014-shell-integration.md) | Steps such as `cd` are handed to the calling shell, and paths are expanded before they are quoted |
+| [15](0015-user-scope.md) | What is learned belongs to a user, a skill is shared by copy, and parallel writers lose nothing |
+| [16](0016-measuring-the-matrix.md) | The matrix is measured against the brain's own evidence, optimised only where the measurement improves, and every new row is checked against its closest skills |
+| [17](0017-project-scope.md) | What is learned inside a project stays with it, global skills are still used there, and a project skill becomes global only with approval |
+| [18](0018-agent-contract.md) | A contract for agent callers: pinned plans, run in order, and corrections without a terminal |
 
 ## Known gaps, by record
 
@@ -34,3 +41,28 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   two correction flows have not been tested live.
 - [11](0011-stated-arguments.md): a stated value has no escapes, and hidden requests were measured on a handful
   of live cases, not on the benchmark.
+- [12](0012-slot-aliases.md): one alias cannot be removed by hand, an unknown name is only noticed as
+  `name=value`, and a skill with no slots still blocks on any argument.
+- [13](0013-learning-fixes.md): the duplicate check was verified offline only, a rejected skill can
+  come back as a second row, hiding is verbatim and case-sensitive, and hidden examples were
+  measured on the demo and six requests, not on a benchmark built for it.
+- [14](0014-shell-integration.md): handed-over steps that are not tried first count as a clean
+  exit, the trial runs in bash whatever the calling shell is, fish has only been tested offline,
+  jli's own session hands its steps over only when it ends, and `~user` is not expanded.
+- [15](0015-user-scope.md): an older jli ignores `--user-id` and `JLI_USER_ID` (and routes the flag
+  as words of a request), two writers teaching the same new command at once get two skills, a share
+  cannot be undone except by `forget`, and the safe writes have not run against a live remote.
+- [16](0016-measuring-the-matrix.md): a stored example is ground truth, so one taught by mistake cannot
+  be dropped through the gate; the gate checks a skill's competitors, not the whole matrix; rewrites are
+  not repeatable; examples carry no context, and a replay in a directory that is gone runs in an
+  inferred one; a `jli fix` made after other requests counts as a request of its own.
+- [17](0017-project-scope.md): an older jli ignores `.jlirc` and teaches the global skills inside a
+  project; a lesson about a global skill blocks only the phrasing it was learned from, and has no
+  path to global but `teach --global`; a stop between `generalize`'s two writes leaves both rows; a
+  project id cannot be renamed; there are no per-project settings; `eval --optimise` in a project
+  rewrites a global row in place; and the `generalization` prompt was measured on six live requests.
+- [18](0018-agent-contract.md): a dry run needs a writable brain; plan rows are never deleted; a plan
+  does not notice that its skill changed after it was made; a proposal learned through `jli run`
+  skips the System 1 check; `jli run` refuses a plan with a `cd` even under the shell function; a plan
+  blocked on an unknown argument runs without it once its slots are filled; `corrections` is shown
+  nowhere; and the claim, like the rest of the cloud setup, has run only against local files.
