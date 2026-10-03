@@ -1,7 +1,10 @@
 # 7. Skills are templates with `{slot}` placeholders, filled cheapest first and always shell-quoted
 
 - Status: accepted; superseded in part by [ADR 14](0014-shell-integration.md), which expands `~`
-  and `$NAME` in a file value before it is quoted, and quotes a value that starts with `=`
+  and `$NAME` in a file value before it is quoted, and quotes a value that starts with `=`; by
+  [ADR 19](0019-one-row-per-command.md), under which matching a command back to a template never gives
+  a slot a value that begins with `-`; and by [ADR 23](0023-shell-fixes-and-number-words.md), which does
+  not read a number word joined by `-` to another word
 - Date: 2026-10-02
 - Origin: the TypeScript prototype; kept unchanged by the Rust port
 

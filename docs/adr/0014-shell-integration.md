@@ -1,6 +1,7 @@
 # 14. Steps such as `cd` are handed to the calling shell, and paths are expanded before they are quoted
 
-- Status: accepted
+- Status: accepted; superseded in part by [ADR 23](0023-shell-fixes-and-number-words.md), which names
+  the running shell in the install line and removes the hand-off file after a ctrl-c
 - Date: 2026-10-03
 - Origin: the Rust version
 - Supersedes in part: [ADR 5](0005-routing-loop.md), on where a step runs, the `--json` outcome and

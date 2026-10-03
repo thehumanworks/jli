@@ -29,6 +29,11 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [16](0016-measuring-the-matrix.md) | The matrix is measured against the brain's own evidence, optimised only where the measurement improves, and every new row is checked against its closest skills |
 | [17](0017-project-scope.md) | What is learned inside a project stays with it, global skills are still used there, and a project skill becomes global only with approval |
 | [18](0018-agent-contract.md) | A contract for agent callers: pinned plans, run in order, and corrections without a terminal |
+| [19](0019-one-row-per-command.md) | A flag is never a slot value, a literal skill is made general in place, and a label taken by the same command is joined |
+| [20](0020-write-back.md) | An accepted route links its phrasing, a rejected command is refused, and a path is hidden as it was typed |
+| [21](0021-hand-edits.md) | One slot name and one phrasing can be changed by hand, written where the router would write the same lesson |
+| [22](0022-project-scenarios.md) | A scenario rewritten inside a project is kept for that project, and the global row is left as it was |
+| [23](0023-shell-fixes-and-number-words.md) | The install line follows the running shell, the function cleans up after ctrl-c, and a hyphenated number word is not a count |
 
 ## Known gaps, by record
 
@@ -41,28 +46,56 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   two correction flows have not been tested live.
 - [11](0011-stated-arguments.md): a stated value has no escapes, and hidden requests were measured on a handful
   of live cases, not on the benchmark.
-- [12](0012-slot-aliases.md): one alias cannot be removed by hand, an unknown name is only noticed as
-  `name=value`, and a skill with no slots still blocks on any argument.
-- [13](0013-learning-fixes.md): the duplicate check was verified offline only, a rejected skill can
-  come back as a second row, hiding is verbatim and case-sensitive, and hidden examples were
-  measured on the demo and six requests, not on a benchmark built for it.
+- [12](0012-slot-aliases.md): an unknown name is only noticed as `name=value`, and a skill with no
+  slots still blocks on any argument.
+- [13](0013-learning-fixes.md): the duplicate check was verified offline only, hiding is verbatim
+  and case-sensitive, and hidden examples were measured on the demo and six requests, not on a
+  benchmark built for it.
 - [14](0014-shell-integration.md): handed-over steps that are not tried first count as a clean
   exit, the trial runs in bash whatever the calling shell is, fish has only been tested offline,
   jli's own session hands its steps over only when it ends, and `~user` is not expanded.
 - [15](0015-user-scope.md): an older jli ignores `--user-id` and `JLI_USER_ID` (and routes the flag
-  as words of a request), two writers teaching the same new command at once get two skills, a share
-  cannot be undone except by `forget`, and the safe writes have not run against a live remote.
+  as words of a request), a share cannot be undone except by `forget`, and the safe writes have not
+  run against a live remote.
 - [16](0016-measuring-the-matrix.md): a stored example is ground truth, so one taught by mistake cannot
-  be dropped through the gate; the gate checks a skill's competitors, not the whole matrix; rewrites are
-  not repeatable; examples carry no context, and a replay in a directory that is gone runs in an
-  inferred one; a `jli fix` made after other requests counts as a request of its own.
+  be dropped through the gate (it can now be dropped by hand with `jli forget-phrase`, ADR 21); the
+  gate checks a skill's competitors, not the whole matrix; rewrites are not repeatable; examples carry
+  no context, and a replay in a directory that is gone runs in an inferred one; a `jli fix` made after
+  other requests counts as a request of its own.
 - [17](0017-project-scope.md): an older jli ignores `.jlirc` and teaches the global skills inside a
   project; a lesson about a global skill blocks only the phrasing it was learned from, and has no
   path to global but `teach --global`; a stop between `generalize`'s two writes leaves both rows; a
-  project id cannot be renamed; there are no per-project settings; `eval --optimise` in a project
-  rewrites a global row in place; and the `generalization` prompt was measured on six live requests.
+  project id cannot be renamed; there are no per-project settings; and the `generalization` prompt
+  was measured on six live requests.
 - [18](0018-agent-contract.md): a dry run needs a writable brain; plan rows are never deleted; a plan
   does not notice that its skill changed after it was made; a proposal learned through `jli run`
   skips the System 1 check; `jli run` refuses a plan with a `cd` even under the shell function; a plan
   blocked on an unknown argument runs without it once its slots are filled; `corrections` is shown
   nowhere; and the claim, like the rest of the cloud setup, has run only against local files.
+- [19](0019-one-row-per-command.md): teaching a command a literal skill runs costs a translator call;
+  a literal skill made general keeps its old label, and its old value as a default; only its own
+  command makes it general, so a template taught with another value is a row beside it; inside a project a
+  global literal skill is not made general, and the router still stores a more general proposal beside
+  a literal skill; two agents' proposals for one command named differently still make two rows, and a
+  writer that joins a row drops its own scenario and slot names; a value that begins with `-` is never
+  read back out of a command; a seed that names a value is never made general; and the
+  compare-and-swap has run only against local files.
+- [20](0020-write-back.md): a refused repeat ends the correction with no second chance for the agent;
+  a command that does the same thing in other words is not recognised as the rejected one; a
+  rejected `ls {directory}` also refuses `ls -la` until `match_template` stops a slot taking a flag; a
+  confident System 1 route leaves a counter-example of its skill in place; and a path's written form
+  is found with the environment as it is when the phrase is worked out, never for a bare `~` or `~user`.
+- [21](0021-hand-edits.md): `jli alias` and exactly three words is read as the command, never as a
+  request; a forgotten phrasing that System 1 still routes to its skill comes back as an example while
+  it stays a counter-example; `jli eval` still replays an accepted request in those words as evidence
+  for the skill; there is no alias for one project only; and the edits have run only against local
+  files.
+- [22](0022-project-scenarios.md): a project's scenario has no path to the global row; a project
+  with one does not see later global rewrites, and only `eval undo` or `forget --global` drops it; a
+  rewrite in a project cannot drop a global row's phrasing; a counter-example already listed as an
+  example in the project's lesson is not measured as it is written; a jli with ADR 17 but not ADR 22
+  still rewrites the global row from a project; and it was run live on one skill of one scratch brain.
+- [23](0023-shell-fixes-and-number-words.md): whether fish removes the hand-off file after a ctrl-c
+  is not measured; with no shell among jli's ancestors the install line still follows `$SHELL`, as
+  `jli shell-init` with no argument does; digits joined by `-` are still numbers; and the number-word
+  fix was tested offline only.

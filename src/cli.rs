@@ -8,6 +8,7 @@ use crate::args;
 use crate::demo::run_demo;
 use crate::eval;
 use crate::generalize::{generalize, GeneralizeOptions};
+use crate::hand;
 use crate::learn::{learn_phrase, LearnInput};
 use crate::plan::{self, PlanRecord, RunFlags};
 use crate::project::{self, Found};
@@ -64,6 +65,8 @@ fn help() -> String {
   jli run <planId> [<planId> …]        run plans (planId in --json) exactly as shown, in order, with no
                                        model call; stops at the first that fails. name=value fills a gap
   jli forget <label>                   delete a skill (inside a project, one of the project's: --global for the user's)
+  jli forget-phrase <label> <phrase>   take one phrasing back from a skill; it is kept as a counter-example
+  jli alias <label> <slot> <name>      give a slot another name for name=value (--remove takes one away)
   jli eval [<label>] [--limit N]       route every stored example with itself held out, and replay accepted
                                        requests: how often each skill comes home (System 1 calls, priced first)
   jli eval --optimise                  the agent rewrites the weakest rows; a rewrite is kept only if the
@@ -121,6 +124,12 @@ impl Flags {
     #[cfg(test)]
     pub(crate) fn quiet() -> Flags {
         Flags { quiet: true, ..Flags::default() }
+    }
+
+    /// `--quiet --yes`, for tests where a correction runs what the agent proposes.
+    #[cfg(test)]
+    pub(crate) fn quiet_yes() -> Flags {
+        Flags { yes: true, ..Flags::quiet() }
     }
 }
 
@@ -357,6 +366,7 @@ impl App {
         // Inside a project each skill says whose it is (ADR 17); outside one the listing is as it was.
         let own: Vec<String> = self.brain.project_skills()?.into_iter().map(|skill| skill.label).collect();
         let lessons = self.brain.project_lessons()?;
+        let rewritten = self.brain.project_scenarios()?;
         say(format!(
             "{} {}\n",
             c::bold(format!("{} skills", skills.len())),
@@ -374,7 +384,8 @@ impl App {
                 Some(_) => {
                     let learned = lessons.iter().find(|(label, _, _)| *label == skill.label);
                     let learned = learned.map(|(_, added, removed)| format!(", +{added} −{removed} learned here"));
-                    format!("  {}", c::dim(format!("global{}", learned.unwrap_or_default())))
+                    let own = if rewritten.contains(&skill.label) { ", scenario rewritten here" } else { "" };
+                    format!("  {}", c::dim(format!("global{}{own}", learned.unwrap_or_default())))
                 }
                 None => String::new(),
             };
@@ -572,6 +583,12 @@ impl App {
         ));
         say(c::dim(if learned.created {
             format!("  new skill{scope}")
+        } else if learned.upgraded {
+            let (count, takes) = skill.map_or((1, String::new()), |skill| {
+                let names: Vec<String> = skill.slots.iter().map(|slot| format!("{{{}}}", slot.name)).collect();
+                (skill.examples.len(), names.join(", "))
+            });
+            format!("  added to an existing skill, which now takes {takes} and has {count} phrasings{scope}")
         } else {
             let count = skill.map_or(1, |skill| skill.examples.len());
             format!("  added to an existing skill, which now has {count} phrasings{scope}")
@@ -626,6 +643,13 @@ impl App {
             if own == 1 { "" } else { "s" },
             if lessons == 1 { "" } else { "s" }
         ));
+        let rewritten = self.brain.project_scenarios()?.len();
+        if rewritten > 0 {
+            say(format!(
+                "  its own scenario for {rewritten} global skill{}, from jli eval --optimise",
+                if rewritten == 1 { "" } else { "s" }
+            ));
+        }
         say(c::dim("  What is learned here stays with this project; your global skills are used here too. See jli skills."));
         Ok(0)
     }
@@ -708,6 +732,16 @@ impl App {
         };
         say(message);
         Ok(code)
+    }
+
+    /// `jli alias` and `jli forget-phrase` (ADR 21): a sentence, or one JSON object; a refusal exits 1.
+    fn hand_edit(&mut self, flags: &Flags, edit: impl FnOnce(&mut Brain) -> Result<hand::Edited>) -> Result<i32> {
+        let done = edit(&mut self.brain)?;
+        if let Some(code) = done.refused {
+            return Ok(refuse(flags, code, &done.message));
+        }
+        say(if flags.json { serde_json::to_string_pretty(&done.json)? } else { done.message });
+        Ok(0)
     }
 
     /// `jli fix`: bare, the last route run here; with an event id, that event, from anywhere.
@@ -912,7 +946,8 @@ impl App {
                 return Ok(Some(0));
             }
             let verb = if undone.dry_run { "Would put back" } else { "Put back" };
-            say(format!("{verb} the scenario of {}: {}", c::bold(&undone.label), undone.scenario));
+            let here = undone.project.as_ref().map(|project| format!(" in project {project}")).unwrap_or_default();
+            say(format!("{verb} the scenario of {}{here}: {}", c::bold(&undone.label), undone.scenario));
             for example in &undone.examples {
                 say(format!("  {} \"{example}\" {}", c::green("+"), c::dim("as an example again")));
             }
@@ -1081,6 +1116,21 @@ impl App {
         let plain: Vec<String> = others.iter().filter(|word| *word != "--global").cloned().collect();
         if first == "forget" && plain.len() == 1 {
             return self.forget(&plain[0], global);
+        }
+        if first == "alias" && rest.is_empty() {
+            match hand::alias_shape(others, flags.dry_run) {
+                Some(edit) => return self.hand_edit(flags, |brain| hand::alias(brain, &edit)),
+                None if others.iter().any(|word| word == "--remove" || word == "--global") => {
+                    return Ok(refuse(flags, USAGE, "Usage: jli alias [--remove] [--global] <label> <slot> <name>"))
+                }
+                None => {}
+            }
+        }
+        if first == "forget-phrase" {
+            return match hand::phrase_shape(others, flags.dry_run).filter(|_| rest.is_empty()) {
+                Some(edit) => self.hand_edit(flags, |brain| hand::forget_phrase(brain, &edit)),
+                None => Ok(refuse(flags, USAGE, "Usage: jli forget-phrase [--global] <label> \"<phrase>\"")),
+            };
         }
         if first == "eval" && rest.is_empty() {
             if let Some(code) = self.measure(others, flags)? {

@@ -9,7 +9,8 @@ use libsql::{Builder, Connection, Database, Value};
 use tokio::runtime::Runtime;
 
 use crate::seed::seed_skills;
-use crate::types::{add_alias, coded, BrainEvent, Origin, Path, Risk, Skill, Slot, STORAGE};
+use crate::slots::match_proposal;
+use crate::types::{add_alias, coded, remove_alias, BrainEvent, Origin, Path, Risk, Skill, Slot, STORAGE};
 
 /// Where the brain lives. One libSQL client covers every deployment:
 ///
@@ -188,6 +189,20 @@ const PROJECT_SCHEMA: &str = "
    );
 ";
 
+/// A scenario a project keeps for one of the user's global skills (ADR 22): `jli eval --optimise` measured
+/// the rewrite inside that project, so it holds there and nowhere else. Keyed like a lesson, by the
+/// global row's `created_at`, so a global skill forgotten and taught again starts clean.
+const SCENARIO_SCHEMA: &str = "
+  CREATE TABLE IF NOT EXISTS project_scenarios (
+     user_id     TEXT NOT NULL,
+     project_id  TEXT NOT NULL,
+     label       TEXT NOT NULL,
+     created_at  TEXT NOT NULL,
+     scenario    TEXT NOT NULL,
+     PRIMARY KEY (user_id, project_id, label, created_at)
+   );
+";
+
 /// The user every brain has always had. Its rows are the tables a brain had before users existed.
 pub const DEFAULT_USER: &str = "default";
 
@@ -331,6 +346,25 @@ fn with_lesson(skill: &mut Skill, lesson: &Lesson) {
     let examples = merge(&skill.examples, &lesson.counter_examples, &lesson.examples);
     let counter_examples = merge(&skill.counter_examples, &lesson.examples, &lesson.counter_examples);
     (skill.examples, skill.counter_examples) = (examples, counter_examples);
+}
+
+/// The phrasings and scenarios one project keeps about the user's global rows, by label and `created_at`.
+struct Kept {
+    lessons: HashMap<(String, String), Lesson>,
+    scenarios: HashMap<(String, String), String>,
+}
+
+impl Kept {
+    /// A global row as the project sees it: with its lesson about the row, and its own scenario if it keeps one.
+    fn apply(&self, skill: &mut Skill) {
+        let key = (skill.label.clone(), skill.created_at.clone());
+        if let Some(lesson) = self.lessons.get(&key) {
+            with_lesson(skill, lesson);
+        }
+        if let Some(scenario) = self.scenarios.get(&key) {
+            skill.scenario = scenario.clone();
+        }
+    }
 }
 
 const SKILL_COLUMNS: &str =
@@ -603,6 +637,7 @@ impl Brain {
         let brain = Brain { conn: Some(conn), db: Some(db), rt, config, scope };
         brain.block(brain.conn().execute_batch(SCHEMA)).context("could not create the brain's tables")?;
         brain.block(brain.conn().execute_batch(PROJECT_SCHEMA)).context("could not create the brain's tables")?;
+        brain.block(brain.conn().execute_batch(SCENARIO_SCHEMA)).context("could not create the brain's tables")?;
         // A project starts from the user's own skills, not from a copy of the seeds.
         brain.seed_once(&brain.scope.base())?;
         Ok(brain)
@@ -731,14 +766,12 @@ impl Brain {
             return self.skills_of(scope);
         }
         let mut skills = self.skills_of(scope)?;
-        let lessons = self.lessons_of(scope)?;
+        let kept = self.kept_by(scope)?;
         for mut skill in self.skills_of(&scope.base())? {
             if skills.iter().any(|own| own.label == skill.label) {
                 continue;
             }
-            if let Some(lesson) = lessons.get(&(skill.label.clone(), skill.created_at.clone())) {
-                with_lesson(&mut skill, lesson);
-            }
+            kept.apply(&mut skill);
             skills.push(skill);
         }
         skills.sort_by(|a, b| b.uses.cmp(&a.uses).then_with(|| a.label.cmp(&b.label)));
@@ -753,9 +786,7 @@ impl Brain {
             return Ok(None);
         }
         let Some(mut global) = self.row(&self.scope.base(), label)? else { return Ok(None) };
-        if let Some(lesson) = self.lessons_of(&self.scope)?.get(&(global.label.clone(), global.created_at.clone())) {
-            with_lesson(&mut global, lesson);
-        }
+        self.kept_by(&self.scope)?.apply(&mut global);
         Ok(Some(global))
     }
 
@@ -835,6 +866,105 @@ impl Brain {
         Ok(rows.into_iter().collect())
     }
 
+    /// The scenarios a project keeps for global rows, by the label and `created_at` of each row.
+    fn scenarios_of(&self, scope: &Scope) -> Result<HashMap<(String, String), String>> {
+        let rows = self.query(
+            "SELECT label, created_at, scenario FROM project_scenarios WHERE user_id = ? AND project_id = ?",
+            vec![scope.user.clone().into(), scope.project.clone().into()],
+            |row| {
+                let mut c = Columns::new(row);
+                ((text(c.take()), text(c.take())), text(c.take()))
+            },
+        )?;
+        Ok(rows.into_iter().collect())
+    }
+
+    fn kept_by(&self, scope: &Scope) -> Result<Kept> {
+        Ok(Kept { lessons: self.lessons_of(scope)?, scenarios: self.scenarios_of(scope)? })
+    }
+
+    /// Inside a project with no row of `label`, the user's global row of it, as stored.
+    fn global_row(&self, label: &str) -> Result<Option<Skill>> {
+        if !self.scope.has_project() || self.row(&self.scope, label)?.is_some() {
+            return Ok(None);
+        }
+        self.row(&self.scope.base(), label)
+    }
+
+    /// The scenario this project keeps for the global skill `label` (ADR 22). None outside a project,
+    /// for a project's own skill, and for a global skill seen here with the global row's scenario.
+    pub fn project_scenario(&self, label: &str) -> Result<Option<String>> {
+        let Some(global) = self.global_row(label)? else { return Ok(None) };
+        Ok(self.scenarios_of(&self.scope)?.remove(&(global.label, global.created_at)))
+    }
+
+    /// The global skills this project sees with a scenario of its own, by label.
+    pub fn project_scenarios(&self) -> Result<Vec<String>> {
+        if !self.scope.has_project() {
+            return Ok(vec![]);
+        }
+        let own: Vec<String> = self.skills_of(&self.scope)?.into_iter().map(|skill| skill.label).collect();
+        let scenarios = self.scenarios_of(&self.scope)?;
+        let mut out: Vec<String> = self
+            .global_skills()?
+            .into_iter()
+            .filter(|skill| !own.contains(&skill.label))
+            .filter(|skill| scenarios.contains_key(&(skill.label.clone(), skill.created_at.clone())))
+            .map(|skill| skill.label)
+            .collect();
+        out.sort();
+        Ok(out)
+    }
+
+    /// Change when a skill applies, as this brain sees it. Inside a project, a skill only the user's
+    /// global skills hold gets a scenario of the project's own, and the global row is not written: a
+    /// rewrite measured in one project is that project's (ADR 22). Otherwise the row's own scenario
+    /// changes. Returns false when there is no such skill or it already reads that way here.
+    ///
+    /// The global row's own scenario is never kept as the project's: that would stop a later rewrite
+    /// of the global row from reaching the project. Asked for it, the project drops its own instead.
+    pub fn set_scenario(&self, label: &str, scenario: &str) -> Result<bool> {
+        let Some(global) = self.global_row(label)? else {
+            return self.edit_column_in(&self.scope, label, "scenario", |stored| {
+                Ok((text(stored) != scenario).then(|| scenario.to_string()))
+            });
+        };
+        if global.scenario == scenario {
+            return self.clear_project_scenario(label);
+        }
+        let kept = self.scenarios_of(&self.scope)?.remove(&(global.label.clone(), global.created_at.clone()));
+        if kept.as_deref() == Some(scenario) {
+            return Ok(false);
+        }
+        self.execute(
+            "INSERT INTO project_scenarios (user_id, project_id, label, created_at, scenario) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(user_id, project_id, label, created_at) DO UPDATE SET scenario = excluded.scenario",
+            vec![
+                self.scope.user.clone().into(),
+                self.scope.project.clone().into(),
+                global.label.into(),
+                global.created_at.into(),
+                scenario.into(),
+            ],
+        )?;
+        Ok(true)
+    }
+
+    /// Let this project see the global scenario of `label` again. Returns false when it kept none.
+    pub fn clear_project_scenario(&self, label: &str) -> Result<bool> {
+        let Some(global) = self.global_row(label)? else { return Ok(false) };
+        let removed = self.execute(
+            "DELETE FROM project_scenarios WHERE user_id = ? AND project_id = ? AND label = ? AND created_at = ?",
+            vec![
+                self.scope.user.clone().into(),
+                self.scope.project.clone().into(),
+                global.label.into(),
+                global.created_at.into(),
+            ],
+        )?;
+        Ok(removed > 0)
+    }
+
     /// The scope that holds the row this brain sees for `label`: its own, or inside a project the
     /// user's global row when the project has none of that label.
     fn row_scope(&self, label: &str) -> Result<Scope> {
@@ -875,24 +1005,108 @@ impl Brain {
     }
 
     /// Insert a new skill under its label, or under the label with `-x` appended until one is free.
-    /// A label that another writer took after this one looked is never overwritten. Returns the
-    /// label the skill was stored under.
-    pub fn add_new_skill(&self, skill: &NewSkill) -> Result<String> {
+    /// A label that another writer took after this one looked is never overwritten. If the row that
+    /// holds a label runs the same command, the skill is that row: its phrasings are added to it and
+    /// nothing new is written. Returns the label, and whether a new row was written.
+    pub fn add_new_skill(&self, skill: &NewSkill) -> Result<(String, bool)> {
         self.claim(&self.scope, skill)
     }
 
     /// Inside a project a label the user's global skills hold is taken too, so a new project skill
     /// never hides a global one by accident.
-    fn claim(&self, scope: &Scope, skill: &NewSkill) -> Result<String> {
+    ///
+    /// Two writers teaching one command at once both pick its label; the second finds it taken by the
+    /// same command and joins it, so the phrasings collect on one row instead of `du-sh` and `du-sh-x`
+    /// (ADR 19). "The same command" is `match_proposal`: the row's template produces this skill's, so a
+    /// literal row never stands in for a template.
+    fn claim(&self, scope: &Scope, skill: &NewSkill) -> Result<(String, bool)> {
         let mut skill = skill.clone();
         for _ in 0..LABEL_ATTEMPTS {
             let held_globally = scope.has_project() && self.row(&scope.base(), &skill.label)?.is_some();
             if !held_globally && self.insert_skill(scope, &skill, "DO NOTHING")? > 0 {
-                return Ok(skill.label);
+                return Ok((skill.label, true));
+            }
+            let holder = match self.row(scope, &skill.label)? {
+                Some(own) => Some(own),
+                None if scope.has_project() => self.row(&scope.base(), &skill.label)?,
+                None => None,
+            };
+            if holder.is_some_and(|holder| match_proposal(&holder.steps, &skill.steps, &HashMap::new()).is_some()) {
+                for phrase in &skill.examples {
+                    self.link_in(scope, &skill.label, phrase)?;
+                }
+                return Ok((skill.label, false));
             }
             skill.label.push_str("-x");
         }
         Err(coded(STORAGE, format!("could not find a free label for {}", skill.label)))
+    }
+
+    /// Add a phrasing to the row `scope` sees under `label`, and drop it from that row's counter-examples.
+    /// In this brain's own scope that is `link_phrase`, so inside a project a global row gets a lesson;
+    /// in another scope (`promote` writing the global skills) the row itself is written.
+    fn link_in(&self, scope: &Scope, label: &str, phrase: &str) -> Result<()> {
+        if scope == &self.scope {
+            self.link_phrase(label, phrase)?;
+            return Ok(());
+        }
+        let edit = |list: Vec<String>| with(list, phrase);
+        self.edit_column_in(scope, label, ListColumn::Examples.name(), |stored| {
+            Ok(edit(json(stored)).map(|next| serde_json::to_string(&next)).transpose()?)
+        })?;
+        let edit = |list: Vec<String>| without(list, phrase);
+        self.edit_column_in(scope, label, ListColumn::CounterExamples.name(), |stored| {
+            Ok(edit(json(stored)).map(|next| serde_json::to_string(&next)).transpose()?)
+        })?;
+        Ok(())
+    }
+
+    /// True when this brain's own scope holds `label`: outside a project any skill, inside one a
+    /// project skill and not a global one seen there.
+    pub fn owns(&self, label: &str) -> Result<bool> {
+        Ok(self.row(&self.scope, label)?.is_some())
+    }
+
+    /// Make a literal skill general in place (ADR 19): it runs `to`'s steps with `to`'s slots, scenario
+    /// and risk, and keeps everything learned about it, as an upsert does (ADR 2): examples,
+    /// counter-examples, uses, origin, `created_at`, and the aliases of a slot that keeps its name.
+    /// Written only in this brain's own scope, and only if the row still runs `from`, with one
+    /// conditional statement on its steps and slots, as a list is written (ADR 15). Returns false when
+    /// the row is not this scope's, has gone, or another writer changed it first.
+    pub fn upgrade_skill(&self, label: &str, from: &[String], to: &NewSkill) -> Result<bool> {
+        let (table, rows) = (self.scope.skills(), self.scope.rows());
+        let read = self.query(
+            &format!("SELECT steps, slots FROM {table} WHERE {rows} AND label = ?"),
+            self.scope.args(vec![label.into()]),
+            |row| (row.get_value(0).unwrap_or(Value::Null), row.get_value(1).unwrap_or(Value::Null)),
+        )?;
+        let Some((steps, slots)) = read.into_iter().next() else { return Ok(false) };
+        if json::<Vec<String>>(steps.clone()) != from {
+            return Ok(false);
+        }
+        let mut next = to.slots.clone();
+        for known in json::<Vec<Slot>>(slots.clone()) {
+            for alias in &known.aliases {
+                add_alias(&mut next, &known.name, alias);
+            }
+        }
+        let written = self.execute(
+            &format!(
+                "UPDATE {table} SET steps = ?, slots = ?, scenario = ?, risk = ?
+                 WHERE {rows} AND label = ? AND steps IS ? AND slots IS ?"
+            ),
+            [
+                vec![
+                    serde_json::to_string(&to.steps)?.into(),
+                    serde_json::to_string(&next)?.into(),
+                    to.scenario.clone().into(),
+                    to.risk.as_str().into(),
+                ],
+                self.scope.args(vec![label.into(), steps, slots]),
+            ]
+            .concat(),
+        )?;
+        Ok(written > 0)
     }
 
     /// Returns how many rows were written: 0 when the label was taken and `conflict` does nothing.
@@ -927,7 +1141,7 @@ impl Brain {
             self.link_phrase(&existing.label, phrase)?;
             return Ok((existing.label.clone(), false));
         }
-        let label = self.add_new_skill(&NewSkill {
+        self.add_new_skill(&NewSkill {
             label: slug(&wanted),
             steps: steps.to_vec(),
             scenario: format!("the user wants: {phrase}"),
@@ -935,15 +1149,15 @@ impl Brain {
             origin: Origin::Taught,
             examples: vec![phrase.to_string()],
             slots: vec![],
-        })?;
-        Ok((label, true))
+        })
     }
 
     /// Add a phrasing to a skill, and drop it from that skill's counter-examples if it was one.
-    pub fn link_phrase(&self, label: &str, phrase: &str) -> Result<()> {
-        self.add_example(label, phrase)?;
-        self.edit_list(label, ListColumn::CounterExamples, |list| without(list, phrase))?;
-        Ok(())
+    /// Returns false when it was already an example and not a counter-example: nothing changed.
+    pub fn link_phrase(&self, label: &str, phrase: &str) -> Result<bool> {
+        let added = self.add_example(label, phrase)?;
+        let lifted = self.edit_list(label, ListColumn::CounterExamples, |list| without(list, phrase))?;
+        Ok(added || lifted)
     }
 
     /// This user's own setting. A user without one gets the built-in default, not the default user's.
@@ -1090,6 +1304,18 @@ impl Brain {
         })
     }
 
+    /// Take `alias` from a slot of `label`, by hand (`jli alias --remove`, ADR 21). It is written where
+    /// `add_alias` writes: the row that holds the skill. Returns false if nothing changed.
+    pub fn remove_alias(&self, label: &str, slot: &str, alias: &str) -> Result<bool> {
+        self.edit_column(label, "slots", |stored| {
+            let mut slots: Vec<Slot> = json(stored);
+            if !remove_alias(&mut slots, slot, alias) {
+                return Ok(None);
+            }
+            Ok(Some(serde_json::to_string(&slots)?))
+        })
+    }
+
     /// Inside a project, a phrasing or counter-example for a global skill is a lesson of the project's
     /// own: the global row is never written, so another project never sees it (ADR 17).
     fn edit_list(&self, label: &str, column: ListColumn, edit: impl Fn(Vec<String>) -> Option<Vec<String>>) -> Result<bool> {
@@ -1227,20 +1453,13 @@ impl Brain {
         let base = scope.base();
         let Some(row) = self.row(&scope, label)? else { return Ok(None) };
         let global = match to {
-            Promote::New(skill) => self.claim(&base, skill)?,
+            Promote::New(skill) => self.claim(&base, skill)?.0,
             Promote::Into(global) => {
                 if self.row(&base, global)?.is_none() {
                     return Err(anyhow!("there is no global skill called {global}"));
                 }
                 for phrase in &row.examples {
-                    let edit = |list: Vec<String>| with(list, phrase);
-                    self.edit_column_in(&base, global, ListColumn::Examples.name(), |stored| {
-                        Ok(edit(json(stored)).map(|next| serde_json::to_string(&next)).transpose()?)
-                    })?;
-                    let edit = |list: Vec<String>| without(list, phrase);
-                    self.edit_column_in(&base, global, ListColumn::CounterExamples.name(), |stored| {
-                        Ok(edit(json(stored)).map(|next| serde_json::to_string(&next)).transpose()?)
-                    })?;
+                    self.link_in(&base, global, phrase)?;
                 }
                 global.clone()
             }
@@ -1481,6 +1700,7 @@ pub fn slug(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::SlotKind;
 
     struct Scratch(PathBuf);
 
@@ -1799,15 +2019,16 @@ mod tests {
             slots: vec![],
         };
         // Both looked when du-sh was free; theirs was written first.
-        assert_eq!(theirs.add_new_skill(&skill("du-sh", "du -h")).unwrap(), "du-sh");
-        assert_eq!(mine.add_new_skill(&skill("du-sh", "du -sh .")).unwrap(), "du-sh-x");
+        assert_eq!(theirs.add_new_skill(&skill("du-sh", "du -h")).unwrap(), ("du-sh".into(), true));
+        assert_eq!(mine.add_new_skill(&skill("du-sh", "du -sh .")).unwrap(), ("du-sh-x".into(), true));
         assert_eq!(mine.skill("du-sh").unwrap().unwrap().steps, ["du -h"]);
         assert_eq!(mine.skill("du-sh-x").unwrap().unwrap().steps, ["du -sh ."]);
 
         // Four writers teaching four commands with one slug at once each keep their own command.
+        // (`du  -s` would not do here: it is `du -s` with another space, the same command, and joins it.)
         drop((mine, theirs));
         let path = scratch.0.join("brain.db");
-        let commands = ["du -s", "du -s .", "du  -s", "du -s ./"];
+        let commands = ["du -s", "du -s .", "du -s /", "du -s ./"];
         let start = std::sync::Barrier::new(commands.len());
         let learned: Vec<String> = std::thread::scope(|scope| {
             let writers: Vec<_> = commands
@@ -1832,6 +2053,87 @@ mod tests {
         let mut distinct = learned.clone();
         distinct.sort();
         assert_eq!(distinct, ["du-s", "du-s-x", "du-s-x-x", "du-s-x-x-x"]);
+    }
+
+    #[test]
+    fn a_label_taken_by_the_same_command_is_joined() {
+        let scratch = Scratch::new("label-join");
+        let (mine, theirs) = (scratch.brain(), scratch.brain());
+        let template = |label: &str, step: &str, slot: &str, examples: &[&str]| NewSkill {
+            slots: vec![Slot {
+                name: slot.into(),
+                kind: SlotKind::Number,
+                description: String::new(),
+                default: None,
+                aliases: vec![],
+            }],
+            ..new_skill(label, step, examples)
+        };
+        // Both looked when du-sh was free, and both are teaching du -sh .; theirs was written first.
+        theirs.add_new_skill(&new_skill("du-sh", "du -sh .", &["disk use"])).unwrap();
+        theirs.add_counter_example("du-sh", "how big is this").unwrap();
+        assert_eq!(
+            mine.add_new_skill(&new_skill("du-sh", "du  -sh  .", &["how big is this"])).unwrap(),
+            ("du-sh".into(), false)
+        );
+        let joined = mine.skill("du-sh").unwrap().unwrap();
+        assert_eq!(joined.steps, ["du -sh ."], "the row is theirs, as written");
+        assert_eq!(joined.examples, ["disk use", "how big is this"]);
+        assert!(joined.counter_examples.is_empty(), "joining links the phrase, so it is no longer a counter-example");
+        assert!(mine.skill("du-sh-x").unwrap().is_none());
+
+        // The same template under other slot names, and a command a template produces, are the same command.
+        theirs.add_new_skill(&template("recent", "git log --oneline -n {count}", "count", &["last commits"])).unwrap();
+        let renamed = template("recent", "git log --oneline -n {n}", "n", &["latest commits"]);
+        assert_eq!(mine.add_new_skill(&renamed).unwrap(), ("recent".into(), false));
+        let five = new_skill("recent", "git log --oneline -n 5", &["five commits"]);
+        assert_eq!(mine.add_new_skill(&five).unwrap(), ("recent".into(), false));
+        assert_eq!(mine.skill("recent").unwrap().unwrap().examples, ["last commits", "latest commits", "five commits"]);
+
+        // A literal row never stands in for a template: the template gets the next free label.
+        theirs.add_new_skill(&new_skill("three", "git log --oneline -n 3", &["three commits"])).unwrap();
+        let general = template("three", "git log --oneline -n {count}", "count", &["some commits"]);
+        assert_eq!(mine.add_new_skill(&general).unwrap(), ("three-x".into(), true));
+        assert_eq!(mine.skill("three").unwrap().unwrap().examples, ["three commits"]);
+
+        // Inside a project, a global row of the label that runs the same command gets the phrase as the
+        // project's lesson; the global row is not written (ADR 17).
+        let shop = scratch.in_project(DEFAULT_USER, "shop");
+        assert_eq!(
+            shop.add_new_skill(&new_skill("du-sh", "du -sh .", &["size of the shop"])).unwrap(),
+            ("du-sh".into(), false)
+        );
+        assert!(shop.project_skills().unwrap().is_empty());
+        assert!(shop.skill("du-sh").unwrap().unwrap().examples.contains(&"size of the shop".to_string()));
+        assert_eq!(theirs.skill("du-sh").unwrap().unwrap().examples, ["disk use", "how big is this"]);
+    }
+
+    #[test]
+    fn writers_teaching_one_command_at_once_get_one_skill() {
+        let scratch = Scratch::new("label-race-same");
+        let path = scratch.0.join("brain.db");
+        let writers = 4;
+        let start = std::sync::Barrier::new(writers);
+        let learned: Vec<(String, bool)> = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..writers)
+                .map(|n| {
+                    let (path, start) = (&path, &start);
+                    scope.spawn(move || {
+                        let brain = Brain::open(BrainConfig::file(path)).unwrap();
+                        start.wait();
+                        brain.learn_command(&format!("disk use {n}"), &["du -sh .".into()], Risk::Safe).unwrap()
+                    })
+                })
+                .collect();
+            threads.into_iter().map(|thread| thread.join().unwrap()).collect()
+        });
+        assert!(learned.iter().all(|(label, _)| label == "du-sh"), "{learned:?}");
+        assert_eq!(learned.iter().filter(|(_, created)| *created).count(), 1, "one writer wrote the row: {learned:?}");
+        let brain = scratch.brain();
+        assert_eq!(labels(&brain).iter().filter(|label| label.starts_with("du-sh")).count(), 1);
+        let mut examples = brain.skill("du-sh").unwrap().unwrap().examples;
+        examples.sort();
+        assert_eq!(examples, (0..writers).map(|n| format!("disk use {n}")).collect::<Vec<_>>());
     }
 
     #[test]
@@ -1936,6 +2238,28 @@ mod tests {
             stored(&brain),
             r#"[{"name":"message","kind":"text","description":"the commit message","aliases":["msg"]}]"#
         );
+    }
+
+    #[test]
+    fn removing_the_last_alias_writes_the_slot_as_it_was_before_aliases() {
+        let scratch = Scratch::new("alias-remove");
+        let brain = scratch.brain();
+        let stored = |brain: &Brain| {
+            brain
+                .query("SELECT slots FROM skills WHERE label = 'git-commit'", vec![], |row| text(row.get_value(0).unwrap()))
+                .unwrap()
+                .remove(0)
+        };
+        let before = stored(&brain);
+        assert!(brain.add_alias("git-commit", "message", "msg").unwrap());
+        assert!(brain.add_alias("git-commit", "message", "text").unwrap());
+        assert!(brain.remove_alias("git-commit", "message", "MSG").unwrap(), "compared as names are");
+        assert!(!brain.remove_alias("git-commit", "message", "msg").unwrap(), "already gone");
+        assert!(!brain.remove_alias("git-commit", "subject", "text").unwrap(), "no such slot");
+        assert!(!brain.remove_alias("no-such-skill", "message", "text").unwrap());
+        assert_eq!(brain.skill("git-commit").unwrap().unwrap().slots[0].aliases, ["text"]);
+        assert!(brain.remove_alias("git-commit", "message", "text").unwrap());
+        assert_eq!(stored(&brain), before, "byte for byte, so an older jli reads it as it always did");
     }
 
     #[test]
@@ -2225,6 +2549,84 @@ mod tests {
         assert_eq!(labels(&outside), ["du-sh"]);
         assert_eq!(outside.skill("du-sh").unwrap().unwrap().counter_examples, ["free space"]);
         assert_eq!(outside.events(10).unwrap().len(), 1);
+    }
+
+    /// Every table a brain had before project scenarios (ADR 22), with its definition and rows.
+    const DUMP_BUT_SCENARIOS: &str = "SELECT name, sql FROM sqlite_master WHERE name != 'project_scenarios' ORDER BY name;
+        SELECT * FROM skills ORDER BY rowid; SELECT * FROM scoped_skills ORDER BY rowid;
+        SELECT * FROM project_lessons ORDER BY rowid; SELECT * FROM meta ORDER BY rowid; SELECT * FROM scoped_meta ORDER BY rowid";
+
+    #[test]
+    fn a_project_keeps_its_own_scenario_for_a_global_skill() {
+        let scratch = Scratch::new("project-scenario");
+        let path = scratch.0.join("brain.db");
+        let global = scratch.brain();
+        global.learn_command("disk use", &["du -sh .".into()], Risk::Safe).unwrap();
+        let (mut shop, blog) = (scratch.in_project(DEFAULT_USER, "shop"), scratch.in_project(DEFAULT_USER, "blog"));
+        shop.add_counter_example("du-sh", "size of the repo").unwrap();
+        let scenario = |brain: &Brain| brain.skill("du-sh").unwrap().unwrap().scenario;
+        let listed =
+            |brain: &Brain| brain.skills().unwrap().into_iter().find(|skill| skill.label == "du-sh").unwrap().scenario;
+        let (stored, checkout, folder) =
+            ("the user wants: disk use", "the user wants the size of this checkout", "the user wants the size of a folder");
+
+        // Written in its own table: every other table, and every row in them, is as it was.
+        let before = raw(&path, DUMP_BUT_SCENARIOS);
+        assert!(!shop.set_scenario("du-sh", stored).unwrap(), "the global row's own scenario is not kept twice");
+        assert!(shop.set_scenario("du-sh", checkout).unwrap());
+        assert!(!shop.set_scenario("du-sh", checkout).unwrap());
+        assert_eq!(raw(&path, DUMP_BUT_SCENARIOS), before);
+        assert_eq!((scenario(&shop), listed(&shop)), (checkout.to_string(), checkout.to_string()));
+        assert_eq!(shop.skill("du-sh").unwrap().unwrap().counter_examples, ["size of the repo"], "the lesson still holds");
+        assert_eq!(shop.project_scenarios().unwrap(), ["du-sh"]);
+        for elsewhere in [&global, &blog, &scratch.in_project("agent", "shop")] {
+            assert_eq!(elsewhere.project_scenario("du-sh").unwrap(), None);
+            assert!(elsewhere.skill("du-sh").unwrap().is_none_or(|skill| skill.scenario == stored));
+        }
+
+        // A project's own skill, and a skill outside every project, change their own row.
+        shop.learn_command("run the tests", &["cargo test".into()], Risk::Safe).unwrap();
+        assert!(shop.set_scenario("cargo-test", "the user wants the crate tested").unwrap());
+        assert_eq!(shop.project_skills().unwrap()[0].scenario, "the user wants the crate tested");
+        assert!(global.set_scenario("du-sh", folder).unwrap());
+        assert_eq!(scenario(&blog), folder);
+        assert_eq!(scenario(&shop), checkout, "the project's own still wins there");
+
+        // `teach --global` works on the global row as stored, and a share copies it as stored.
+        assert_eq!(shop.globally(|brain| scenario(brain)), folder);
+        assert_eq!(shop.share("du-sh", "agent").unwrap(), Shared::Copied);
+        assert_eq!(scenario(&scratch.brain_as("agent")), folder);
+
+        // `generalize` merging a project skill into the global row keeps the row, and so the project's scenario.
+        shop.promote("shop", "cargo-test", &Promote::Into("du-sh".into())).unwrap();
+        assert_eq!(scenario(&shop), checkout);
+
+        // A project row of the same label is seen instead; forgotten, the global row comes back with the scenario.
+        shop.add_skill_if_missing(&new_skill("du-sh", "du -sh", &[])).unwrap();
+        assert_eq!((scenario(&shop), shop.project_scenarios().unwrap().len()), ("runs du -sh".into(), 0));
+        assert_eq!(shop.project_scenario("du-sh").unwrap(), None);
+        assert!(shop.forget("du-sh").unwrap());
+        assert_eq!(scenario(&shop), checkout);
+
+        // Cleared, the project sees the global scenario again.
+        assert!(shop.clear_project_scenario("du-sh").unwrap());
+        assert!(!shop.clear_project_scenario("du-sh").unwrap());
+        assert_eq!(scenario(&shop), folder);
+
+        // Set to the global row's own text, the project keeps none: a later global rewrite still reaches it.
+        shop.set_scenario("du-sh", checkout).unwrap();
+        assert!(shop.set_scenario("du-sh", folder).unwrap());
+        assert_eq!(shop.project_scenario("du-sh").unwrap(), None);
+        global.set_scenario("du-sh", "the user wants a folder's size").unwrap();
+        assert_eq!(scenario(&shop), "the user wants a folder's size");
+
+        // The scenario is about one row: forgotten everywhere and taught again, the global skill starts clean.
+        shop.set_scenario("du-sh", checkout).unwrap();
+        assert!(shop.globally(|brain| brain.forget("du-sh")).unwrap());
+        std::thread::sleep(Duration::from_millis(5));
+        global.learn_command("disk use", &["du -sh .".into()], Risk::Safe).unwrap();
+        assert_eq!(scenario(&shop), stored);
+        assert!(shop.project_scenarios().unwrap().is_empty());
     }
 
     #[test]

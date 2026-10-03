@@ -28,14 +28,19 @@ Learning is writing to that database:
 
 | What happened | What is stored | Effect |
 | --- | --- | --- |
-| System 2 proposed a command and it ran, with exit 0 or a failure that was not the command's fault ([ADR 13](docs/adr/0013-learning-fixes.md)) | a new skill with the request as its first example, its values hidden, once System 1 has checked it; a command a skill already runs adds the phrasing to that skill instead | System 1 answers next time |
-| You said yes to "Run it?" | the phrasing, as an example of that skill | that phrasing becomes more confident |
+| System 2 proposed a command and it ran, with exit 0 or a failure that was not the command's fault ([ADR 13](docs/adr/0013-learning-fixes.md)) | a new skill with the request as its first example, its values hidden, once System 1 has checked it; a command a skill already runs adds the phrasing to that skill instead, and drops it from that skill's counter-examples ([ADR 20](docs/adr/0020-write-back.md)) | System 1 answers next time |
+| You said yes to "Run it?" | the phrasing, as an example of that skill and no longer a counter-example of it | that phrasing becomes more confident |
 | You said no and typed the right command | a counter-example on the wrong skill, and the phrasing on the right one | it routes to your command next time |
-| You ran `jli teach` or `jli fix` | a phrasing, or a counter-example | same as above, by hand |
+| You ran `jli teach` or `jli fix` | a phrasing, or a counter-example; if the agent then proposes the rejected command again, it is refused (`already_rejected`) and nothing is stored | same as above, by hand |
 | You wrote `dir=src` for a slot called `directory` | `dir` as another name for that slot | `dir=` is read with no model next time |
+| You ran `jli alias` or `jli forget-phrase` | a slot name added or removed; a phrasing moved to the counter-examples | the same, by hand, for one name or one phrasing |
 
 One command can hold many phrasings. Teaching a phrase for a command that a skill already runs adds
-the phrase to that skill.
+the phrase to that skill. If that skill runs only the one command, as one taught in manual mode
+does, and the translator finds a value in it, the skill is made general in place and keeps its
+phrasings: teaching `git log --oneline -n 3` again turns it into `git log --oneline -n {count}`, with
+3 as the count's default. Two jli processes teaching one command at once also end up with one skill.
+See [ADR 19](docs/adr/0019-one-row-per-command.md).
 
 ## Learning modes
 
@@ -95,7 +100,8 @@ person accepted its routes, times how far its phrasings fall short of coming hom
 rewrites the top rows. A rewrite is kept only if the measured score of the skill and its
 competitors rises and no other skill loses a phrasing. Nobody is asked: the measurement is the
 approval. Each kept change is recorded, and `jli eval undo` puts it back. With `-n` nothing at all
-is written. On a scratch brain of 16 skills on 2026-10-03, a measurement took 22 System 1 calls
+is written. Inside a project the rewrite of a global skill's scenario is kept for that project only
+([ADR 22](docs/adr/0022-project-scenarios.md)). On a scratch brain of 16 skills on 2026-10-03, a measurement took 22 System 1 calls
 ($0.0014). An optimisation run took 80 System 1 and 6 System 2 calls, kept one rewrite of six, and
 cut the steal rate from 9% to 5%: the phrasing it freed
 now escalates to the agent instead, so the share that came home stayed at 91%. See [ADR 16](docs/adr/0016-measuring-the-matrix.md).
@@ -148,9 +154,9 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | `jli skills` | every skill, with learned phrasings and counter-examples |
 | `jli stats` | routing mix, latency, the learning curve, how often routes were right first time, and the `jli eval` trend |
 | `jli eval [<label>] [--limit N]` | route every stored example with itself held out, and replay accepted requests; priced before it spends |
-| `jli eval --optimise` | the agent rewrites the weakest rows; a rewrite is kept only if the measurement improves |
+| `jli eval --optimise` | the agent rewrites the weakest rows; a rewrite is kept only if the measurement improves, and inside a project only for that project |
 | `jli eval -n [--optimise]` | measure, and show the rewrites and their effect, but write nothing |
-| `jli eval undo [<label>]` | put back what the last optimisation changed |
+| `jli eval undo [<label>]` | put back what the last optimisation changed (inside a project, the last one made there) |
 | `jli history` | recent requests and how each was routed |
 | `jli teach "<phrase>" -- <command>` | link a phrase to a command; repeat to add more phrasings |
 | `jli teach --global "<phrase>" -- <command>` | the same, from inside a project, for every project |
@@ -159,6 +165,8 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | `jli fix <eventId> -- <command>` | that was wrong, this is right: learn it as a "no" and the command at the prompt would, and return a plan of it (`--run` runs it) |
 | `jli fix <eventId> --expected "<words>"` | unlearn it and ask the agent with what you expected; returns a plan (`--run` runs it) |
 | `jli forget <label>` | delete a skill; inside a project only the project's own, `--global` for a global one |
+| `jli forget-phrase <label> "<phrase>"` | take one phrasing back from a skill and keep it as a counter-example, so it is not learned straight back; inside a project, for a global skill, in that project only (`--global` for every project) |
+| `jli alias <label> <slot> <name>` | give a slot another name for `name=value`; `--remove` takes one away. Inside a project an alias of a global skill holds in every project; `--global` reaches a global skill that a project skill of the same label hides |
 | `jli project` | the project this directory is in, from the nearest `.jlirc`, and how many skills are its own |
 | `jli project init [<id>]` | make this directory a project: what jli learns here stays with it |
 | `jli generalize [<label>]` | the agent proposes how to make project skills global; each is written only once you approve (`--all-projects`, `--approve-all`, `-n`) |
@@ -202,15 +210,18 @@ Then a step such as `cd`, `pushd`, `export`, `unset`, `source` or `alias`, and e
 is handed to your shell, which runs it once jli exits: `jli go to src` leaves you in `src`. jli
 passes it through a temp file, not stdout, so output still goes down a pipe, and the function
 returns jli's exit code, or the status of what your shell ran. A plain `cd` to a directory that does
-not exist fails in jli, with the shell's own message, before anything is handed over.
+not exist fails in jli, with the shell's own message, before anything is handed over. A ctrl-c while
+jli runs leaves no temp file behind.
 Without the function such a step is not run and nothing is learned from it: jli says how to install
-the function and exits 3, and `--json` lists the steps in `callerShell` for an agent to run itself.
-See [ADR 14](docs/adr/0014-shell-integration.md).
+the function in the shell it was started from (a bash started from zsh gets `~/.bashrc`) and exits 3,
+and `--json` lists the steps in `callerShell` for an agent to run itself.
+See [ADR 14](docs/adr/0014-shell-integration.md) and [ADR 23](docs/adr/0023-shell-fixes-and-number-words.md).
 
 ## Slots
 
-Skills are templates such as `git log -n {count}` or `git commit -m {message}`. A value you state
-is passed as written, by a parser and no model:
+Skills are templates such as `git log -n {count}` or `git commit -m {message}`. A flag is never a
+value: `cd -` is a skill of its own, not `cd {directory}` with `-`. A value you state is passed as
+written, by a parser and no model:
 
 ```sh
 jli commit message="fix the parser"            # name=value, for the slot called message
@@ -231,6 +242,18 @@ A name that fits no slot stops the run and lists the command's arguments. `jli s
 slot as `{name}` in the command, with its other names below it. See
 [ADR 12](docs/adr/0012-slot-aliases.md).
 
+A name can also be given or taken away by hand, for example when the agent read one wrong:
+
+```sh
+jli alias count-files directory folder            # folder=docs now fills {directory}
+jli alias --remove count-files directory d        # and d= no longer does
+jli forget-phrase du-sh "size of each file here"  # a phrasing taught to the wrong skill
+```
+
+Both take `--json` and `-n`, and refuse an unknown skill, slot or phrasing with exit 1. A forgotten
+phrasing is kept as a counter-example, so the next request in those words is not learned back; `jli
+teach` with the right command undoes it. See [ADR 21](docs/adr/0021-hand-edits.md).
+
 Anything not stated is filled by the cheapest method that works: a number in the request, a System 1
 `choice` among the real files or branches, the agent, and last the slot's default. See
 [ADR 11](docs/adr/0011-stated-arguments.md).
@@ -244,7 +267,9 @@ the request, not only in the working directory, can be picked for a file slot. S
 
 What is learned is the shape of a request, not the instance: every value the command ran with is
 hidden in the stored phrasing wherever it appears as a whole word, so `how many lines are in
-notes.txt` is kept as `how many lines are in …`. See [ADR 13](docs/adr/0013-learning-fixes.md).
+notes.txt` is kept as `how many lines are in …`. A file value is hidden as the request wrote it, so
+`~/notes/n.txt` goes too, though the command ran with `/Users/you/notes/n.txt`. See
+[ADR 13](docs/adr/0013-learning-fixes.md) and [ADR 20](docs/adr/0020-write-back.md).
 
 ## One brain for every host
 
@@ -277,7 +302,8 @@ users existed. A user sees, routes against, teaches, fixes and forgets only thei
 history, stats and settings are their own; a new user starts from the seed skills with the built-in
 settings. `jli share` copies one skill as it is now, with its phrasings and slot names but not its
 counter-examples, and refuses if the other user already has that label or that command. Several
-jli processes can write one brain at once without losing a lesson. An older jli on the same brain
+jli processes can write one brain at once without losing a lesson, and two that teach the same
+command at once get one skill ([ADR 19](docs/adr/0019-one-row-per-command.md)). An older jli on the same brain
 sees only the default user. See [ADR 15](docs/adr/0015-user-scope.md).
 
 ## Projects
@@ -296,11 +322,14 @@ A project is named by the id in the nearest `.jlirc` at or above the working dir
 project's skills and your global ones together, and a project skill wins a label both hold. A new
 skill is the project's; a phrasing or a counter-example for a global skill is kept as the project's
 own lesson about it, so correcting `cargo test` to `npm test` in one project never reaches another.
+A scenario `jli eval --optimise` rewrites there for a global skill is kept as the project's own too,
+and `jli skills` tags it `scenario rewritten here`.
 `teach --global` and `forget --global` reach the global skills from inside a project. Settings stay
 yours; history, stats, and the event and plan ids that `jli fix` and `jli run` take are the
 project's. `jli generalize` checks each proposal with System 1 in
 the project, among the global skills and against your other projects, and writes it only when you
-say yes. Without a `.jlirc` nothing changes. See [ADR 17](docs/adr/0017-project-scope.md).
+say yes. Without a `.jlirc` nothing changes. See [ADR 17](docs/adr/0017-project-scope.md) and
+[ADR 22](docs/adr/0022-project-scenarios.md).
 
 ## Layout
 
@@ -309,7 +338,7 @@ say yes. Without a `.jlirc` nothing changes. See [ADR 17](docs/adr/0017-project-
 | `src/system1.rs` | builds the matrix from the database and asks Jev; the only module that uses `typesafe-jev` |
 | `src/system2.rs` | the agent: structured proposals, free-text slot filling, naming an unknown argument's slot, rewriting a weak row, and proposing how a project skill could be global |
 | `src/translator.rs` | turns a taught phrase and command into a general matrix row |
-| `src/learn.rs` | writes a row once System 1 has verified it, and settles a skill the agent proposed |
+| `src/learn.rs` | writes a row once System 1 has verified it, or makes a literal skill general in place, and settles a skill the agent proposed |
 | `src/eval.rs` | measures the matrix against its own examples and history, optimises it, and checks a new row against its closest skills |
 | `src/suggest.rs` | auto mode: diagnoses a failure and offers alternatives |
 | `src/llm.rs` | the one HTTP call every language model request goes through |
@@ -318,11 +347,12 @@ say yes. Without a `.jlirc` nothing changes. See [ADR 17](docs/adr/0017-project-
 | `src/store.rs` | the brain: skills, events, settings, plans and corrections per user and project in libSQL, behind a runtime that never leaves the module |
 | `src/project.rs` | finds, reads and writes the `.jlirc` that names a project |
 | `src/generalize.rs` | `jli generalize`: checks the agent's proposal for a project skill and writes it once approved |
+| `src/hand.rs` | `jli alias` and `jli forget-phrase`: one slot name or one phrasing changed by hand, where the router would write it |
 | `src/args.rs` | reads the arguments a request states: `name=value`, labels and quoted text |
-| `src/slots.rs` | fills, expands and shell-quotes `{slot}` values |
-| `src/shell.rs` | the shell function, and which steps it must run in your shell |
+| `src/slots.rs` | fills, expands and shell-quotes `{slot}` values, and matches a command back to its template |
+| `src/shell.rs` | the shell function, which steps it must run in your shell, and which shell jli is running under |
 | `src/seed.rs` | the original hard-coded matrix, now only the seed for an empty brain |
-| `src/exec.rs` | runs the steps with `bash -c`, watching stderr in auto mode and for a new proposal, and tries builtins before they are handed over |
+| `src/exec.rs` | runs the steps with `bash -c`, watching stderr in auto mode and for a new proposal, tries builtins before they are handed over, and reads the process table to find the shell jli was started from |
 | `src/cli.rs` | argument parsing, subcommands, the interactive session, and errors as JSON |
 | `src/ui.rs` | the trace on stderr, and the one owner of stdin |
 | `src/demo.rs` | the two-pass learning demo |

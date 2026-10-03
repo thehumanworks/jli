@@ -12,13 +12,15 @@ use crate::learn::{learn_phrase, settle_proposed, LearnInput, Learned, Settled};
 use crate::llm::AGENT_MODEL;
 use crate::plan::{self, CandidateInfo, PlanRecord, SlotInfo, SlotValue};
 use crate::shell::{first_caller_step, hand_off_text, safe_to_try, HandOff, Shell};
-use crate::slots::{fill_slots, match_proposal, match_template, render, render_fish, undeclared, Filled, Source, Template};
+use crate::slots::{
+    expand_path, fill_slots, match_proposal, match_template, render, render_fish, undeclared, Filled, Source, Template,
+};
 use crate::store::{slug, Brain, NewEvent, NewSkill};
 use crate::suggest::{suggest, Failure, SuggestInput, Suggestion, Verdict};
 use crate::system1::Decision;
 use crate::system2::{propose, ProposalKind, ProposeInput, Rejected};
 use crate::types::error_code;
-use crate::types::{add_alias, with_checked_aliases, Mode, Origin, Path, Risk, Skill, Slot};
+use crate::types::{add_alias, with_checked_aliases, Mode, Origin, Path, Risk, Skill, Slot, SlotKind};
 use crate::ui::{c, fixed, Prompt, Ui};
 use crate::Models;
 
@@ -51,6 +53,8 @@ pub const DIRECTORY_MISSING: &str = "directory_missing";
 /// A later plan of `jli run`, after one before it failed or was not run.
 pub const NOT_RUN: &str = "not_run";
 pub const NEEDS_CALLER_SHELL_CODE: &str = "needs_caller_shell";
+/// The agent proposed again a skill just rejected for this request (ADR 20).
+pub const ALREADY_REJECTED: &str = "already_rejected";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouteOptions {
@@ -515,6 +519,44 @@ impl Route<'_> {
                         }),
                     existing => (existing, provided),
                 };
+                // A skill just rejected for this request stays off the list above, so it is never routed to
+                // again; nor does its command come back under another label (ADR 20).
+                if existing.is_none() && proposal.kind != ProposalKind::NotACommand {
+                    let named = |skill: &&Skill| {
+                        proposal.kind == ProposalKind::Existing && proposal.existing_label.as_ref() == Some(&skill.label)
+                    };
+                    // The command as it would run: a file value expanded, as `fill_slots` expands it.
+                    let as_run = |files: Vec<&str>| -> HashMap<String, String> {
+                        let expand = |value: &str| expand_path(value, &options.cwd, |name| std::env::var(name).ok()).value;
+                        let value = |name: &str, value: &str| {
+                            if files.contains(&name) {
+                                expand(value)
+                            } else {
+                                value.to_string()
+                            }
+                        };
+                        provided.iter().map(|(name, given)| (name.clone(), value(name, given))).collect()
+                    };
+                    let files = proposal.slots.iter().filter(|slot| slot.kind == SlotKind::File);
+                    let proposed = as_run(files.map(|slot| slot.name.as_str()).collect());
+                    let again = self
+                        .all_skills
+                        .iter()
+                        .filter(|skill| options.rejected.contains(&skill.label))
+                        .find(|skill| named(skill) || produces(&skill.steps, &proposal.steps, &proposed));
+                    let again = again.map(|rejected| {
+                        let commands = if named(&rejected) {
+                            let files = rejected.slots.iter().filter(|slot| slot.kind == SlotKind::File);
+                            render(&rejected.steps, &as_run(files.map(|slot| slot.name.as_str()).collect()))
+                        } else {
+                            render(&proposal.steps, &proposed)
+                        };
+                        (rejected.label.clone(), commands)
+                    });
+                    if let Some((label, commands)) = again {
+                        return self.refuse_rejected(label, commands);
+                    }
+                }
                 let confidence = decision.as_ref().map(|decided| decided.confidence);
 
                 if proposal.kind == ProposalKind::NotACommand || (existing.is_none() && proposal.steps.is_empty()) {
@@ -803,8 +845,9 @@ impl Route<'_> {
                     ),
                     _ => (skill.scenario.clone(), Settled::Unchecked),
                 };
-                // Another writer may have taken the label since it was shown; the skill then gets the next free one.
-                let label = self.brain.add_new_skill(&NewSkill {
+                // Another writer may have taken the label since it was shown; the skill then gets the next free
+                // one, or, if that writer stored this same command, the phrasing joins their skill.
+                let (label, created) = self.brain.add_new_skill(&NewSkill {
                     label: skill.label.clone(),
                     steps: skill.steps.clone(),
                     scenario,
@@ -815,9 +858,18 @@ impl Route<'_> {
                 })?;
                 self.outcome.label = Some(label.clone());
                 self.brain.record_use(&label)?;
-                self.outcome.learned.push(format!("new skill {label}"));
-                self.outcome.learned.extend(settled.note(&label));
-                ui.learned(format!("new skill {}. Next time System 1 handles this without the agent.", c::bold(&label)));
+                if created {
+                    self.outcome.learned.push(format!("new skill {label}"));
+                    self.outcome.learned.extend(settled.note(&label));
+                    ui.learned(format!("new skill {}. Next time System 1 handles this without the agent.", c::bold(&label)));
+                } else {
+                    self.outcome.learned.push(format!("\"{}\" means {label}", self.phrase));
+                    ui.learned(format!(
+                        "\"{}\" means {}, which another jli stored for this command while it ran",
+                        self.phrase,
+                        c::bold(&label)
+                    ));
+                }
             } else {
                 ui.note("The command failed, so the proposal was not learned.");
             }
@@ -831,7 +883,8 @@ impl Route<'_> {
             }
             let taught_something =
                 vouched && (plan.path == Path::System2 || plan.confidence.unwrap_or(1.0) < ALREADY_KNOWN_AT);
-            if taught_something && self.brain.add_example(&skill.label, &self.phrase)? {
+            // Linked as teaching links it: a phrasing that now means this skill stops being a counter-example of it.
+            if taught_something && self.brain.link_phrase(&skill.label, &self.phrase)? {
                 self.outcome.learned.push(format!("\"{}\" means {}", self.phrase, skill.label));
                 ui.learned(format!("\"{}\" means {}", self.phrase, c::bold(&skill.label)));
             }
@@ -895,13 +948,32 @@ impl Route<'_> {
             "Not run: {} has to run in your own shell, and jli can only run commands in a shell of its own, where this would change nothing.",
             self.outcome.caller_shell.join(" && ")
         ));
-        let shells = Shell::of_user().map_or_else(|| Shell::ALL.to_vec(), |shell| vec![shell]);
+        let running = Shell::running(|name| std::env::var(name).ok(), crate::exec::process_table);
+        let shells = running.map_or_else(|| Shell::ALL.to_vec(), |shell| vec![shell]);
         for shell in shells {
             let (line, file) = shell.install_hint();
             ui.note(format!("To let jli hand it to your shell, add this line to {file} and open a new terminal:"));
             ui.note(format!("    {line}"));
         }
         ui.note("Nothing was learned.");
+    }
+
+    /// The agent proposed again what was just rejected for this request. Running it would repeat
+    /// the route the person turned down, and storing it would bring the skill back as a second row.
+    fn refuse_rejected(&mut self, label: String, commands: Vec<String>) -> Result<Outcome> {
+        let ui = self.ui;
+        self.outcome.path = Path::System2;
+        self.outcome.label = Some(label.clone());
+        self.outcome.commands = commands;
+        ui.warn(format!(
+            "Not run: the agent proposed {} again, which {} runs and was just rejected for this request.",
+            self.outcome.commands.join(" && "),
+            c::bold(&label)
+        ));
+        ui.note(format!("Nothing was learned. To teach the right command: jli teach \"{}\" -- <command>", self.query));
+        self.outcome
+            .block(format!("{label} was rejected for this request, and the agent proposed it again"), ALREADY_REJECTED);
+        self.finish()
     }
 
     // ── Corrections: how a "no" or a failed run turns into a lesson ────────────
@@ -1062,6 +1134,15 @@ impl Route<'_> {
 /// with another slot value is not: that skill was right.
 pub fn is_another_command(wrong: &[String], steps: &[String]) -> bool {
     match_template(wrong, &steps.join(" && ")).is_none()
+}
+
+/// Whether a skill's steps run the proposed command: the same template (`match_proposal`), or, once
+/// the agent's values are in, the command a literal skill runs (`wc -l {file}` with `notes.txt` for
+/// `wc -l notes.txt`). The second is too broad to route by (ADR 13), but right for refusing a repeat.
+fn produces(steps: &[String], proposed: &[String], values: &HashMap<String, String>) -> bool {
+    !proposed.is_empty()
+        && (match_proposal(steps, proposed, values).is_some()
+            || match_template(steps, &render(proposed, values).join(" && ")).is_some())
 }
 
 /// `phrase` does not mean `skill`: it stops being one of its examples and becomes a counter-example.

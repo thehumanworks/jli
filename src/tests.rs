@@ -655,7 +655,10 @@ fn a_translated_row_is_kept_when_system1_confirms_it() {
         cwd: scratch.work.clone(),
     };
     let learned = learn_phrase(&scratch.brain, &models, &input, &quiet()).unwrap();
-    assert_eq!(learned, crate::learn::Learned { label: "git-recent-commits".into(), created: true, translated: true });
+    assert_eq!(
+        learned,
+        crate::learn::Learned { label: "git-recent-commits".into(), created: true, translated: true, upgraded: false }
+    );
     let skill = scratch.brain.skill("git-recent-commits").unwrap().unwrap();
     assert_eq!(skill.steps, ["git log --oneline -n {count}"]);
     assert_eq!(skill.slots[0].name, "count");
@@ -804,7 +807,9 @@ fn a_new_proposal_that_a_known_skill_already_runs_is_that_skill() {
     let (models, _) = self::models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", proposal)]);
     let rejected = RouteOptions { rejected: vec!["list-files-by-time".into()], ..dry };
     let outcome = go(&scratch, &models, "files by date", &mut Script::default(), &rejected);
-    assert_eq!(outcome.label.as_deref(), Some("list-by-date"), "a rejected skill is never chosen again");
+    // Its command is refused rather than stored as a second row (ADR 20).
+    assert_eq!((code(&outcome), outcome.label.as_deref()), (Some("already_rejected"), Some("list-files-by-time")));
+    assert!(scratch.brain.skill("list-by-date").unwrap().is_none());
 }
 
 #[test]
@@ -1521,7 +1526,8 @@ fn every_way_of_not_running_has_its_code() {
     let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
     let outcome = go(&scratch, &models, "commit message=wip msg=other", &mut Script::default(), &options);
     assert_eq!(code(&outcome), Some("unknown_argument"));
-    // missing_value, dry_run, destructive and the plan codes have their own tests above.
+    // missing_value, dry_run, destructive and the plan codes have their own tests above, and
+    // already_rejected has the_agent_cannot_bring_back_a_rejected_command_as_a_second_skill.
 }
 
 #[test]
@@ -2041,4 +2047,697 @@ fn a_generalization_that_fails_a_check_is_never_offered() {
     let (models, _) = self::models(takes_node(false), vec![("generalization", parameterized())]);
     let approve = GeneralizeOptions { approve_all: true, ..options_for(&scratch) };
     assert_eq!(generalize(&rust, &models, &approve, &quiet(), &mut Script::default()).unwrap().written.len(), 1);
+}
+
+// ── One row per command: flags, literal skills and labels taken by the same command (ADR 19) ──
+
+fn teach(phrase: &str, command: &str, mode: Mode, scratch: &Scratch) -> LearnInput {
+    LearnInput {
+        phrase: phrase.into(),
+        steps: vec![command.into()],
+        risk: None,
+        mode,
+        threshold: 0.5,
+        cwd: scratch.work.clone(),
+    }
+}
+
+/// A skill that runs one fixed command, as manual mode or an agent's literal proposal leaves one.
+fn literal_skill(brain: &Brain, label: &str, step: &str, examples: &[&str]) {
+    brain
+        .add_skill(&NewSkill {
+            label: label.into(),
+            steps: vec![step.into()],
+            scenario: format!("the user wants: {}", examples.first().copied().unwrap_or(step)),
+            risk: Risk::Safe,
+            origin: Origin::Taught,
+            examples: examples.iter().map(|example| example.to_string()).collect(),
+            slots: vec![],
+        })
+        .unwrap();
+}
+
+/// System 1 that sends `phrase` to `label` and every other request to git-status, as the check expects.
+fn routes_phrase_to(phrase: &'static str, label: &'static str) -> impl Fn(&Value) -> Value + Send + Sync + 'static {
+    move |request| {
+        if request["state"]["request"] == phrase {
+            decision(label, 0.92, 0.9, SAFE)
+        } else {
+            decision("git-status", 0.9, 0.9, SAFE)
+        }
+    }
+}
+
+#[test]
+fn teaching_cd_minus_beside_cd_directory_makes_its_own_skill() {
+    let scratch = Scratch::new("teach-cd-minus");
+    directory_skill(&scratch, "go-to-directory", &["cd {directory}"]);
+    let (models, _) = models(|_| panic!("System 1 must not be asked"), no_language_model());
+    let learned =
+        learn_phrase(&scratch.brain, &models, &teach("go back", "cd -", Mode::Manual, &scratch), &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created), ("cd", true), "- is a flag, not a directory");
+    assert_eq!(scratch.brain.skill("cd").unwrap().unwrap().steps, ["cd -"]);
+    assert!(scratch.brain.skill("go-to-directory").unwrap().unwrap().examples.is_empty());
+}
+
+#[test]
+fn a_translator_that_names_a_template_with_a_flag_for_its_value_is_not_believed() {
+    let scratch = Scratch::new("teach-cd-minus-translated");
+    directory_skill(&scratch, "go-to-directory", &["cd {directory}"]);
+    // The translator calls `cd -` the known skill with `-` for the directory, the same mistake #17 was.
+    let row = json!({
+        "existingLabel": "go-to-directory", "label": "go-back", "steps": ["cd {directory}"],
+        "scenario": "the user wants to go back to the previous directory",
+        "slots": [{ "name": "directory", "kind": "file", "description": "the directory", "default": null }],
+        "slotValues": [{ "name": "directory", "value": "-" }], "risk": "safe",
+    });
+    let (models, _) = models(routes_phrase_to("go back", "go-back"), vec![("matrix_row", row)]);
+    let learned = learn_phrase(&scratch.brain, &models, &teach("go back", "cd -", Mode::Semi, &scratch), &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created), ("go-back", true), "- is a flag, not a directory");
+    assert_eq!(scratch.brain.skill("go-back").unwrap().unwrap().steps, ["cd -"]);
+    assert!(scratch.brain.skill("go-to-directory").unwrap().unwrap().examples.is_empty());
+}
+
+#[test]
+fn teaching_a_literal_skills_command_makes_it_general_in_place() {
+    let scratch = Scratch::new("teach-upgrade");
+    literal_skill(&scratch.brain, "recent-three", "git log --oneline -n 3", &["show the last 3 commits"]);
+    scratch.brain.add_counter_example("recent-three", "show the last 3 tags").unwrap();
+    scratch.brain.record_use("recent-three").unwrap();
+    let before = scratch.brain.skill("recent-three").unwrap().unwrap();
+    // The translator writes the template, and names the literal skill as the one that runs the command.
+    let mut row = draft("git log --oneline -n {count}", "3");
+    row["existingLabel"] = json!("recent-three");
+    let (models, _) = models(routes_phrase_to("list the 3 newest commits", "recent-three"), vec![("matrix_row", row)]);
+    let input = teach("list the 3 newest commits", "git log --oneline -n 3", Mode::Semi, &scratch);
+    let learned = learn_phrase(&scratch.brain, &models, &input, &quiet()).unwrap();
+    assert_eq!(
+        learned,
+        crate::learn::Learned { label: "recent-three".into(), created: false, translated: true, upgraded: true }
+    );
+    let after = scratch.brain.skill("recent-three").unwrap().unwrap();
+    assert_eq!(after.steps, ["git log --oneline -n {count}"]);
+    assert_eq!((after.slots[0].name.as_str(), after.slots[0].default.as_deref()), ("count", Some("3")));
+    assert!(after.scenario.starts_with("the user wants a one-line summary"));
+    assert_eq!(after.examples, ["show the last 3 commits", "list the 3 newest commits"]);
+    assert_eq!(after.counter_examples, ["show the last 3 tags"]);
+    assert_eq!((after.uses, after.created_at.as_str(), after.origin), (1, before.created_at.as_str(), Origin::Taught));
+    assert!(scratch.brain.skill("git-recent-commits").unwrap().is_none(), "no second row");
+
+    // Every count now runs, and a phrasing that names none still runs what the literal skill ran.
+    let (models, _) = self::models(|_| decision("recent-three", 0.95, 0.9, SAFE), no_language_model());
+    let dry = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let seven = go(&scratch, &models, "show the last 7 commits", &mut Script::default(), &dry);
+    assert_eq!(seven.commands, ["git log --oneline -n 7"]);
+    let some = go(&scratch, &models, "show me some recent commits", &mut Script::default(), &dry);
+    assert_eq!(some.commands, ["git log --oneline -n 3"]);
+}
+
+#[test]
+fn a_literal_skill_takes_the_phrase_when_there_is_nothing_to_generalise() {
+    let scratch = Scratch::new("teach-literal-kept");
+    literal_skill(&scratch.brain, "list-everything", "ls -la", &["everything here"]);
+    let unchanged = json!({
+        "existingLabel": "list-everything", "label": "list-all", "steps": ["ls -la"],
+        "scenario": "the user wants every file listed with details", "slots": [], "slotValues": [], "risk": "safe",
+    });
+    let (models, replies) = models(|_| panic!("System 1 must not be asked"), vec![("matrix_row", unchanged)]);
+    let learned =
+        learn_phrase(&scratch.brain, &models, &teach("all of it", "ls -la", Mode::Semi, &scratch), &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created, learned.upgraded), ("list-everything", false, false));
+    assert_eq!(scratch.brain.skill("list-everything").unwrap().unwrap().examples, ["everything here", "all of it"]);
+    assert_eq!(replies.seen.lock().unwrap().len(), 1, "the translator is asked once");
+
+    // A seed is a fixed command written by hand: it takes the phrase with no model at all.
+    let (models, _) = self::models(|_| panic!("System 1 must not be asked"), no_language_model());
+    let learned =
+        learn_phrase(&scratch.brain, &models, &teach("oldest last", "ls -ltr", Mode::Semi, &scratch), &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created), ("list-files-by-time", false));
+}
+
+#[test]
+fn a_template_wins_over_a_literal_skill_that_runs_the_same_command() {
+    let scratch = Scratch::new("teach-template-first");
+    literal_skill(&scratch.brain, "recent-three", "git log --oneline -n 3", &["show the last 3 commits"]);
+    // The literal skill is the more used, so it comes first in the matrix.
+    scratch.brain.record_use("recent-three").unwrap();
+    scratch
+        .brain
+        .add_skill(&NewSkill {
+            label: "git-recent-commits".into(),
+            steps: vec!["git log --oneline -n {count}".into()],
+            scenario: "the user wants the most recent commits".into(),
+            risk: Risk::Safe,
+            origin: Origin::Agent,
+            examples: vec!["latest commits".into()],
+            slots: vec![Slot {
+                name: "count".into(),
+                kind: SlotKind::Number,
+                description: "how many".into(),
+                default: None,
+                aliases: vec![],
+            }],
+        })
+        .unwrap();
+    let (models, _) = models(|_| panic!("System 1 must not be asked"), no_language_model());
+    let input = teach("three newest commits", "git log --oneline -n 3", Mode::Semi, &scratch);
+    let learned = learn_phrase(&scratch.brain, &models, &input, &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created), ("git-recent-commits", false));
+    assert_eq!(scratch.brain.skill("recent-three").unwrap().unwrap().examples, ["show the last 3 commits"]);
+}
+
+#[test]
+fn a_global_literal_skill_is_not_made_general_from_inside_a_project() {
+    let scratch = Scratch::new("teach-upgrade-project");
+    literal_skill(&scratch.brain, "recent-three", "git log --oneline -n 3", &["show the last 3 commits"]);
+    let shop = in_project(&scratch, "shop");
+    let (models, _) = models(
+        routes_phrase_to("three newest commits", "git-recent-commits"),
+        vec![("matrix_row", draft("git log --oneline -n {count}", "3"))],
+    );
+    let input = teach("three newest commits", "git log --oneline -n 3", Mode::Semi, &scratch);
+    let learned = learn_phrase(&shop, &models, &input, &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created, learned.upgraded), ("git-recent-commits", true, false));
+    assert_eq!(shop.project_skills().unwrap()[0].steps, ["git log --oneline -n {count}"]);
+    let global = scratch.brain.skill("recent-three").unwrap().unwrap();
+    assert_eq!((global.steps.as_slice(), global.examples.len()), (["git log --oneline -n 3".to_string()].as_slice(), 1));
+}
+
+#[test]
+fn a_literal_skill_another_writer_made_general_first_is_joined() {
+    let scratch = Scratch::new("teach-upgrade-race");
+    literal_skill(&scratch.brain, "recent-three", "git log --oneline -n 3", &["show the last 3 commits"]);
+    let path = scratch.root.join("brain.db");
+    let row = draft("git log --oneline -n {count}", "3");
+    let llm = Llm::with_transport(move |_| {
+        // Another jli makes the same skill general while this one's translator is writing.
+        let other = Brain::open(BrainConfig::file(&path)).unwrap();
+        let general = NewSkill {
+            label: "recent-three".into(),
+            steps: vec!["git log --oneline -n {n}".into()],
+            scenario: "theirs".into(),
+            risk: Risk::Safe,
+            origin: Origin::Taught,
+            examples: vec![],
+            slots: vec![Slot {
+                name: "n".into(),
+                kind: SlotKind::Number,
+                description: String::new(),
+                default: None,
+                aliases: vec![],
+            }],
+        };
+        other.upgrade_skill("recent-three", &["git log --oneline -n 3".into()], &general).unwrap();
+        Ok((200, json!({ "choices": [{ "message": { "content": row.to_string() } }] }).to_string()))
+    });
+    let system1 = System1::fake(routes_phrase_to("three newest commits", "recent-three"));
+    let input = teach("three newest commits", "git log --oneline -n 3", Mode::Semi, &scratch);
+    let learned = learn_phrase(&scratch.brain, &Models { system1, llm }, &input, &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created, learned.upgraded), ("recent-three", false, false));
+    let skill = scratch.brain.skill("recent-three").unwrap().unwrap();
+    assert_eq!(
+        (skill.steps.as_slice(), skill.scenario.as_str()),
+        (["git log --oneline -n {n}".to_string()].as_slice(), "theirs")
+    );
+    assert_eq!(skill.examples, ["show the last 3 commits", "three newest commits"]);
+    assert!(scratch.brain.skill("recent-three-x").unwrap().is_none());
+}
+
+#[test]
+fn a_label_taken_by_the_same_command_while_the_agent_was_thinking_is_joined() {
+    let scratch = Scratch::new("label-race-same-agent");
+    std::fs::write(scratch.work.join("notes.txt"), "one\ntwo\n").unwrap();
+    let path = scratch.root.join("brain.db");
+    let proposal = json!({
+        "kind": "new", "existingLabel": null, "label": "count-lines", "steps": ["wc -l {file}"],
+        "scenario": "the user wants the number of lines in a file",
+        "slots": [{ "name": "file", "kind": "file", "description": "the file to count", "default": null }],
+        "slotValues": [{ "name": "file", "value": "notes.txt" }],
+        "risk": "safe", "explanation": "Counts lines.", "answer": null,
+    });
+    // After this request read the matrix, another jli on the same brain stores the same command.
+    let (models, _) = models(
+        move |request| {
+            Brain::open(BrainConfig::file(&path))
+                .unwrap()
+                .add_skill_if_missing(&NewSkill {
+                    label: "count-lines".into(),
+                    steps: vec!["wc -l {path}".into()],
+                    scenario: "theirs".into(),
+                    risk: Risk::Safe,
+                    origin: Origin::Agent,
+                    examples: vec!["lines in a file".into()],
+                    slots: vec![],
+                })
+                .unwrap();
+            once_known("count-lines", decision(NONE, 0.7, 0.95, SAFE))(request)
+        },
+        vec![("proposal", proposal)],
+    );
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "how many lines are in notes.txt", &mut Script::default(), &options);
+    assert!(outcome.ran);
+    assert_eq!(outcome.label.as_deref(), Some("count-lines"));
+    assert_eq!(outcome.learned, ["\"how many lines are in …\" means count-lines"]);
+    let theirs = scratch.brain.skill("count-lines").unwrap().unwrap();
+    assert_eq!((theirs.scenario.as_str(), theirs.uses), ("theirs", 1));
+    assert_eq!(theirs.examples, ["lines in a file", "how many lines are in …"]);
+    assert!(scratch.brain.skill("count-lines-x").unwrap().is_none());
+}
+
+#[test]
+fn a_command_another_writer_taught_while_the_translator_was_writing_is_joined() {
+    let scratch = Scratch::new("teach-race-same");
+    let path = scratch.root.join("brain.db");
+    let row = draft("git log --oneline -n {count}", "3");
+    let llm = Llm::with_transport(move |_| {
+        // Another jli teaches the same command meanwhile; its translator named it differently (seen live).
+        Brain::open(BrainConfig::file(&path))
+            .unwrap()
+            .add_skill_if_missing(&NewSkill {
+                label: "show-recent-commits".into(),
+                steps: vec!["git log --oneline -n {n}".into()],
+                scenario: "theirs".into(),
+                risk: Risk::Safe,
+                origin: Origin::Taught,
+                examples: vec!["latest commits".into()],
+                slots: vec![],
+            })
+            .unwrap();
+        Ok((200, json!({ "choices": [{ "message": { "content": row.to_string() } }] }).to_string()))
+    });
+    let system1 = System1::fake(routes_phrase_to("show the last 3 commits", "git-recent-commits"));
+    let input = teach("show the last 3 commits", "git log --oneline -n 3", Mode::Semi, &scratch);
+    let learned = learn_phrase(&scratch.brain, &Models { system1, llm }, &input, &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created, learned.translated), ("show-recent-commits", false, false));
+    let theirs = scratch.brain.skill("show-recent-commits").unwrap().unwrap();
+    assert_eq!(theirs.examples, ["latest commits", "show the last 3 commits"]);
+    assert!(scratch.brain.skill("git-recent-commits").unwrap().is_none(), "no second row");
+}
+
+// ── What an accepted route writes back (ADR 20) ──────────────────────────────
+
+fn existing_proposal(label: &str) -> Value {
+    json!({
+        "kind": "existing", "existingLabel": label, "label": null, "steps": [],
+        "scenario": "", "slots": [], "slotValues": [], "risk": "safe", "explanation": "Known.", "answer": null,
+    })
+}
+
+fn file_slot(name: &str) -> Value {
+    json!([{ "name": name, "kind": "file", "description": "the file", "default": null }])
+}
+
+#[test]
+fn an_agent_route_to_a_known_skill_links_its_phrasing_and_drops_the_counter_example() {
+    let scratch = Scratch::new("link-agent");
+    scratch.brain.add_counter_example("list-files-by-time", "files by date").unwrap();
+    let agent =
+        || models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", existing_proposal("list-files-by-time"))]).0;
+    let outcome = go(&scratch, &agent(), "files by date", &mut Script::default(), &yes(&scratch));
+    assert_eq!((outcome.path, outcome.label.as_deref(), outcome.ran), (Path::System2, Some("list-files-by-time"), true));
+    assert_eq!(outcome.learned, ["\"files by date\" means list-files-by-time"]);
+    let (examples, counter) = lists(&scratch, "list-files-by-time");
+    assert!(examples.contains(&"files by date".to_string()));
+    assert!(counter.is_empty(), "never an example and a counter-example of one skill at once");
+
+    // A plan of an agent route, run after its phrasing became a counter-example, links it the same way.
+    let dry = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let planned = go(&scratch, &agent(), "newest stuff", &mut Script::default(), &dry);
+    scratch.brain.add_counter_example("list-files-by-time", "newest stuff").unwrap();
+    let ran = plans(&scratch, &no_model_at_all(), &[planned.plan_id.unwrap()], &[], &mut Script::default());
+    assert!(ran[0].ran);
+    let (examples, counter) = lists(&scratch, "list-files-by-time");
+    assert!(examples.contains(&"newest stuff".to_string()));
+    assert!(counter.is_empty(), "jli run writes back as the route does");
+}
+
+#[test]
+fn the_agent_cannot_bring_back_a_rejected_command_as_a_second_skill() {
+    let scratch = Scratch::new("rejected-again");
+    std::fs::write(scratch.work.join("notes.txt"), "one\ntwo\n").unwrap();
+    let values = json!([{ "name": "file", "value": "notes.txt" }]);
+    let count = new_proposal("count-lines-in-file", "wc -l {file}", file_slot("file"), values);
+    let (models, _) = models(once_known("count-lines-in-file", decision(NONE, 0.4, 0.95, SAFE)), vec![("proposal", count)]);
+    let ran = go(&scratch, &models, "how many lines are in notes.txt", &mut Script::default(), &yes(&scratch));
+    assert_eq!(ran.learned, ["new skill count-lines-in-file"]);
+    let before = scratch.brain.skills().unwrap().len();
+
+    // `jli fix`: told the skill was wrong, the agent proposes its command again under another slot name.
+    let again = new_proposal(
+        "count-lines-in-file",
+        "wc -l {path}",
+        file_slot("path"),
+        json!([{ "name": "path", "value": "notes.txt" }]),
+    );
+    // Were it run, the second row would pass System 1's check as `count-lines-in-file-x`.
+    let check = once_known("count-lines-in-file-x", decision(NONE, 0.4, 0.95, SAFE));
+    let (models, _) = self::models(check, vec![("proposal", again)]);
+    let fix = Fix { event: ran.event_id, how: FixHow::Unlearn, run: false };
+    assert_eq!(app(&scratch, "default", models).fix(&Flags::quiet_yes(), fix).unwrap(), 3, "refused, not run");
+    assert_eq!(scratch.brain.skills().unwrap().len(), before, "no count-lines-in-file-x");
+    let refused = scratch.brain.events(1).unwrap().remove(0);
+    assert!(!refused.accepted && refused.exit_code.is_none(), "nothing ran");
+    // Not a second verdict: `jli eval` counts the rejection once, the repeat as a retry of it.
+    assert!(!crate::eval::is_corrected(&refused));
+    let mut oldest_first = scratch.brain.events(10).unwrap();
+    oldest_first.reverse();
+    let correctness = crate::eval::correctness(&oldest_first);
+    assert_eq!((correctness.requests, correctness.turned_down, correctness.blocked), (1, 1, 0));
+    assert_eq!(scratch.brain.skill("count-lines-in-file").unwrap().unwrap().counter_examples, ["how many lines are in …"]);
+
+    // At the router: the same command, a more general one than a rejected literal, or the label itself.
+    let rejecting = |label: &str| RouteOptions { rejected: vec![label.into()], ..yes(&scratch) };
+    scratch
+        .brain
+        .add_skill(&NewSkill {
+            label: "count-notes".into(),
+            steps: vec![format!("grep -c TODO {}/notes.txt", std::env::var("HOME").unwrap())],
+            scenario: "the user wants the TODOs in the notes counted".into(),
+            risk: Risk::Safe,
+            origin: Origin::Taught,
+            examples: vec![],
+            slots: vec![],
+        })
+        .unwrap();
+    let before = scratch.brain.skills().unwrap().len();
+    for (rejected, proposal, commands) in [
+        ("list-files-by-time", new_proposal("list-by-date", "ls -ltr", json!([]), json!([])), "ls -ltr"),
+        (
+            "count-notes",
+            new_proposal(
+                "count-todos",
+                "grep -c TODO {file}",
+                file_slot("file"),
+                json!([{ "name": "file", "value": "~/notes.txt" }]),
+            ),
+            &format!("grep -c TODO {}/notes.txt", std::env::var("HOME").unwrap()),
+        ),
+        ("list-files-by-time", existing_proposal("list-files-by-time"), "ls -ltr"),
+    ] {
+        let (models, _) = self::models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", proposal)]);
+        let outcome = go(&scratch, &models, "show them", &mut Script::default(), &rejecting(rejected));
+        assert_eq!((code(&outcome), outcome.ran, outcome.exit_code()), (Some("already_rejected"), false, 3), "{rejected}");
+        assert_eq!(outcome.label.as_deref(), Some(rejected), "the outcome names the skill it ran into");
+        assert_eq!(outcome.commands, [commands], "what would have run, a file value expanded");
+        assert!(outcome.learned.is_empty() && outcome.plan_id.is_none());
+    }
+    assert_eq!(scratch.brain.skills().unwrap().len(), before);
+}
+
+#[test]
+fn a_home_path_is_hidden_as_the_request_wrote_it() {
+    let scratch = Scratch::new("hide-home");
+    let home = std::env::var("HOME").unwrap();
+    let steps = ["wc -l {file}".to_string()];
+    let slots: Vec<Slot> = serde_json::from_value(file_slot("file")).unwrap();
+    // The agent proposes the skill and gives the value already expanded, or as the request wrote it.
+    for (request, value) in [
+        ("how many lines are in ~/notes/n.txt", format!("{home}/notes/n.txt")),
+        ("how many lines are in ~/notes/n.txt.", "~/notes/n.txt".to_string()),
+        ("how many lines are in $HOME/notes/n.txt", format!("{home}/notes/n.txt")),
+        ("how many lines are in ${HOME}/notes/n.txt, please", "${HOME}/notes/n.txt".to_string()),
+    ] {
+        let proposal =
+            new_proposal("count-lines", &steps[0], file_slot("file"), json!([{ "name": "file", "value": value }]));
+        let (models, _) = models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", proposal)]);
+        let dry = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+        let outcome = go(&scratch, &models, request, &mut Script::default(), &dry);
+        let phrase = outcome.phrase.clone().unwrap();
+        assert!(!phrase.contains("notes") && phrase.starts_with("how many lines are in …"), "{request}: {phrase}");
+        // `jli fix` works it out again from the request and the command, and arrives at the same text.
+        let again = crate::slots::learned_phrase(request, &steps, &slots, Some(&outcome.commands.join(" && ")));
+        assert_eq!(again, phrase, "{request}");
+    }
+
+    // A System 1 pick of the path the request named, run, learned, and found again from the event log.
+    directory_skill(&scratch, "show-dir", &["ls -d {directory}"]);
+    let (models, _) = models(
+        |request| {
+            let Some(pick) = request["questions"].get("value") else { return decision("show-dir", 0.9, 0.9, SAFE) };
+            assert!(pick.to_string().contains("$HOME"));
+            json!({"model": "m", "answers": {"value": {"type": "choice", "choice": "$HOME", "confidence": 0.9,
+                                                      "probabilities": {"$HOME": 0.9}}}})
+        },
+        no_language_model(),
+    );
+    let outcome = go(&scratch, &models, "is $HOME there", &mut Script::default(), &yes(&scratch));
+    assert!(outcome.ran && outcome.exit_code == Some(0));
+    assert_eq!(outcome.learned, ["\"is … there\" means show-dir"]);
+    let event = scratch.brain.events(1).unwrap().remove(0);
+    let skill = scratch.brain.skill("show-dir").unwrap().unwrap();
+    let again = crate::slots::learned_phrase(&event.query, &skill.steps, &skill.slots, event.command.as_deref());
+    assert_eq!(again, "is … there");
+    assert!(scratch.brain.remove_example("show-dir", &again).unwrap());
+}
+
+// ── Hand edits: jli alias and jli forget-phrase (ADR 21) ────────────────────────
+
+use crate::hand::{self, AliasEdit, PhraseEdit};
+
+/// The scratch brain opened a second time, mutable, as `jli` opens it for a subcommand.
+fn mutable(scratch: &Scratch) -> Brain {
+    Brain::open(BrainConfig::file(&scratch.root.join("brain.db"))).unwrap()
+}
+
+fn alias_edit(label: &str, slot: &str, name: &str, remove: bool) -> AliasEdit {
+    AliasEdit { label: label.into(), slot: slot.into(), name: name.into(), remove, global: false, dry_run: false }
+}
+
+fn phrase_edit(label: &str, phrase: &str) -> PhraseEdit {
+    PhraseEdit { label: label.into(), phrase: phrase.into(), global: false, dry_run: false }
+}
+
+fn aliases(brain: &Brain, label: &str, slot: &str) -> Vec<String> {
+    let skill = brain.skill(label).unwrap().unwrap();
+    skill.slots.into_iter().find(|known| known.name == slot).unwrap().aliases
+}
+
+/// `du -sh {directory}` with the phrasing that was taught to it by mistake in issue #23. Inserted in
+/// the brain's own scope, so inside a project it can hide a global skill of the same label.
+fn directory_size(brain: &Brain, label: &str) {
+    brain
+        .add_skill_if_missing(&NewSkill {
+            label: label.into(),
+            steps: vec!["du -sh {directory}".into()],
+            scenario: "the user wants the total size of a directory".into(),
+            risk: Risk::Safe,
+            origin: Origin::Taught,
+            examples: vec!["how big is this folder".into(), "size of each file here".into()],
+            slots: vec![Slot {
+                name: "directory".into(),
+                kind: SlotKind::File,
+                description: "the directory".into(),
+                default: Some(".".into()),
+                aliases: vec![],
+            }],
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_slot_alias_is_added_and_removed_by_hand() {
+    let scratch = Scratch::new("hand-alias");
+    first_lines_skill(&scratch);
+    let mut brain = mutable(&scratch);
+
+    // Stored the way a learned name is (ADR 12): lower case, `-` as `_`.
+    let done = hand::alias(&mut brain, &alias_edit("first-lines", "count", "Line-Count", false)).unwrap();
+    assert_eq!(done.refused, None);
+    assert_eq!(done.message, "line_count is now another name for {count} in first-lines.");
+    assert_eq!(aliases(&scratch.brain, "first-lines", "count"), ["line_count"]);
+    assert_eq!(
+        (done.json["alias"].as_str(), done.json["changed"].as_bool(), done.json["writtenTo"].as_str()),
+        (Some("line_count"), Some(true), Some("global"))
+    );
+
+    // The parser reads it at once, with no model: an unexpected call would panic.
+    let (models, _) = models(|_| decision("first-lines", 0.9, 0.9, SAFE), no_language_model());
+    let options = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "top of the notes line_count=2", &mut Script::default(), &options);
+    assert_eq!(outcome.commands, ["head -n 2 notes.txt"]);
+
+    // Again, in another spelling: nothing changes, and it is not a refusal.
+    let again = hand::alias(&mut brain, &alias_edit("first-lines", "count", "LINE_COUNT", false)).unwrap();
+    assert_eq!((again.refused, again.json["changed"].as_bool()), (None, Some(false)));
+    assert_eq!(hand::alias(&mut brain, &alias_edit("first-lines", "count", "count", false)).unwrap().refused, None);
+
+    let refusals = [
+        (alias_edit("no-such-skill", "count", "n", false), hand::SKILL_NOT_FOUND),
+        (alias_edit("first-lines", "lines", "n", false), hand::SLOT_NOT_FOUND),
+        (alias_edit("first-lines", "count", "how many", false), hand::ALIAS_INVALID),
+        (alias_edit("first-lines", "count", "n", true), hand::ALIAS_NOT_FOUND),
+        (alias_edit("first-lines", "count", "count", true), hand::ALIAS_NOT_FOUND),
+        (alias_edit("list-files", "directory", "dir", false), hand::SLOT_NOT_FOUND),
+    ];
+    for (edit, code) in refusals {
+        let done = hand::alias(&mut brain, &edit).unwrap();
+        assert_eq!(done.refused, Some(code), "{edit:?}: {}", done.message);
+    }
+    assert_eq!(aliases(&scratch.brain, "first-lines", "count"), ["line_count"], "a refusal writes nothing");
+
+    // A slot keeps at most eight other names.
+    for name in ["n", "lines", "num", "how_many", "rows", "top", "k"] {
+        assert_eq!(hand::alias(&mut brain, &alias_edit("first-lines", "count", name, false)).unwrap().refused, None);
+    }
+    let full = hand::alias(&mut brain, &alias_edit("first-lines", "count", "amount", false)).unwrap();
+    assert_eq!(full.refused, Some(hand::ALIASES_FULL));
+
+    // A dry run says what it would do and writes nothing.
+    let dry = AliasEdit { dry_run: true, ..alias_edit("first-lines", "n", "line_count", true) };
+    let done = hand::alias(&mut brain, &dry).unwrap();
+    assert!(done.message.starts_with("Dry run: nothing was written."), "{}", done.message);
+    assert_eq!(aliases(&scratch.brain, "first-lines", "count").len(), 8);
+    assert!(!done.json["aliases"].as_array().unwrap().contains(&json!("line_count")));
+
+    // Removed, with the slot named by any of its names and the alias in any spelling.
+    let done = hand::alias(&mut brain, &alias_edit("first-lines", "n", "Line-Count", true)).unwrap();
+    assert_eq!(done.message, "line_count is no longer another name for {count} in first-lines.");
+    assert!(!aliases(&scratch.brain, "first-lines", "count").contains(&"line_count".to_string()));
+    // So line_count= is a name the skill does not know again, and the agent is asked about it (ADR 12).
+    let no_slot = json!({ "arguments": [{ "name": "line_count", "placeholder": null }] });
+    let (asked, _) = self::models(|_| decision("first-lines", 0.9, 0.9, SAFE), vec![("argument_names", no_slot)]);
+    let outcome = go(&scratch, &asked, "top of the notes line_count=2", &mut Script::default(), &options);
+    assert_eq!(outcome.unknown_arguments, ["line_count"]);
+}
+
+#[test]
+fn a_phrasing_taught_to_the_wrong_skill_is_forgotten_and_kept_as_a_counter_example() {
+    let scratch = Scratch::new("hand-forget-phrase");
+    directory_size(&scratch.brain, "directory-size");
+    let mut brain = mutable(&scratch);
+
+    // A dry run first: nothing is written.
+    let dry = PhraseEdit { dry_run: true, ..phrase_edit("directory-size", "size of each file here") };
+    let done = hand::forget_phrase(&mut brain, &dry).unwrap();
+    assert_eq!(done.json["counterExamples"], json!(["size of each file here"]));
+    assert_eq!(lists(&scratch, "directory-size").1.len(), 0);
+
+    // Matched as phrasings are, without case or surrounding space; the stored text is what is kept.
+    let done = hand::forget_phrase(&mut brain, &phrase_edit("directory-size", "  Size of each file HERE ")).unwrap();
+    assert_eq!(done.refused, None);
+    assert_eq!(
+        done.message,
+        "\"size of each file here\" no longer means directory-size, and is kept as a counter-example so that it is not learned straight back."
+    );
+    assert_eq!(
+        lists(&scratch, "directory-size"),
+        (vec!["how big is this folder".to_string()], vec!["size of each file here".to_string()])
+    );
+    let shown = criteria(&scratch, &scratch.brain, "size of each file here");
+    assert_eq!(shown["directory-size"]["examples"], json!(["how big is this folder"]));
+    assert_eq!(shown["directory-size"]["doesNotApplyTo"], json!(["size of each file here"]));
+
+    // Asked again, it is already done; a phrasing the skill never had, or a skill that is not there, is refused.
+    let again = hand::forget_phrase(&mut brain, &phrase_edit("directory-size", "size of each file here")).unwrap();
+    assert_eq!((again.refused, again.json["changed"].as_bool()), (None, Some(false)));
+    let missing = hand::forget_phrase(&mut brain, &phrase_edit("directory-size", "disk usage")).unwrap();
+    assert_eq!(missing.refused, Some(hand::PHRASE_NOT_FOUND));
+    assert_eq!(
+        missing.message,
+        "directory-size has no phrasing \"disk usage\". Its phrasings are: \"how big is this folder\"."
+    );
+    let nothing = hand::forget_phrase(&mut brain, &phrase_edit("no-such-skill", "anything")).unwrap();
+    assert_eq!(nothing.refused, Some(hand::SKILL_NOT_FOUND));
+
+    // Teaching it back by hand lifts the counter-example, as for any phrasing.
+    scratch.brain.link_phrase("directory-size", "size of each file here").unwrap();
+    assert_eq!(lists(&scratch, "directory-size").1.len(), 0);
+}
+
+#[test]
+fn forgetting_a_global_phrasing_inside_a_project_stays_in_that_project() {
+    let scratch = Scratch::new("hand-forget-in-project");
+    directory_size(&scratch.brain, "directory-size");
+    let mut shop = in_project(&scratch, "shop");
+    let blog = in_project(&scratch, "blog");
+    let blog_before = criteria(&scratch, &blog, "size of each file here");
+
+    let done = hand::forget_phrase(&mut shop, &phrase_edit("directory-size", "size of each file here")).unwrap();
+    assert_eq!(done.json["writtenTo"], json!("project_lesson"));
+    assert!(
+        done.message.contains("in project shop") && done.message.contains("jli forget-phrase --global"),
+        "{}",
+        done.message
+    );
+    let in_shop = criteria(&scratch, &shop, "size of each file here");
+    assert_eq!(in_shop["directory-size"]["examples"], json!(["how big is this folder"]));
+    assert_eq!(in_shop["directory-size"]["doesNotApplyTo"], json!(["size of each file here"]));
+    // The global row is untouched, so every other project is shown what it was.
+    assert_eq!(lists(&scratch, "directory-size").0, ["how big is this folder", "size of each file here"]);
+    assert_eq!(criteria(&scratch, &blog, "size of each file here"), blog_before);
+
+    // A phrasing the project learned itself is the project's alone, and the message does not send anyone elsewhere.
+    shop.add_example("directory-size", "how much room does this take").unwrap();
+    let done = hand::forget_phrase(&mut shop, &phrase_edit("directory-size", "how much room does this take")).unwrap();
+    assert_eq!(done.json["writtenTo"], json!("project_lesson"));
+    assert!(!done.message.contains("other projects"), "{}", done.message);
+    assert!(!criteria(&scratch, &shop, "x")["directory-size"]["examples"].to_string().contains("room"));
+
+    // --global edits the row itself, for every project.
+    let everywhere = PhraseEdit { global: true, ..phrase_edit("directory-size", "how big is this folder") };
+    let done = hand::forget_phrase(&mut shop, &everywhere).unwrap();
+    assert_eq!((done.json["writtenTo"].as_str(), done.json["project"].as_str()), (Some("global"), Some("shop")));
+    assert_eq!(lists(&scratch, "directory-size").1, ["how big is this folder"]);
+    assert_eq!(criteria(&scratch, &blog, "x")["directory-size"]["doesNotApplyTo"], json!(["how big is this folder"]));
+
+    // A project's own skill is edited in its own row.
+    directory_size(&shop, "shop-size");
+    let done = hand::forget_phrase(&mut shop, &phrase_edit("shop-size", "size of each file here")).unwrap();
+    assert_eq!(done.json["writtenTo"], json!("project"));
+    assert_eq!(shop.project_skills().unwrap()[0].counter_examples, ["size of each file here"]);
+}
+
+#[test]
+fn an_alias_from_inside_a_project_is_kept_where_the_skill_is() {
+    let scratch = Scratch::new("hand-alias-in-project");
+    directory_size(&scratch.brain, "directory-size");
+    let mut shop = in_project(&scratch, "shop");
+
+    // A name for a value does not steer a route, so it goes to the global row, as a learned one does (ADR 17).
+    let done = hand::alias(&mut shop, &alias_edit("directory-size", "directory", "dir", false)).unwrap();
+    assert_eq!(done.json["writtenTo"], json!("global"));
+    assert_eq!(
+        done.message,
+        "dir is now another name for {directory} in directory-size. directory-size is a global skill, so this holds in every project."
+    );
+    assert_eq!(aliases(&scratch.brain, "directory-size", "directory"), ["dir"]);
+
+    // A project skill of the same label hides the global one: a plain edit is the project's, --global the global row's.
+    directory_size(&shop, "directory-size");
+    let done = hand::alias(&mut shop, &alias_edit("directory-size", "directory", "folder", false)).unwrap();
+    assert_eq!(done.json["writtenTo"], json!("project"));
+    assert_eq!(aliases(&shop, "directory-size", "directory"), ["folder"]);
+    assert_eq!(aliases(&scratch.brain, "directory-size", "directory"), ["dir"]);
+    let global = AliasEdit { global: true, ..alias_edit("directory-size", "directory", "dir", true) };
+    let done = hand::alias(&mut shop, &global).unwrap();
+    assert_eq!(done.message, "dir is no longer another name for {directory} in directory-size, in every project.");
+    assert!(aliases(&scratch.brain, "directory-size", "directory").is_empty());
+    assert_eq!(aliases(&shop, "directory-size", "directory"), ["folder"]);
+}
+
+#[test]
+fn a_hand_edit_never_reaches_another_users_skill() {
+    let scratch = Scratch::new("hand-users");
+    directory_size(&scratch.brain, "directory-size");
+    let mut agent = Brain::open_as(BrainConfig::file(&scratch.root.join("brain.db")), "agent").unwrap();
+    let refused = hand::alias(&mut agent, &alias_edit("directory-size", "directory", "dir", false)).unwrap();
+    assert_eq!(refused.refused, Some(hand::SKILL_NOT_FOUND), "another user's skill is not there to edit");
+
+    // A shared skill is the other user's own copy: an edit there stays there.
+    scratch.brain.share("directory-size", "agent").unwrap();
+    hand::alias(&mut agent, &alias_edit("directory-size", "directory", "dir", false)).unwrap();
+    hand::forget_phrase(&mut agent, &phrase_edit("directory-size", "size of each file here")).unwrap();
+    assert_eq!(aliases(&agent, "directory-size", "directory"), ["dir"]);
+    assert_eq!(agent.skill("directory-size").unwrap().unwrap().counter_examples, ["size of each file here"]);
+    assert!(aliases(&scratch.brain, "directory-size", "directory").is_empty());
+    assert_eq!(
+        lists(&scratch, "directory-size"),
+        (vec!["how big is this folder".to_string(), "size of each file here".to_string()], vec![])
+    );
+    assert_eq!(
+        agent.shared_from().unwrap().get("directory-size").map(String::as_str),
+        Some("default"),
+        "still shown as shared"
+    );
 }
