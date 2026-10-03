@@ -51,6 +51,56 @@ pub struct Slot {
     /// Used when nothing can be extracted from the request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
+    /// Other names the request may use for this slot: `dir=` for `{directory}`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+}
+
+/// How many other names one slot may collect.
+pub const MAX_ALIASES: usize = 8;
+
+/// Slot names and argument keys compare without case, and `-` is the same as `_`.
+pub fn normal_name(name: &str) -> String {
+    name.to_ascii_lowercase().replace('-', "_")
+}
+
+impl Slot {
+    /// Whether an argument key means this slot: its name or one of its aliases.
+    pub fn answers_to(&self, key: &str) -> bool {
+        let key = normal_name(key);
+        normal_name(&self.name) == key || self.aliases.iter().any(|alias| normal_name(alias) == key)
+    }
+}
+
+/// Give the slot called `slot` another name. Refused when the alias could not be typed as a key,
+/// or when it already means a slot of this skill.
+pub fn add_alias(slots: &mut [Slot], slot: &str, alias: &str) -> bool {
+    let mut letters = alias.trim().bytes();
+    let typable = letters.next().is_some_and(|first| first.is_ascii_alphabetic() || first == b'_')
+        && letters.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+    let alias = normal_name(alias.trim());
+    if !typable || slots.iter().any(|known| known.answers_to(&alias)) {
+        return false;
+    }
+    match slots.iter_mut().find(|known| known.name == slot) {
+        Some(known) if known.aliases.len() < MAX_ALIASES => {
+            known.aliases.push(alias);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Slots as a model wrote them, with only the aliases that hold up: the first slot to claim a name keeps it.
+pub fn with_checked_aliases(mut slots: Vec<Slot>) -> Vec<Slot> {
+    let claimed: Vec<(String, Vec<String>)> =
+        slots.iter_mut().map(|slot| (slot.name.clone(), std::mem::take(&mut slot.aliases))).collect();
+    for (slot, aliases) in claimed {
+        for alias in aliases {
+            add_alias(&mut slots, &slot, &alias);
+        }
+    }
+    slots
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

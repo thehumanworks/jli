@@ -8,7 +8,7 @@ use libsql::{Builder, Connection, Database, Value};
 use tokio::runtime::Runtime;
 
 use crate::seed::seed_skills;
-use crate::types::{BrainEvent, Origin, Path, Risk, Skill, Slot};
+use crate::types::{add_alias, BrainEvent, Origin, Path, Risk, Skill, Slot};
 
 /// Where the brain lives. One libSQL client covers every deployment:
 ///
@@ -386,10 +386,17 @@ impl Brain {
     }
 
     /// Insert a skill, or change what an existing label runs. Re-teaching a label keeps
-    /// what was learned about it: examples, counter-examples and uses are never replaced.
+    /// what was learned about it: examples, counter-examples and uses are never replaced,
+    /// and a slot that keeps its name keeps its aliases.
     pub fn add_skill(&self, skill: &NewSkill) -> Result<()> {
+        let mut skill = skill.clone();
+        for known in self.skill(&skill.label)?.map(|known| known.slots).unwrap_or_default() {
+            for alias in &known.aliases {
+                add_alias(&mut skill.slots, &known.name, alias);
+            }
+        }
         self.insert_skill(
-            skill,
+            &skill,
             "DO UPDATE SET steps = excluded.steps, scenario = excluded.scenario, slots = excluded.slots, risk = excluded.risk",
         )
     }
@@ -483,6 +490,19 @@ impl Brain {
     /// Remember that `phrase` does NOT mean `label`.
     pub fn add_counter_example(&self, label: &str, phrase: &str) -> Result<bool> {
         self.edit_list(label, ListColumn::CounterExamples, |list| with(list, phrase))
+    }
+
+    /// Remember that `alias` is another name for a slot of `label`. Returns false if nothing changed.
+    pub fn add_alias(&self, label: &str, slot: &str, alias: &str) -> Result<bool> {
+        let Some(mut skill) = self.skill(label)? else { return Ok(false) };
+        if !add_alias(&mut skill.slots, slot, alias) {
+            return Ok(false);
+        }
+        self.execute(
+            "UPDATE skills SET slots = ? WHERE label = ?",
+            vec![serde_json::to_string(&skill.slots)?.into(), label.into()],
+        )?;
+        Ok(true)
     }
 
     fn edit_list(
@@ -692,6 +712,55 @@ mod tests {
         assert_eq!((label.as_str(), created), ("du-sh", true));
         let (again, _) = brain.learn_command("other", &["du  -sh".into()], Risk::Safe).unwrap();
         assert_eq!(again, "du-sh-x");
+    }
+
+    #[test]
+    fn a_slot_collects_aliases() {
+        let scratch = Scratch::new("aliases");
+        let brain = scratch.brain();
+        // A row written before aliases existed reads as it always did, and is written back unchanged.
+        let stored = |brain: &Brain| {
+            brain.query("SELECT slots FROM skills WHERE label = 'git-commit'", vec![], |row| text(row.get_value(0).unwrap())).unwrap().remove(0)
+        };
+        assert_eq!(stored(&brain), r#"[{"name":"message","kind":"text","description":"the commit message"}]"#);
+
+        assert!(brain.add_alias("git-commit", "message", "Msg").unwrap());
+        assert!(!brain.add_alias("git-commit", "message", "msg").unwrap(), "already known");
+        assert!(!brain.add_alias("git-commit", "message", "message").unwrap(), "the name itself");
+        assert!(!brain.add_alias("git-commit", "message", "-m").unwrap(), "a flag is never a name");
+        assert!(!brain.add_alias("git-commit", "message", "two words").unwrap());
+        assert!(!brain.add_alias("git-commit", "subject", "s").unwrap(), "no such slot");
+        assert!(!brain.add_alias("no-such-skill", "message", "m").unwrap());
+        assert_eq!(brain.skill("git-commit").unwrap().unwrap().slots[0].aliases, ["msg"]);
+        assert_eq!(stored(&brain), r#"[{"name":"message","kind":"text","description":"the commit message","aliases":["msg"]}]"#);
+    }
+
+    #[test]
+    fn re_teaching_a_label_keeps_its_slots_aliases() {
+        let scratch = Scratch::new("alias-upsert");
+        let brain = scratch.brain();
+        assert!(brain.add_alias("git-commit", "message", "msg").unwrap());
+        let slot = |name: &str, aliases: &[&str]| Slot {
+            name: name.into(),
+            kind: crate::types::SlotKind::Text,
+            description: String::new(),
+            default: None,
+            aliases: aliases.iter().map(|alias| alias.to_string()).collect(),
+        };
+        brain
+            .add_skill(&NewSkill {
+                label: "git-commit".into(),
+                steps: vec!["git commit --author {msg} -m {message}".into()],
+                scenario: "changed".into(),
+                risk: Risk::Modifies,
+                origin: Origin::Taught,
+                examples: vec![],
+                slots: vec![slot("message", &["text"]), slot("author", &["by"])],
+            })
+            .unwrap();
+        let slots = brain.skill("git-commit").unwrap().unwrap().slots;
+        assert_eq!(slots[0].aliases, ["text", "msg"]);
+        assert_eq!(slots[1].aliases, ["by"]);
     }
 
     #[test]

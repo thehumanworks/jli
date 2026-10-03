@@ -6,7 +6,7 @@ use regex::Regex;
 
 use crate::args;
 use crate::context::{list_branches, list_entries, Context};
-use crate::system2::extract;
+use crate::system2::{extract, name_arguments};
 use crate::types::{Slot, SlotKind};
 use crate::Models;
 
@@ -42,6 +42,8 @@ pub struct Filled {
     pub sources: Vec<(String, Source)>,
     /// `name=value` arguments in the request that name no slot of the skill.
     pub unmatched: Vec<String>,
+    /// Names the request used for a slot that the skill did not know yet, as (slot, alias).
+    pub aliases: Vec<(String, String)>,
     /// The request with its stated values hidden: what is learned as a phrasing.
     pub phrase: String,
     pub ms_system1: u64,
@@ -94,7 +96,7 @@ fn in_template_order<'a>(skill: &Template<'a>) -> Vec<&'a Slot> {
 }
 
 /// Give every `{slot}` a value, most certain and cheapest method first:
-/// a value the request states by name, a value the agent already supplied, a quoted string or a
+/// a value the request states by name or alias, a value the agent already supplied, a quoted string or a
 /// number in the request, a System 1 pick among real candidates, then the agent, and the slot's
 /// default only as a last resort.
 pub fn fill_slots(
@@ -105,13 +107,31 @@ pub fn fill_slots(
     provided: &HashMap<String, String>,
 ) -> Result<Filled> {
     let reading = args::read(query, skill.slots);
-    let mut filled = Filled { unmatched: reading.unmatched, phrase: reading.phrase, ..Filled::default() };
+    let mut filled = Filled { phrase: reading.phrase, ..Filled::default() };
     let mut pending: Vec<&Slot> = Vec::new();
     let slots = in_template_order(skill);
 
     for (name, value) in reading.named {
         filled.set(&name, value, Source::Request);
     }
+    // A name the skill does not know may be another name for one of its slots. The agent says
+    // which; the value stays the user's own. Without an answer the argument blocks the run below.
+    let mut unmatched = reading.unmatched;
+    let unnamed: Vec<&Slot> = slots.iter().copied().filter(|slot| !filled.has(&slot.name)).collect();
+    if !unmatched.is_empty() && !unnamed.is_empty() {
+        if let Ok((names, ms)) = name_arguments(&models.llm, skill.steps, skill.scenario, &unnamed, &unmatched) {
+            filled.ms_system2 += ms;
+            for (key, name) in names {
+                let Some(slot) = unnamed.iter().find(|slot| slot.name == name && !filled.has(&slot.name)) else { continue };
+                let Some((_, value)) = unmatched.iter().find(|(stated, _)| *stated == key).cloned() else { continue };
+                let value = if slot.kind == SlotKind::Number { args::as_number(&value) } else { value };
+                filled.set(&slot.name, value, Source::Request);
+                filled.aliases.push((slot.name.clone(), key.clone()));
+                unmatched.retain(|(stated, _)| *stated != key);
+            }
+        }
+    }
+    filled.unmatched = unmatched.into_iter().map(|(key, _)| key).collect();
     for slot in &slots {
         if filled.has(&slot.name) {
             continue;
@@ -376,7 +396,7 @@ mod tests {
 
     #[test]
     fn undeclared_placeholders_are_found_once() {
-        let slots = vec![Slot { name: "file".into(), kind: SlotKind::File, description: String::new(), default: None }];
+        let slots = vec![Slot { name: "file".into(), kind: SlotKind::File, description: String::new(), default: None, aliases: vec![] }];
         assert_eq!(undeclared(&steps(&["cp {file} {dest}", "ls {dest} ${HOME}"]), &slots), ["dest"]);
     }
 }

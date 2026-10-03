@@ -34,6 +34,7 @@ fn help() -> String {
 {}
   jli commit message=\"fix the parser\"  name=value goes straight to the command's {{message}} slot
   jli commit with message: fix it      so does the slot's name with a colon, or any \"quoted text\"
+  jli go to dir=src                    another name for a slot is worked out once by the agent, then kept
   Stated values are passed as written, by no model, and never influence which command is picked.
 
 {}
@@ -223,6 +224,9 @@ impl App {
             ));
             for step in &skill.steps {
                 say(format!("  {} {step}", c::green("$")));
+            }
+            for slot in skill.slots.iter().filter(|slot| !slot.aliases.is_empty()) {
+                say(format!("  {}", c::dim(format!("{{{}}} is also {}", slot.name, slot.aliases.join(", ")))));
             }
             say(format!("  {}", c::dim(&skill.scenario)));
             for example in &skill.examples {

@@ -22,6 +22,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [9](0009-port-to-rust.md) | Port jli from TypeScript to Rust, keeping its behaviour and its brain |
 | [10](0010-synchronous-rust.md) | The Rust version is synchronous, with async confined to the store |
 | [11](0011-stated-arguments.md) | Arguments stated in the request are read by a parser, before and instead of any model |
+| [12](0012-slot-aliases.md) | A slot answers to several names, and a new name is worked out once and kept |
 
 ## Known gaps, by record
 
@@ -34,3 +35,5 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   two correction flows have not been tested live.
 - [11](0011-stated-arguments.md): a stated value has no escapes, and hidden requests were measured on a handful
   of live cases, not on the benchmark.
+- [12](0012-slot-aliases.md): one alias cannot be removed by hand, an unknown name is only noticed as
+  `name=value`, and a skill with no slots still blocks on any argument.

@@ -14,7 +14,7 @@ use crate::store::{slug, Brain, NewEvent, NewSkill};
 use crate::suggest::{suggest, Failure, SuggestInput, Suggestion, Verdict};
 use crate::system1::Decision;
 use crate::system2::{propose, ProposalKind, ProposeInput, Rejected};
-use crate::types::{Mode, Origin, Path, Risk, Skill, Slot};
+use crate::types::{add_alias, with_checked_aliases, Mode, Origin, Path, Risk, Skill, Slot};
 use crate::ui::{c, fixed, Prompt, Ui};
 use crate::Models;
 
@@ -369,8 +369,10 @@ impl Route<'_> {
                                 kind: slot.kind,
                                 description: slot.description.clone(),
                                 default: slot.default.clone(),
+                                aliases: slot.aliases.clone(),
                             })
                             .collect();
+                        let slots = with_checked_aliases(slots);
                         // A proposal nobody has vetted yet: the request's own risk reading gets a vote too.
                         let intent = decision.as_ref().map_or(Risk::Safe, |decided| decided.intent_risk);
                         Plan {
@@ -387,7 +389,7 @@ impl Route<'_> {
         };
 
         // ── Fill in the blanks ────────────────────────────────────────────────────
-        let skill = plan.skill.clone();
+        let mut skill = plan.skill.clone();
         self.outcome.path = plan.path;
         self.outcome.label = Some(skill.label.clone());
         self.outcome.confidence = plan.confidence;
@@ -404,12 +406,21 @@ impl Route<'_> {
         ui.command(&self.outcome.commands, plan.risk);
         for (name, source) in &filled.sources {
             if *source != Source::Agent || !plan.is_new {
-                ui.note(format!("{{{name}}} = {} (from {source})", filled.values[name]));
+                let read_as = filled.aliases.iter().find(|(slot, _)| slot == name);
+                let read_as = read_as.map(|(_, alias)| format!(", reading {alias}= as {name}=")).unwrap_or_default();
+                ui.note(format!("{{{name}}} = {} (from {source}{read_as})", filled.values[name]));
             }
         }
         if !filled.unmatched.is_empty() {
             let given: Vec<String> = filled.unmatched.iter().map(|name| format!("{name}=")).collect();
-            let takes: Vec<&str> = skill.slots.iter().map(|slot| slot.name.as_str()).collect();
+            let takes: Vec<String> = skill
+                .slots
+                .iter()
+                .map(|slot| match slot.aliases.as_slice() {
+                    [] => slot.name.clone(),
+                    aliases => format!("{} (or {})", slot.name, aliases.join(", ")),
+                })
+                .collect();
             let blocked = format!("{} does not take {}", skill.label, given.join(", "));
             ui.warn(if takes.is_empty() {
                 format!("{blocked}: it takes no arguments.")
@@ -495,6 +506,15 @@ impl Route<'_> {
         }
 
         // ── Write back: this is where the software learns ─────────────────────────
+        // A human yes vouches for the route even if the command itself failed; --yes and --yolo need a clean exit.
+        let vouched = plan.path == Path::System2 || !(options.yes || options.yolo) || result.exit_code == 0;
+        // A name the request used for a slot is kept on the same terms as a phrasing.
+        let mut renamed = Vec::new();
+        for (slot, alias) in &filled.aliases {
+            if add_alias(&mut skill.slots, slot, alias) {
+                renamed.push((slot, alias));
+            }
+        }
         if plan.is_new {
             if result.exit_code == 0 {
                 self.brain.add_skill(&NewSkill {
@@ -514,8 +534,12 @@ impl Route<'_> {
             }
         } else {
             self.brain.record_use(&skill.label)?;
-            // A human yes vouches for the route even if the command itself failed; --yes and --yolo need a clean exit.
-            let vouched = plan.path == Path::System2 || !(options.yes || options.yolo) || result.exit_code == 0;
+            for (slot, alias) in renamed {
+                if vouched && self.brain.add_alias(&skill.label, slot, alias)? {
+                    self.outcome.learned.push(format!("{alias}= means {{{slot}}} in {}", skill.label));
+                    ui.learned(format!("{alias}= means {{{slot}}} in {}", c::bold(&skill.label)));
+                }
+            }
             let taught_something =
                 vouched && (plan.path == Path::System2 || plan.confidence.unwrap_or(1.0) < ALREADY_KNOWN_AT);
             if taught_something && self.brain.add_example(&skill.label, &self.phrase)? {

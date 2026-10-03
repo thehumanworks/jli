@@ -9,7 +9,7 @@ use crate::slots::{match_template, render, undeclared};
 use crate::store::{slug, Brain, NewSkill};
 use crate::system1::Decision;
 use crate::translator::{translate, TranslateInput};
-use crate::types::{Mode, Origin, Risk, Skill, Slot};
+use crate::types::{with_checked_aliases, Mode, Origin, Risk, Skill, Slot};
 use crate::ui::{c, duration, fixed, Ui};
 use crate::Models;
 
@@ -173,8 +173,10 @@ pub fn learn_phrase(brain: &Brain, models: &Models, input: &LearnInput, ui: &Ui)
                 kind: slot.kind,
                 description: slot.description.clone(),
                 default: slot.default.clone(),
+                aliases: slot.aliases.clone(),
             })
             .collect();
+        let slots = with_checked_aliases(slots);
         // A flag is part of what the skill does, never a value. Models sometimes slot one anyway.
         let slots_a_flag = values.values().any(|value| value.trim().starts_with('-'));
         let faithful = !slots_a_flag
