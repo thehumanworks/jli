@@ -16,6 +16,9 @@ use crate::types::{Mode, Origin, Path, Risk, Slot, SlotKind};
 use crate::ui::{Prompt, Ui};
 use crate::Models;
 
+/// Measuring the matrix, optimising it, and checking a row before it is written.
+mod eval_tests;
+
 /// A temp directory with a brain in it and an empty working directory.
 struct Scratch {
     root: PathBuf,
@@ -68,6 +71,18 @@ fn decision(choice: &str, confidence: f64, is_command: f64, risk: [f64; 3]) -> V
 }
 
 const SAFE: [f64; 3] = [0.9, 0.1, 0.0];
+
+/// System 1 that answers `before` until the matrix holds `label`, and routes there once it does:
+/// a proposed skill passes the check it gets before it is stored.
+fn once_known(label: &'static str, before: Value) -> impl Fn(&Value) -> Value + Send + Sync + 'static {
+    move |request| {
+        if request["questions"]["skill"]["criteria"].get(label).is_some() {
+            decision(label, 0.9, 0.95, SAFE)
+        } else {
+            before.clone()
+        }
+    }
+}
 
 /// Language model replies by schema name, in order. Any other call fails the test.
 struct Replies {
@@ -331,7 +346,7 @@ fn a_proposed_skill_keeps_only_the_aliases_that_hold_up() {
         "slotValues": [{ "name": "count", "value": "5" }],
         "risk": "safe", "explanation": "Lists.", "answer": null,
     });
-    let (models, _) = models(|_| decision(NONE, 0.7, 0.95, SAFE), vec![("proposal", proposal)]);
+    let (models, _) = models(once_known("list-directory", decision(NONE, 0.7, 0.95, SAFE)), vec![("proposal", proposal)]);
     let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
     let outcome = go(&scratch, &models, "first entries of dir=src", &mut Script::default(), &options);
     assert_eq!(outcome.commands, ["ls src | head -n 5"], "the user's own name reaches the slot the agent named properly");
@@ -424,7 +439,8 @@ fn yolo_runs_a_destructive_command_without_asking() {
         "scenario": "the user wants every .log file in the directory deleted", "slots": [], "slotValues": [],
         "risk": "destructive", "explanation": "Deletes the log files.", "answer": null,
     });
-    let (models, _) = models(|_| decision(NONE, 0.8, 0.95, [0.1, 0.3, 0.6]), vec![("proposal", proposal)]);
+    let (models, _) =
+        models(once_known("delete-log-files", decision(NONE, 0.8, 0.95, [0.1, 0.3, 0.6])), vec![("proposal", proposal)]);
     let mut script = Script::default();
     let options = RouteOptions { yolo: true, ..scratch.options(Mode::Semi) };
     let outcome = go(&scratch, &models, "delete all the log files", &mut script, &options);
@@ -445,7 +461,7 @@ fn an_agent_proposal_that_runs_becomes_a_skill() {
         "slotValues": [{ "name": "file", "value": "notes.txt" }],
         "risk": "safe", "explanation": "Counts lines.", "answer": null,
     });
-    let (models, replies) = models(|_| decision(NONE, 0.7, 0.95, SAFE), vec![("proposal", proposal)]);
+    let (models, replies) = models(once_known("count-lines", decision(NONE, 0.7, 0.95, SAFE)), vec![("proposal", proposal)]);
     let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
     let outcome = go(&scratch, &models, "how many lines are in notes.txt", &mut Script::default(), &options);
     assert_eq!(outcome.path, Path::System2);

@@ -6,8 +6,9 @@ use serde::Serialize;
 
 use crate::args;
 use crate::context::{list_entries, read_context, Context};
+use crate::eval::verify_row;
 use crate::exec::{run, RunOptions};
-use crate::learn::{learn_phrase, LearnInput};
+use crate::learn::{learn_phrase, settle_proposed, LearnInput, Settled};
 use crate::llm::AGENT_MODEL;
 use crate::slots::{fill_slots, match_template, render, undeclared, Source, Template};
 use crate::store::{slug, Brain, NewEvent, NewSkill};
@@ -246,7 +247,12 @@ impl Route<'_> {
                 command: Some(outcome.commands.join(" && ")).filter(|command| !command.is_empty()),
                 exit_code: outcome.exit_code.map(i64::from),
                 accepted: outcome.ran,
-                learned: Some(outcome.learned.join("; ")).filter(|learned| !learned.is_empty()),
+                // A declined route is marked as `jli fix` marks one it undid, so no reader counts it as a success.
+                learned: if outcome.blocked.as_deref() == Some("declined") {
+                    Some("corrected".into())
+                } else {
+                    Some(outcome.learned.join("; ")).filter(|learned| !learned.is_empty())
+                },
                 ms_system1: nonzero(outcome.ms_system1),
                 ms_system2: nonzero(outcome.ms_system2),
             })?;
@@ -475,11 +481,22 @@ impl Route<'_> {
         }
 
         // ── Execute ───────────────────────────────────────────────────────────────
-        let result = run(
-            &self.outcome.commands,
-            &options.cwd,
-            RunOptions { capture: options.capture, watch_stderr: options.mode == Mode::Auto },
-        )?;
+        // A skill the agent proposed is checked with System 1 while its command runs, so the check
+        // never holds up the command's output.
+        let proposed = plan.is_new.then(|| Skill { examples: vec![self.phrase.clone()], ..skill.clone() });
+        let (result, checked) = std::thread::scope(|scope| {
+            let check = proposed.as_ref().map(|row| {
+                let (models, skills, context, phrase) = (self.models, &self.all_skills, &self.context, &self.phrase);
+                scope.spawn(move || verify_row(models, skills, row, phrase, context, options.threshold))
+            });
+            let result = run(
+                &self.outcome.commands,
+                &options.cwd,
+                RunOptions { capture: options.capture, watch_stderr: options.mode == Mode::Auto },
+            );
+            (result, check.map(|check| check.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))))
+        });
+        let result = result?;
         self.outcome.ran = true;
         self.outcome.exit_code = Some(result.exit_code);
         self.outcome.output = result.output.clone();
@@ -527,10 +544,23 @@ impl Route<'_> {
         }
         if plan.is_new {
             if result.exit_code == 0 {
+                let (scenario, settled) = match (checked, &proposed) {
+                    (Some(checked), Some(row)) => settle_proposed(
+                        self.models,
+                        &self.all_skills,
+                        row,
+                        &self.phrase,
+                        &self.context,
+                        options.threshold,
+                        checked,
+                        ui,
+                    ),
+                    _ => (skill.scenario.clone(), Settled::Unchecked),
+                };
                 self.brain.add_skill(&NewSkill {
                     label: skill.label.clone(),
                     steps: skill.steps.clone(),
-                    scenario: skill.scenario.clone(),
+                    scenario,
                     risk: skill.risk,
                     origin: Origin::Agent,
                     examples: vec![self.phrase.clone()],
@@ -538,6 +568,7 @@ impl Route<'_> {
                 })?;
                 self.brain.record_use(&skill.label)?;
                 self.outcome.learned.push(format!("new skill {}", skill.label));
+                self.outcome.learned.extend(settled.note(&skill.label));
                 ui.learned(format!(
                     "new skill {}. Next time System 1 handles this without the agent.",
                     c::bold(&skill.label)
@@ -565,7 +596,18 @@ impl Route<'_> {
 
     // ── Corrections: how a "no" or a failed run turns into a lesson ────────────
 
-    fn diagnose(&self, failure: Option<Failure>) -> Option<Suggestion> {
+    /// The route the person turned down, logged as its own event before the correction is: not
+    /// accepted, and marked `corrected`. The row the correction then writes carries its own label.
+    fn log_declined(&mut self) -> Result<()> {
+        let attempt = self.outcome.clone();
+        self.outcome.ran = false;
+        self.outcome.blocked = Some("declined".into());
+        self.finish()?;
+        self.outcome = attempt;
+        Ok(())
+    }
+
+    fn diagnose(&mut self, failure: Option<Failure>) -> Option<Suggestion> {
         let entries = list_entries(&self.options.cwd);
         let input = SuggestInput {
             query: self.query,
@@ -576,7 +618,11 @@ impl Route<'_> {
             failure,
         };
         match suggest(&self.models.llm, &input) {
-            Ok((suggestion, _)) => Some(suggestion),
+            Ok((suggestion, ms)) => {
+                // The suggester is a language model call like the agent's, so its time is counted with it.
+                self.outcome.ms_system2 += ms;
+                Some(suggestion)
+            }
             Err(error) => {
                 self.ui.note(format!("Could not get suggestions: {error:#}"));
                 None
@@ -599,7 +645,11 @@ impl Route<'_> {
         let ui = self.ui;
         let skill = &plan.skill;
 
-        let suggestion = if options.mode == Mode::Auto { given.or_else(|| self.diagnose(None)) } else { None };
+        let suggestion = match given {
+            Some(given) if options.mode == Mode::Auto => Some(given),
+            None if options.mode == Mode::Auto => self.diagnose(None),
+            _ => None,
+        };
         let choice = if let Some(suggestion) = suggestion {
             for (index, option) in suggestion.options.iter().enumerate() {
                 ui.line(format!("   {}  {}  {}", c::bold(index + 1), option.command, c::dim(&option.description)));
@@ -642,6 +692,7 @@ impl Route<'_> {
             }
         };
 
+        self.log_declined()?;
         // Choosing a different command is itself the verdict on the old one. The same command
         // with another slot value is not: that skill was right.
         let was_wrong = match &choice {
@@ -693,6 +744,8 @@ impl Route<'_> {
         }
         self.outcome.path = Path::Taught;
         self.outcome.label = Some(taught.label.clone());
+        // System 1's confidence was in the label just turned down, not in this one.
+        self.outcome.confidence = None;
         self.outcome.commands = steps;
         self.outcome.ran = true;
         self.outcome.exit_code = Some(rerun.exit_code);
