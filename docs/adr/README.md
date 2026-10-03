@@ -31,6 +31,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [18](0018-agent-contract.md) | A contract for agent callers: pinned plans, run in order, and corrections without a terminal |
 | [19](0019-one-row-per-command.md) | A flag is never a slot value, a literal skill is made general in place, and a label taken by the same command is joined |
 | [20](0020-write-back.md) | An accepted route links its phrasing, a rejected command is refused, and a path is hidden as it was typed |
+| [21](0021-hand-edits.md) | One slot name and one phrasing can be changed by hand, written where the router would write the same lesson |
 | [23](0023-shell-fixes-and-number-words.md) | The install line follows the running shell, the function cleans up after ctrl-c, and a hyphenated number word is not a count |
 
 ## Known gaps, by record
@@ -44,8 +45,8 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   two correction flows have not been tested live.
 - [11](0011-stated-arguments.md): a stated value has no escapes, and hidden requests were measured on a handful
   of live cases, not on the benchmark.
-- [12](0012-slot-aliases.md): one alias cannot be removed by hand, an unknown name is only noticed as
-  `name=value`, and a skill with no slots still blocks on any argument.
+- [12](0012-slot-aliases.md): an unknown name is only noticed as `name=value`, and a skill with no
+  slots still blocks on any argument.
 - [13](0013-learning-fixes.md): the duplicate check was verified offline only, hiding is verbatim
   and case-sensitive, and hidden examples were measured on the demo and six requests, not on a
   benchmark built for it.
@@ -56,9 +57,10 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   as words of a request), a share cannot be undone except by `forget`, and the safe writes have not
   run against a live remote.
 - [16](0016-measuring-the-matrix.md): a stored example is ground truth, so one taught by mistake cannot
-  be dropped through the gate; the gate checks a skill's competitors, not the whole matrix; rewrites are
-  not repeatable; examples carry no context, and a replay in a directory that is gone runs in an
-  inferred one; a `jli fix` made after other requests counts as a request of its own.
+  be dropped through the gate (it can now be dropped by hand with `jli forget-phrase`, ADR 21); the
+  gate checks a skill's competitors, not the whole matrix; rewrites are not repeatable; examples carry
+  no context, and a replay in a directory that is gone runs in an inferred one; a `jli fix` made after
+  other requests counts as a request of its own.
 - [17](0017-project-scope.md): an older jli ignores `.jlirc` and teaches the global skills inside a
   project; a lesson about a global skill blocks only the phrasing it was learned from, and has no
   path to global but `teach --global`; a stop between `generalize`'s two writes leaves both rows; a
@@ -82,6 +84,11 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   rejected `ls {directory}` also refuses `ls -la` until `match_template` stops a slot taking a flag; a
   confident System 1 route leaves a counter-example of its skill in place; and a path's written form
   is found with the environment as it is when the phrase is worked out, never for a bare `~` or `~user`.
+- [21](0021-hand-edits.md): `jli alias` and exactly three words is read as the command, never as a
+  request; a forgotten phrasing that System 1 still routes to its skill comes back as an example while
+  it stays a counter-example; `jli eval` still replays an accepted request in those words as evidence
+  for the skill; there is no alias for one project only; and the edits have run only against local
+  files.
 - [23](0023-shell-fixes-and-number-words.md): whether fish removes the hand-off file after a ctrl-c
   is not measured; with no shell among jli's ancestors the install line still follows `$SHELL`, as
   `jli shell-init` with no argument does; digits joined by `-` are still numbers; and the number-word

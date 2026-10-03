@@ -10,7 +10,7 @@ use tokio::runtime::Runtime;
 
 use crate::seed::seed_skills;
 use crate::slots::match_proposal;
-use crate::types::{add_alias, coded, BrainEvent, Origin, Path, Risk, Skill, Slot, STORAGE};
+use crate::types::{add_alias, coded, remove_alias, BrainEvent, Origin, Path, Risk, Skill, Slot, STORAGE};
 
 /// Where the brain lives. One libSQL client covers every deployment:
 ///
@@ -1175,6 +1175,18 @@ impl Brain {
         })
     }
 
+    /// Take `alias` from a slot of `label`, by hand (`jli alias --remove`, ADR 21). It is written where
+    /// `add_alias` writes: the row that holds the skill. Returns false if nothing changed.
+    pub fn remove_alias(&self, label: &str, slot: &str, alias: &str) -> Result<bool> {
+        self.edit_column(label, "slots", |stored| {
+            let mut slots: Vec<Slot> = json(stored);
+            if !remove_alias(&mut slots, slot, alias) {
+                return Ok(None);
+            }
+            Ok(Some(serde_json::to_string(&slots)?))
+        })
+    }
+
     /// Inside a project, a phrasing or counter-example for a global skill is a lesson of the project's
     /// own: the global row is never written, so another project never sees it (ADR 17).
     fn edit_list(&self, label: &str, column: ListColumn, edit: impl Fn(Vec<String>) -> Option<Vec<String>>) -> Result<bool> {
@@ -2097,6 +2109,28 @@ mod tests {
             stored(&brain),
             r#"[{"name":"message","kind":"text","description":"the commit message","aliases":["msg"]}]"#
         );
+    }
+
+    #[test]
+    fn removing_the_last_alias_writes_the_slot_as_it_was_before_aliases() {
+        let scratch = Scratch::new("alias-remove");
+        let brain = scratch.brain();
+        let stored = |brain: &Brain| {
+            brain
+                .query("SELECT slots FROM skills WHERE label = 'git-commit'", vec![], |row| text(row.get_value(0).unwrap()))
+                .unwrap()
+                .remove(0)
+        };
+        let before = stored(&brain);
+        assert!(brain.add_alias("git-commit", "message", "msg").unwrap());
+        assert!(brain.add_alias("git-commit", "message", "text").unwrap());
+        assert!(brain.remove_alias("git-commit", "message", "MSG").unwrap(), "compared as names are");
+        assert!(!brain.remove_alias("git-commit", "message", "msg").unwrap(), "already gone");
+        assert!(!brain.remove_alias("git-commit", "subject", "text").unwrap(), "no such slot");
+        assert!(!brain.remove_alias("no-such-skill", "message", "text").unwrap());
+        assert_eq!(brain.skill("git-commit").unwrap().unwrap().slots[0].aliases, ["text"]);
+        assert!(brain.remove_alias("git-commit", "message", "text").unwrap());
+        assert_eq!(stored(&brain), before, "byte for byte, so an older jli reads it as it always did");
     }
 
     #[test]

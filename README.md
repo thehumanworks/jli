@@ -33,6 +33,7 @@ Learning is writing to that database:
 | You said no and typed the right command | a counter-example on the wrong skill, and the phrasing on the right one | it routes to your command next time |
 | You ran `jli teach` or `jli fix` | a phrasing, or a counter-example; if the agent then proposes the rejected command again, it is refused (`already_rejected`) and nothing is stored | same as above, by hand |
 | You wrote `dir=src` for a slot called `directory` | `dir` as another name for that slot | `dir=` is read with no model next time |
+| You ran `jli alias` or `jli forget-phrase` | a slot name added or removed; a phrasing moved to the counter-examples | the same, by hand, for one name or one phrasing |
 
 One command can hold many phrasings. Teaching a phrase for a command that a skill already runs adds
 the phrase to that skill. If that skill runs only the one command, as one taught in manual mode
@@ -163,6 +164,8 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | `jli fix <eventId> -- <command>` | that was wrong, this is right: learn it as a "no" and the command at the prompt would, and return a plan of it (`--run` runs it) |
 | `jli fix <eventId> --expected "<words>"` | unlearn it and ask the agent with what you expected; returns a plan (`--run` runs it) |
 | `jli forget <label>` | delete a skill; inside a project only the project's own, `--global` for a global one |
+| `jli forget-phrase <label> "<phrase>"` | take one phrasing back from a skill and keep it as a counter-example, so it is not learned straight back; inside a project, for a global skill, in that project only (`--global` for every project) |
+| `jli alias <label> <slot> <name>` | give a slot another name for `name=value`; `--remove` takes one away. Inside a project an alias of a global skill holds in every project; `--global` reaches a global skill that a project skill of the same label hides |
 | `jli project` | the project this directory is in, from the nearest `.jlirc`, and how many skills are its own |
 | `jli project init [<id>]` | make this directory a project: what jli learns here stays with it |
 | `jli generalize [<label>]` | the agent proposes how to make project skills global; each is written only once you approve (`--all-projects`, `--approve-all`, `-n`) |
@@ -237,6 +240,18 @@ means; the value stays yours, and after the run the name is kept, so next time t
 A name that fits no slot stops the run and lists the command's arguments. `jli skills` shows each
 slot as `{name}` in the command, with its other names below it. See
 [ADR 12](docs/adr/0012-slot-aliases.md).
+
+A name can also be given or taken away by hand, for example when the agent read one wrong:
+
+```sh
+jli alias count-files directory folder            # folder=docs now fills {directory}
+jli alias --remove count-files directory d        # and d= no longer does
+jli forget-phrase du-sh "size of each file here"  # a phrasing taught to the wrong skill
+```
+
+Both take `--json` and `-n`, and refuse an unknown skill, slot or phrasing with exit 1. A forgotten
+phrasing is kept as a counter-example, so the next request in those words is not learned back; `jli
+teach` with the right command undoes it. See [ADR 21](docs/adr/0021-hand-edits.md).
 
 Anything not stated is filled by the cheapest method that works: a number in the request, a System 1
 `choice` among the real files or branches, the agent, and last the slot's default. See
@@ -328,6 +343,7 @@ say yes. Without a `.jlirc` nothing changes. See [ADR 17](docs/adr/0017-project-
 | `src/store.rs` | the brain: skills, events, settings, plans and corrections per user and project in libSQL, behind a runtime that never leaves the module |
 | `src/project.rs` | finds, reads and writes the `.jlirc` that names a project |
 | `src/generalize.rs` | `jli generalize`: checks the agent's proposal for a project skill and writes it once approved |
+| `src/hand.rs` | `jli alias` and `jli forget-phrase`: one slot name or one phrasing changed by hand, where the router would write it |
 | `src/args.rs` | reads the arguments a request states: `name=value`, labels and quoted text |
 | `src/slots.rs` | fills, expands and shell-quotes `{slot}` values, and matches a command back to its template |
 | `src/shell.rs` | the shell function, which steps it must run in your shell, and which shell jli is running under |

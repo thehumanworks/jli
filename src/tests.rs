@@ -2490,3 +2490,254 @@ fn a_home_path_is_hidden_as_the_request_wrote_it() {
     assert_eq!(again, "is … there");
     assert!(scratch.brain.remove_example("show-dir", &again).unwrap());
 }
+
+// ── Hand edits: jli alias and jli forget-phrase (ADR 21) ────────────────────────
+
+use crate::hand::{self, AliasEdit, PhraseEdit};
+
+/// The scratch brain opened a second time, mutable, as `jli` opens it for a subcommand.
+fn mutable(scratch: &Scratch) -> Brain {
+    Brain::open(BrainConfig::file(&scratch.root.join("brain.db"))).unwrap()
+}
+
+fn alias_edit(label: &str, slot: &str, name: &str, remove: bool) -> AliasEdit {
+    AliasEdit { label: label.into(), slot: slot.into(), name: name.into(), remove, global: false, dry_run: false }
+}
+
+fn phrase_edit(label: &str, phrase: &str) -> PhraseEdit {
+    PhraseEdit { label: label.into(), phrase: phrase.into(), global: false, dry_run: false }
+}
+
+fn aliases(brain: &Brain, label: &str, slot: &str) -> Vec<String> {
+    let skill = brain.skill(label).unwrap().unwrap();
+    skill.slots.into_iter().find(|known| known.name == slot).unwrap().aliases
+}
+
+/// `du -sh {directory}` with the phrasing that was taught to it by mistake in issue #23. Inserted in
+/// the brain's own scope, so inside a project it can hide a global skill of the same label.
+fn directory_size(brain: &Brain, label: &str) {
+    brain
+        .add_skill_if_missing(&NewSkill {
+            label: label.into(),
+            steps: vec!["du -sh {directory}".into()],
+            scenario: "the user wants the total size of a directory".into(),
+            risk: Risk::Safe,
+            origin: Origin::Taught,
+            examples: vec!["how big is this folder".into(), "size of each file here".into()],
+            slots: vec![Slot {
+                name: "directory".into(),
+                kind: SlotKind::File,
+                description: "the directory".into(),
+                default: Some(".".into()),
+                aliases: vec![],
+            }],
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_slot_alias_is_added_and_removed_by_hand() {
+    let scratch = Scratch::new("hand-alias");
+    first_lines_skill(&scratch);
+    let mut brain = mutable(&scratch);
+
+    // Stored the way a learned name is (ADR 12): lower case, `-` as `_`.
+    let done = hand::alias(&mut brain, &alias_edit("first-lines", "count", "Line-Count", false)).unwrap();
+    assert_eq!(done.refused, None);
+    assert_eq!(done.message, "line_count is now another name for {count} in first-lines.");
+    assert_eq!(aliases(&scratch.brain, "first-lines", "count"), ["line_count"]);
+    assert_eq!(
+        (done.json["alias"].as_str(), done.json["changed"].as_bool(), done.json["writtenTo"].as_str()),
+        (Some("line_count"), Some(true), Some("global"))
+    );
+
+    // The parser reads it at once, with no model: an unexpected call would panic.
+    let (models, _) = models(|_| decision("first-lines", 0.9, 0.9, SAFE), no_language_model());
+    let options = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "top of the notes line_count=2", &mut Script::default(), &options);
+    assert_eq!(outcome.commands, ["head -n 2 notes.txt"]);
+
+    // Again, in another spelling: nothing changes, and it is not a refusal.
+    let again = hand::alias(&mut brain, &alias_edit("first-lines", "count", "LINE_COUNT", false)).unwrap();
+    assert_eq!((again.refused, again.json["changed"].as_bool()), (None, Some(false)));
+    assert_eq!(hand::alias(&mut brain, &alias_edit("first-lines", "count", "count", false)).unwrap().refused, None);
+
+    let refusals = [
+        (alias_edit("no-such-skill", "count", "n", false), hand::SKILL_NOT_FOUND),
+        (alias_edit("first-lines", "lines", "n", false), hand::SLOT_NOT_FOUND),
+        (alias_edit("first-lines", "count", "how many", false), hand::ALIAS_INVALID),
+        (alias_edit("first-lines", "count", "n", true), hand::ALIAS_NOT_FOUND),
+        (alias_edit("first-lines", "count", "count", true), hand::ALIAS_NOT_FOUND),
+        (alias_edit("list-files", "directory", "dir", false), hand::SLOT_NOT_FOUND),
+    ];
+    for (edit, code) in refusals {
+        let done = hand::alias(&mut brain, &edit).unwrap();
+        assert_eq!(done.refused, Some(code), "{edit:?}: {}", done.message);
+    }
+    assert_eq!(aliases(&scratch.brain, "first-lines", "count"), ["line_count"], "a refusal writes nothing");
+
+    // A slot keeps at most eight other names.
+    for name in ["n", "lines", "num", "how_many", "rows", "top", "k"] {
+        assert_eq!(hand::alias(&mut brain, &alias_edit("first-lines", "count", name, false)).unwrap().refused, None);
+    }
+    let full = hand::alias(&mut brain, &alias_edit("first-lines", "count", "amount", false)).unwrap();
+    assert_eq!(full.refused, Some(hand::ALIASES_FULL));
+
+    // A dry run says what it would do and writes nothing.
+    let dry = AliasEdit { dry_run: true, ..alias_edit("first-lines", "n", "line_count", true) };
+    let done = hand::alias(&mut brain, &dry).unwrap();
+    assert!(done.message.starts_with("Dry run: nothing was written."), "{}", done.message);
+    assert_eq!(aliases(&scratch.brain, "first-lines", "count").len(), 8);
+    assert!(!done.json["aliases"].as_array().unwrap().contains(&json!("line_count")));
+
+    // Removed, with the slot named by any of its names and the alias in any spelling.
+    let done = hand::alias(&mut brain, &alias_edit("first-lines", "n", "Line-Count", true)).unwrap();
+    assert_eq!(done.message, "line_count is no longer another name for {count} in first-lines.");
+    assert!(!aliases(&scratch.brain, "first-lines", "count").contains(&"line_count".to_string()));
+    // So line_count= is a name the skill does not know again, and the agent is asked about it (ADR 12).
+    let no_slot = json!({ "arguments": [{ "name": "line_count", "placeholder": null }] });
+    let (asked, _) = self::models(|_| decision("first-lines", 0.9, 0.9, SAFE), vec![("argument_names", no_slot)]);
+    let outcome = go(&scratch, &asked, "top of the notes line_count=2", &mut Script::default(), &options);
+    assert_eq!(outcome.unknown_arguments, ["line_count"]);
+}
+
+#[test]
+fn a_phrasing_taught_to_the_wrong_skill_is_forgotten_and_kept_as_a_counter_example() {
+    let scratch = Scratch::new("hand-forget-phrase");
+    directory_size(&scratch.brain, "directory-size");
+    let mut brain = mutable(&scratch);
+
+    // A dry run first: nothing is written.
+    let dry = PhraseEdit { dry_run: true, ..phrase_edit("directory-size", "size of each file here") };
+    let done = hand::forget_phrase(&mut brain, &dry).unwrap();
+    assert_eq!(done.json["counterExamples"], json!(["size of each file here"]));
+    assert_eq!(lists(&scratch, "directory-size").1.len(), 0);
+
+    // Matched as phrasings are, without case or surrounding space; the stored text is what is kept.
+    let done = hand::forget_phrase(&mut brain, &phrase_edit("directory-size", "  Size of each file HERE ")).unwrap();
+    assert_eq!(done.refused, None);
+    assert_eq!(
+        done.message,
+        "\"size of each file here\" no longer means directory-size, and is kept as a counter-example so that it is not learned straight back."
+    );
+    assert_eq!(
+        lists(&scratch, "directory-size"),
+        (vec!["how big is this folder".to_string()], vec!["size of each file here".to_string()])
+    );
+    let shown = criteria(&scratch, &scratch.brain, "size of each file here");
+    assert_eq!(shown["directory-size"]["examples"], json!(["how big is this folder"]));
+    assert_eq!(shown["directory-size"]["doesNotApplyTo"], json!(["size of each file here"]));
+
+    // Asked again, it is already done; a phrasing the skill never had, or a skill that is not there, is refused.
+    let again = hand::forget_phrase(&mut brain, &phrase_edit("directory-size", "size of each file here")).unwrap();
+    assert_eq!((again.refused, again.json["changed"].as_bool()), (None, Some(false)));
+    let missing = hand::forget_phrase(&mut brain, &phrase_edit("directory-size", "disk usage")).unwrap();
+    assert_eq!(missing.refused, Some(hand::PHRASE_NOT_FOUND));
+    assert_eq!(
+        missing.message,
+        "directory-size has no phrasing \"disk usage\". Its phrasings are: \"how big is this folder\"."
+    );
+    let nothing = hand::forget_phrase(&mut brain, &phrase_edit("no-such-skill", "anything")).unwrap();
+    assert_eq!(nothing.refused, Some(hand::SKILL_NOT_FOUND));
+
+    // Teaching it back by hand lifts the counter-example, as for any phrasing.
+    scratch.brain.link_phrase("directory-size", "size of each file here").unwrap();
+    assert_eq!(lists(&scratch, "directory-size").1.len(), 0);
+}
+
+#[test]
+fn forgetting_a_global_phrasing_inside_a_project_stays_in_that_project() {
+    let scratch = Scratch::new("hand-forget-in-project");
+    directory_size(&scratch.brain, "directory-size");
+    let mut shop = in_project(&scratch, "shop");
+    let blog = in_project(&scratch, "blog");
+    let blog_before = criteria(&scratch, &blog, "size of each file here");
+
+    let done = hand::forget_phrase(&mut shop, &phrase_edit("directory-size", "size of each file here")).unwrap();
+    assert_eq!(done.json["writtenTo"], json!("project_lesson"));
+    assert!(
+        done.message.contains("in project shop") && done.message.contains("jli forget-phrase --global"),
+        "{}",
+        done.message
+    );
+    let in_shop = criteria(&scratch, &shop, "size of each file here");
+    assert_eq!(in_shop["directory-size"]["examples"], json!(["how big is this folder"]));
+    assert_eq!(in_shop["directory-size"]["doesNotApplyTo"], json!(["size of each file here"]));
+    // The global row is untouched, so every other project is shown what it was.
+    assert_eq!(lists(&scratch, "directory-size").0, ["how big is this folder", "size of each file here"]);
+    assert_eq!(criteria(&scratch, &blog, "size of each file here"), blog_before);
+
+    // A phrasing the project learned itself is the project's alone, and the message does not send anyone elsewhere.
+    shop.add_example("directory-size", "how much room does this take").unwrap();
+    let done = hand::forget_phrase(&mut shop, &phrase_edit("directory-size", "how much room does this take")).unwrap();
+    assert_eq!(done.json["writtenTo"], json!("project_lesson"));
+    assert!(!done.message.contains("other projects"), "{}", done.message);
+    assert!(!criteria(&scratch, &shop, "x")["directory-size"]["examples"].to_string().contains("room"));
+
+    // --global edits the row itself, for every project.
+    let everywhere = PhraseEdit { global: true, ..phrase_edit("directory-size", "how big is this folder") };
+    let done = hand::forget_phrase(&mut shop, &everywhere).unwrap();
+    assert_eq!((done.json["writtenTo"].as_str(), done.json["project"].as_str()), (Some("global"), Some("shop")));
+    assert_eq!(lists(&scratch, "directory-size").1, ["how big is this folder"]);
+    assert_eq!(criteria(&scratch, &blog, "x")["directory-size"]["doesNotApplyTo"], json!(["how big is this folder"]));
+
+    // A project's own skill is edited in its own row.
+    directory_size(&shop, "shop-size");
+    let done = hand::forget_phrase(&mut shop, &phrase_edit("shop-size", "size of each file here")).unwrap();
+    assert_eq!(done.json["writtenTo"], json!("project"));
+    assert_eq!(shop.project_skills().unwrap()[0].counter_examples, ["size of each file here"]);
+}
+
+#[test]
+fn an_alias_from_inside_a_project_is_kept_where_the_skill_is() {
+    let scratch = Scratch::new("hand-alias-in-project");
+    directory_size(&scratch.brain, "directory-size");
+    let mut shop = in_project(&scratch, "shop");
+
+    // A name for a value does not steer a route, so it goes to the global row, as a learned one does (ADR 17).
+    let done = hand::alias(&mut shop, &alias_edit("directory-size", "directory", "dir", false)).unwrap();
+    assert_eq!(done.json["writtenTo"], json!("global"));
+    assert_eq!(
+        done.message,
+        "dir is now another name for {directory} in directory-size. directory-size is a global skill, so this holds in every project."
+    );
+    assert_eq!(aliases(&scratch.brain, "directory-size", "directory"), ["dir"]);
+
+    // A project skill of the same label hides the global one: a plain edit is the project's, --global the global row's.
+    directory_size(&shop, "directory-size");
+    let done = hand::alias(&mut shop, &alias_edit("directory-size", "directory", "folder", false)).unwrap();
+    assert_eq!(done.json["writtenTo"], json!("project"));
+    assert_eq!(aliases(&shop, "directory-size", "directory"), ["folder"]);
+    assert_eq!(aliases(&scratch.brain, "directory-size", "directory"), ["dir"]);
+    let global = AliasEdit { global: true, ..alias_edit("directory-size", "directory", "dir", true) };
+    let done = hand::alias(&mut shop, &global).unwrap();
+    assert_eq!(done.message, "dir is no longer another name for {directory} in directory-size, in every project.");
+    assert!(aliases(&scratch.brain, "directory-size", "directory").is_empty());
+    assert_eq!(aliases(&shop, "directory-size", "directory"), ["folder"]);
+}
+
+#[test]
+fn a_hand_edit_never_reaches_another_users_skill() {
+    let scratch = Scratch::new("hand-users");
+    directory_size(&scratch.brain, "directory-size");
+    let mut agent = Brain::open_as(BrainConfig::file(&scratch.root.join("brain.db")), "agent").unwrap();
+    let refused = hand::alias(&mut agent, &alias_edit("directory-size", "directory", "dir", false)).unwrap();
+    assert_eq!(refused.refused, Some(hand::SKILL_NOT_FOUND), "another user's skill is not there to edit");
+
+    // A shared skill is the other user's own copy: an edit there stays there.
+    scratch.brain.share("directory-size", "agent").unwrap();
+    hand::alias(&mut agent, &alias_edit("directory-size", "directory", "dir", false)).unwrap();
+    hand::forget_phrase(&mut agent, &phrase_edit("directory-size", "size of each file here")).unwrap();
+    assert_eq!(aliases(&agent, "directory-size", "directory"), ["dir"]);
+    assert_eq!(agent.skill("directory-size").unwrap().unwrap().counter_examples, ["size of each file here"]);
+    assert!(aliases(&scratch.brain, "directory-size", "directory").is_empty());
+    assert_eq!(
+        lists(&scratch, "directory-size"),
+        (vec!["how big is this folder".to_string(), "size of each file here".to_string()], vec![])
+    );
+    assert_eq!(
+        agent.shared_from().unwrap().get("directory-size").map(String::as_str),
+        Some("default"),
+        "still shown as shared"
+    );
+}

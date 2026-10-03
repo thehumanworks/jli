@@ -8,6 +8,7 @@ use crate::args;
 use crate::demo::run_demo;
 use crate::eval;
 use crate::generalize::{generalize, GeneralizeOptions};
+use crate::hand;
 use crate::learn::{learn_phrase, LearnInput};
 use crate::plan::{self, PlanRecord, RunFlags};
 use crate::project::{self, Found};
@@ -64,6 +65,8 @@ fn help() -> String {
   jli run <planId> [<planId> …]        run plans (planId in --json) exactly as shown, in order, with no
                                        model call; stops at the first that fails. name=value fills a gap
   jli forget <label>                   delete a skill (inside a project, one of the project's: --global for the user's)
+  jli forget-phrase <label> <phrase>   take one phrasing back from a skill; it is kept as a counter-example
+  jli alias <label> <slot> <name>      give a slot another name for name=value (--remove takes one away)
   jli eval [<label>] [--limit N]       route every stored example with itself held out, and replay accepted
                                        requests: how often each skill comes home (System 1 calls, priced first)
   jli eval --optimise                  the agent rewrites the weakest rows; a rewrite is kept only if the
@@ -722,6 +725,16 @@ impl App {
         Ok(code)
     }
 
+    /// `jli alias` and `jli forget-phrase` (ADR 21): a sentence, or one JSON object; a refusal exits 1.
+    fn hand_edit(&mut self, flags: &Flags, edit: impl FnOnce(&mut Brain) -> Result<hand::Edited>) -> Result<i32> {
+        let done = edit(&mut self.brain)?;
+        if let Some(code) = done.refused {
+            return Ok(refuse(flags, code, &done.message));
+        }
+        say(if flags.json { serde_json::to_string_pretty(&done.json)? } else { done.message });
+        Ok(0)
+    }
+
     /// `jli fix`: bare, the last route run here; with an event id, that event, from anywhere.
     pub(crate) fn fix(&mut self, flags: &Flags, fix: Fix) -> Result<i32> {
         let here = cwd()?;
@@ -1093,6 +1106,21 @@ impl App {
         let plain: Vec<String> = others.iter().filter(|word| *word != "--global").cloned().collect();
         if first == "forget" && plain.len() == 1 {
             return self.forget(&plain[0], global);
+        }
+        if first == "alias" && rest.is_empty() {
+            match hand::alias_shape(others, flags.dry_run) {
+                Some(edit) => return self.hand_edit(flags, |brain| hand::alias(brain, &edit)),
+                None if others.iter().any(|word| word == "--remove" || word == "--global") => {
+                    return Ok(refuse(flags, USAGE, "Usage: jli alias [--remove] [--global] <label> <slot> <name>"))
+                }
+                None => {}
+            }
+        }
+        if first == "forget-phrase" {
+            return match hand::phrase_shape(others, flags.dry_run).filter(|_| rest.is_empty()) {
+                Some(edit) => self.hand_edit(flags, |brain| hand::forget_phrase(brain, &edit)),
+                None => Ok(refuse(flags, USAGE, "Usage: jli forget-phrase [--global] <label> \"<phrase>\"")),
+            };
         }
         if first == "eval" && rest.is_empty() {
             if let Some(code) = self.measure(others, flags)? {
