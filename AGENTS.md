@@ -14,14 +14,14 @@ mise run fix          # apply what the linters can fix
 ```
 
 The hooks run the same checks: `pre-commit` runs the linters and fixes what it can, `pre-push` adds
-`cargo test`. Do not skip them with `--no-verify`. A commit that fails them is not done.
+`cargo test --workspace`. Do not skip them with `--no-verify`. A commit that fails them is not done.
 
 | Check | Command | What it holds |
 | --- | --- | --- |
 | Format | `cargo fmt --check` | `rustfmt.toml`: 125 columns |
-| Lints | `cargo clippy --all-targets -- -D warnings` | `[lints]` in `Cargo.toml`: no `unsafe`, no `unwrap()`, `panic!`, `todo!` or `dbg!` outside tests |
+| Lints | `cargo clippy --workspace --all-targets -- -D warnings` | `[workspace.lints]` in `Cargo.toml`: no `unsafe`, no `unwrap()`, `panic!`, `todo!` or `dbg!` outside tests |
 | Architecture | `ast-grep scan --error` | `rules/*.yml`: one rule per boundary an ADR draws |
-| Behaviour | `cargo test` | the router and the learning loop, offline, against fake models |
+| Behaviour | `cargo test --workspace` | the router and the learning loop, offline, against fake models; and `chatgpt-sdk`, against a fake ChatGPT |
 
 ## Rules that are not negotiable
 
@@ -29,9 +29,15 @@ The hooks run the same checks: `pre-commit` runs the linters and fixes what it c
   keyboard. A test never calls a network API, and an unexpected language model call panics. Every
   change to routing, learning, slots or storage comes with a test there or in the module's own
   `tests`.
-- **Live runs use a scratch brain.** Set `JLI_DB_URL=file:<scratch dir>/brain.db` and run inside a
-  scratch directory. Never touch `~/.jli/brain.db`. Unset `JLI_YES` and `JLI_YOLO` first: with
-  `JLI_YOLO=1` in the environment a destructive command runs without asking.
+- **Live runs use a scratch brain.** Set `JLI_DB_URL=file:<scratch dir>/brain.db` and
+  `JLI_CHATGPT_DIR=<scratch dir>/chatgpt`, and run inside a scratch directory. Never touch
+  `~/.jli/brain.db` or `~/.jli/chatgpt`. Unset `JLI_YES` and `JLI_YOLO` first: with `JLI_YOLO=1` in
+  the environment a destructive command runs without asking. To run the models on a ChatGPT plan
+  without a browser, `jli login --codex` uses the Codex CLI's sign-in, read only.
+- **`crates/chatgpt-sdk` is a library of its own** ([ADR 25](docs/adr/0025-chatgpt-plan.md)), kept
+  to the standard of a published crate: every public item documented, tests in the crate, and its
+  live tests `#[ignore]`d (`cargo test -p chatgpt-sdk --test live -- --ignored`). jli uses it only
+  from `src/llm.rs` and `src/account.rs`.
 - **Storage is additive** ([ADR 2](docs/adr/0002-brain-in-libsql.md)). Never `INSERT OR REPLACE` a
   skill, never drop or rename a column, and write new fields so that a row without them reads as
   before (`#[serde(default, skip_serializing_if = …)]`). Several hosts and versions share one brain.

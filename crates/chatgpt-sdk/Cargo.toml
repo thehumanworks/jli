@@ -5,6 +5,7 @@ edition = "2021"
 rust-version = "1.89"
 description = "Sign in with ChatGPT, and run Responses API requests on the user's ChatGPT plan"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/thehumanworks/jli"
 readme = "README.md"
 keywords = ["chatgpt", "openai", "oauth", "responses", "llm"]
 categories = ["api-bindings", "authentication", "web-programming::http-client"]
@@ -32,8 +33,12 @@ required-features = ["ureq"]
 name = "live"
 required-features = ["ureq"]
 
+[[test]]
+name = "sign_in"
+required-features = ["testing"]
+
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 percent-encoding = "2"
 ring = "0.17"
@@ -43,7 +48,8 @@ thiserror = "2"
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip"], optional = true }
 
 [dev-dependencies]
-# The integration tests use the fake from the `testing` feature.
+# The integration tests use the fake from the `testing` feature. A path-only dev-dependency is left
+# out of the published package, where `required-features` skips the test instead.
 chatgpt-sdk = { path = ".", features = ["testing"] }
 
 [package.metadata.docs.rs]

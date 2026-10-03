@@ -38,6 +38,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [25](0025-command-help.md) | `--help` before `--` is jli's own help, each command has its own from one table, and a choice is shown by its name |
 | [26](0026-project-flag.md) | `--project` names the project a command acts on, from any directory |
 | [27](0027-quiet.md) | A quiet run hides the trace, keeps its warnings, and still shows what a question asks about |
+| [28](0028-chatgpt-plan.md) | The agent and the translator can run on the user's ChatGPT plan, through a crate of jli's own |
 
 ## Known gaps, by record
 
@@ -125,3 +126,11 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   command or the plan it stored; the agent's answer to a request that is not a command, and System 1's
   "not a command", are hidden under `--quiet`; and `jli fix` prints its learned and dry-run lines
   under `--quiet` and `--json`.
+- [28](0028-chatgpt-plan.md): `jli login` has not completed live, since the authorization endpoint
+  refuses a scripted browser, so the public `api.openai.com/v1` route has not been called with such a
+  token; only Codex's sign-in on the Codex backend ran live, a route that is not the documented one
+  and whose model list depends on an aging `client_version`; refreshing Codex's sign-in has run
+  offline only; the prompts were measured on Mercury, and on `gpt-6-luna` only the acceptance checks,
+  the benchmark and about twenty agent requests ran; the model is chosen per host, not per user or
+  project; a printed sign-in URL carries the saved ID token as a hint; and an older jli ignores the
+  sign-in.

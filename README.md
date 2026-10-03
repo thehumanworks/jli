@@ -16,11 +16,12 @@ Two models, the way people think about fast and slow thinking.
 - **System 1** is TypeSafe's `jev` decision model. One call, about 250 ms, answers three typed
   questions against the request: a `choice` over every known skill, a `noul` on whether a command is
   wanted at all, and a `score` on how risky the intent is.
-- **System 2** is a reasoning agent, Mercury 2.5 by default (about 2 s). It is only called when
-  System 1 has no confident answer. It proposes a reusable skill, not a one-off command.
-- **The translator** is a fast model, Mercury 2.5 by default (under 1 s). It never sits on the
-  request path. It rewrites what you teach into a general matrix row, and in auto mode it diagnoses
-  failures and suggests alternatives.
+- **System 2** is a reasoning agent: GPT-6-Luna on your ChatGPT plan after `jli login` (about 3 s),
+  or Mercury 2.5 with an API key (about 2 s). It is only called when System 1 has no confident
+  answer. It proposes a reusable skill, not a one-off command.
+- **The translator** is a fast model, the same one (2 to 5 s on the plan, under 1 s for Mercury). It
+  never sits on the request path. It rewrites what you teach into a general matrix row, and in auto
+  mode it diagnoses failures and suggests alternatives.
 - **The brain** is a SQLite database. Each row is a skill. The rows are rendered into the `choice`
   criteria on every request, so the decision matrix *is* the database.
 
@@ -136,15 +137,16 @@ across hosts), `JLI_THRESHOLD=0.7` (`JLI_CONFIDENCE` also works), or `--confiden
 
 ```sh
 export TYPESAFE_API_KEY=…      # System 1
-export OPENROUTER_API_KEY=…    # System 2 and the translator (here it is injected by fnox)
 
 cargo build --release          # the binary is target/release/jli
 cargo install --path .         # optional: puts `jli` on your PATH
+jli login                      # System 2 and the translator on your ChatGPT plan, or:
+export OPENROUTER_API_KEY=…    # on OpenRouter instead (here it is injected by fnox)
 jli demo                       # watch a fresh brain learn in a throwaway git repo
 jli which branch am I on
 jli                            # interactive session
 jli help
-cargo test                     # offline: System 1 and the language models are faked
+cargo test --workspace         # offline: System 1, the language models and ChatGPT are faked
 ```
 
 The demo asks five things, then asks them again in different words. In a real run, three requests
@@ -163,6 +165,12 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | `jli -q <request>` | hide the decision trace; a question still shows what it asks about (also `--quiet`, `JLI_QUIET=1`) |
 | `jli config confidence <0..1>` | set the confidence threshold |
 | `jli config mode <manual\|semi\|auto>` | set the learning mode |
+| `jli config model <slug>` | the model the agent and the translator run on your ChatGPT plan, from `jli models`; kept on this host |
+| `jli login` | continue with ChatGPT in the browser: the agent and the translator run on your ChatGPT plan |
+| `jli login --new` | the same with another ChatGPT account than the one saved here |
+| `jli login --codex` | use the ChatGPT account the Codex CLI is signed in with |
+| `jli logout` | stop using your ChatGPT plan; jli's session with it is revoked |
+| `jli models` | the models your ChatGPT plan has, the one in use marked |
 | `jli --json <request>` | machine-readable outcome with captured output, for agents; an error is one JSON object too |
 | `jli run <planId> [<planId> …] [name=value …]` | run stored plans exactly as shown, in order, with no model call; stop at the first that fails |
 | `jli skills` | every skill, with learned phrasings and counter-examples |
@@ -425,7 +433,9 @@ no `--project`. See [ADR 26](docs/adr/0026-project-flag.md).
 | `src/learn.rs` | writes a row once System 1 has verified it, or makes a literal skill general in place, and settles a skill the agent proposed |
 | `src/eval.rs` | measures the matrix against its own examples and history, optimises it, and checks a new row against its closest skills |
 | `src/suggest.rs` | auto mode: diagnoses a failure and offers alternatives |
-| `src/llm.rs` | the one HTTP call every language model request goes through |
+| `src/llm.rs` | where every language model request goes: one HTTP call to an API-key endpoint, or a Responses request on a ChatGPT plan |
+| `src/account.rs` | `jli login`, `jli logout`, `jli models` and the model on the plan, kept on this host in `~/.jli/chatgpt` |
+| `crates/chatgpt-sdk/` | a library of its own: Sign in with ChatGPT, saved credentials, Codex's sign-in, and streamed Responses requests, with typed errors |
 | `src/router.rs` | the loop: decide, escalate, confirm, run, write back; and a stored plan through the same confirmation and write-back |
 | `src/plan.rs` | plans: what a route pins, and `jli run` |
 | `src/store.rs` | the brain: skills, events, settings, plans and corrections per user and project in libSQL, behind a runtime that never leaves the module |
@@ -453,15 +463,44 @@ The app makes two kinds of HTTP call and uses one database. It is synchronous th
 
 - **Language models:** `POST {base}/chat/completions` in the OpenAI-compatible shape, with a
   `response_format` of type `json_schema`, sent with `ureq`. Schemas are plain JSON Schema objects
-  in the source. `JLI_LLM_BASE_URL` with `JLI_LLM_API_KEY` is used when both are set, then
-  OpenRouter when `OPENROUTER_API_KEY` is set, then the Vercel AI Gateway.
+  in the source. `JLI_LLM_BASE_URL` with `JLI_LLM_API_KEY` is used when both are set, then your
+  ChatGPT plan once you have run `jli login`, then OpenRouter when `OPENROUTER_API_KEY` is set, then
+  the Vercel AI Gateway. `JLI_PROVIDER=chatgpt|openrouter|gateway|custom` picks one instead.
+- **Your ChatGPT plan:** the same prompts and schemas as a streamed, unstored Responses request,
+  through the `chatgpt-sdk` crate in `crates/`. After `jli login` it goes to
+  `https://api.openai.com/v1/responses`; after `jli login --codex`, with the Codex CLI's sign-in, to
+  the Codex backend. The trace says `using ChatGPT plan`, and a usage limit stops the run with a link
+  to <https://chatgpt.com/settings/usage>. See [ADR 25](docs/adr/0025-chatgpt-plan.md).
 - **System 1:** `POST https://api.typesafe.ai/v1/systemone` with `{ model, state, questions }`,
   through the `typesafe-jev` crate, with a 10 second timeout and two retries.
 - **Storage:** libSQL through its first-party crate. It is async, so `store.rs` owns a
   current-thread Tokio runtime and blocks on it; nothing outside that module is async.
 
-Models are set with `JLI_AGENT_MODEL` (default `inception/mercury-2.5`) and `JLI_TRANSLATOR_MODEL`
-(default `inception/mercury-2.5`).
+Models are set with `JLI_AGENT_MODEL` and `JLI_TRANSLATOR_MODEL`. Without them, both are
+`gpt-6-luna` on a ChatGPT plan (or what `jli config model` picked) and `inception/mercury-2.5`
+with an API key.
+
+## Your ChatGPT plan
+
+```
+$ jli login
+  Continue with ChatGPT in the browser that just opened.
+Signed in with ChatGPT as you@example.com.
+The agent and the translator now run on gpt-6-luna using your ChatGPT plan. jli models lists the others.
+$ jli models
+  gpt-6.1-sol  GPT-6.1-Sol
+  gpt-6-luna   GPT-6-Luna  ← in use
+  …
+$ jli config model gpt-6.1-sol
+```
+
+`jli login` registers jli with your ChatGPT account in the browser, the first time, and signs in to
+it again after that; it asks to use your plan for jli's requests, and nothing changes if you say no.
+The sign-in is kept on this host only, in `~/.jli/chatgpt` (`JLI_CHATGPT_DIR`), never in the brain.
+If the Codex CLI is signed in, `jli login --codex` uses its account instead, and leaves Codex's file
+as it is. `jli logout` stops, and `jli login --new` adds another account. Requests count toward your
+plan's usage; review and limit them at <https://chatgpt.com/settings/usage>. System 1 still needs
+`TYPESAFE_API_KEY`.
 
 ## Contributing
 

@@ -1,6 +1,8 @@
 # 4. Language models are reached with one OpenAI-compatible HTTP call and strict JSON Schemas
 
-- Status: accepted
+- Status: accepted; superseded in part by [ADR 25](0025-chatgpt-plan.md), which adds the user's
+  ChatGPT plan, reached with a streamed Responses request through `chatgpt-sdk`, puts it before
+  OpenRouter, and retries only failures that are temporary there
 - Date: 2026-10-02
 - Origin: the TypeScript prototype; ported to `ureq` unchanged
 
