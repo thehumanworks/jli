@@ -8,7 +8,9 @@
   declined route as its own event, and counts the suggester in `msSystem2`;
   and by [ADR 18](0018-agent-contract.md), under which a dry run stores a plan (and still writes no
   skill and logs no event), `jli run` and `jli fix <eventId>` join the CLI, the `--json` outcome gains
-  fields, and an error under `--json` prints one JSON object
+  fields, and an error under `--json` prints one JSON object;
+  and by [ADR 25](0025-command-help.md), under which a line with `--help` or `-h` before `--` is
+  jli's help and never a request, and each command has its own help
 - Date: 2026-10-02
 - Origin: the TypeScript prototype; kept unchanged by the Rust port
 

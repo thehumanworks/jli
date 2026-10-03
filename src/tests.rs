@@ -1609,6 +1609,21 @@ fn quiet_flags() -> Flags {
     Flags::quiet()
 }
 
+#[test]
+fn words_that_ask_for_help_are_never_routed() {
+    let scratch = Scratch::new("help");
+    // System 1 and every language model panic: a request routed here would fail the test.
+    let (silent, _) = models(|_| panic!("help asks no model"), no_language_model());
+    let mut app = app(&scratch, "default", silent);
+    for asked in
+        [&["skills", "--help"][..], &["slot", "-h"][..], &["deploy", "the", "app", "--help"][..], &["help", "eval"][..]]
+    {
+        let words: Vec<String> = asked.iter().map(|word| word.to_string()).collect();
+        assert_eq!(app.dispatch(&quiet_flags(), &words, &[]).unwrap(), 0, "{asked:?}");
+    }
+    assert!(scratch.brain.events(10).unwrap().is_empty(), "nothing was routed or logged");
+}
+
 fn lists(scratch: &Scratch, label: &str) -> (Vec<String>, Vec<String>) {
     let skill = scratch.brain.skill(label).unwrap().unwrap();
     (skill.examples, skill.counter_examples)
@@ -3127,6 +3142,30 @@ fn a_placeholder_is_given_choices_and_a_default_by_hand() {
     assert_eq!(go(&scratch, &models, "a debug build", &mut Script::default(), &dry).commands, ["echo build"]);
     let again = hand::slot(&mut brain, &edit).unwrap();
     assert!(again.message.ends_with("Nothing was changed."), "{}", again.message);
+}
+
+#[test]
+fn a_choice_given_by_its_name_alone_puts_that_name_in_the_command() {
+    let scratch = Scratch::new("hand-slot-plain");
+    let (label, _) = scratch.brain.learn_command("install the app", &["echo install {profile}".into()], Risk::Safe).unwrap();
+    // As a person writes it: jli slot <label> profile --choice=release --choice=debug --default=release.
+    let words: Vec<String> = [label.as_str(), "profile", "--choice=release", "--choice=debug", "--default=release"]
+        .iter()
+        .map(|word| word.to_string())
+        .collect();
+    let edit = hand::slot_shape(&words, false).unwrap();
+    let choices: Vec<(&str, &str)> =
+        edit.choices.iter().flatten().map(|choice| (choice.value.as_str(), choice.text.as_str())).collect();
+    assert_eq!(choices, [("release", "release"), ("debug", "debug")], "a choice's text is its name");
+    let done = hand::slot(&mut mutable(&scratch), &edit).unwrap();
+    assert_eq!(done.refused, None, "the default is one of the choices: {}", done.message);
+    assert_eq!(done.message, format!("{{profile}} in {label} is now a slot: release, debug; default release."));
+
+    let to = label.clone();
+    let (models, _) = models(move |_| decision(&to, 0.9, 0.9, SAFE), no_language_model());
+    let dry = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    assert_eq!(go(&scratch, &models, "install the app", &mut Script::default(), &dry).commands, ["echo install release"]);
+    assert_eq!(go(&scratch, &models, "a debug install", &mut Script::default(), &dry).commands, ["echo install debug"]);
 }
 
 #[test]

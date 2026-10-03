@@ -9,6 +9,7 @@ use crate::demo::run_demo;
 use crate::eval;
 use crate::generalize::{generalize, GeneralizeOptions};
 use crate::hand;
+use crate::help;
 use crate::learn::{learn_phrase, LearnInput};
 use crate::plan::{self, PlanRecord, RunFlags};
 use crate::project::{self, Found};
@@ -22,90 +23,6 @@ use crate::store::{user_id, Brain, BrainConfig, Correction, Shared, DEFAULT_USER
 use crate::types::{coded, error_code, BrainEvent, Mode, Path, Risk, CONFIGURATION, DEFAULT_MODE, USAGE};
 use crate::ui::{bar, c, duration, risk_tag, sparkline, Prompt, Terminal, Ui};
 use crate::Models;
-
-fn help() -> String {
-    format!(
-        "{}  say what you want, it runs the command, and it learns how you say it
-
-{}
-  jli <request in plain language>      route, run, learn
-  jli                                  interactive session
-
-{}
-  -n, --dry-run    show what would run, execute nothing, learn nothing; keep it as a plan for jli run
-  -y, --yes        run without asking (never approves destructive commands)
-  -Y, --yolo       run without asking, destructive commands included
-      --confidence=N   use System 1's pick at or above N for this run (0 to 1)
-      --mode=M         learning mode for this run: manual, semi or auto
-  -q, --quiet      hide the decision trace
-      --json       print the outcome as JSON (for agents); command output is captured
-      --agent      skip the decision model and ask the reasoning agent directly
-      --user-id=ID     whose skills, history and settings to use (default \"default\")
-
-{}
-  jli commit message=\"fix the parser\"  name=value goes straight to the command's {{message}} slot
-  jli commit with message: fix it      so does the slot's name with a colon, or any \"quoted text\"
-  jli go to dir=src                    another name for a slot is worked out once by the agent, then kept
-  Stated values are passed as written, by no model, and never influence which command is picked.
-
-{}
-  jli skills                           what it knows, and the phrasings it learned
-  jli stats                            how much it has learned
-  jli history                          recent requests and how they were routed
-  jli teach \"<phrase>\" -- <command>    link a phrase to a command (repeat to add more phrasings)
-  jli teach --global \"<phrase>\" -- …  the same, for every project, from inside one
-  jli config                           show settings
-  jli config confidence <0..1>         confidence System 1 needs before its pick is used (default 0.5)
-  jli config mode <manual|semi|auto>   who does the teaching (default semi)
-  jli fix                              the last command run here was wrong: unlearn it and try again
-  jli fix <eventId>                    the same for that event (eventId in --json), from anywhere
-  jli fix <eventId> -- <command>       that was wrong, this is right: learn it, and return a plan of it
-  jli fix <eventId> --expected <words> ask the agent again with what you expected, and return a plan
-                                       (add --run to either to run the correction instead)
-  jli run <planId> [<planId> …]        run plans (planId in --json) exactly as shown, in order, with no
-                                       model call; stops at the first that fails. name=value fills a gap
-  jli forget <label>                   delete a skill (inside a project, one of the project's: --global for the user's)
-  jli forget-phrase <label> <phrase>   take one phrasing back from a skill; it is kept as a counter-example
-  jli alias <label> <slot> <name>      give a slot another name for name=value (--remove takes one away)
-  jli slot <label> <slot> <setting>…   how a slot is filled and written; each setting is written with =
-      --default=<value>                the value it takes when the request names none (--default= for none)
-      --optional | --required          whether it, and its --flag=<flag>, may be left out of the command
-      --choice=<value>=<text> …        the only values it takes, each with what it puts in the command
-                                       (--choice=debug= puts nothing; --no-choices takes them away)
-  jli eval [<label>] [--limit N]       route every stored example with itself held out, and replay accepted
-                                       requests: how often each skill comes home (System 1 calls, priced first)
-  jli eval --optimise                  the agent rewrites the weakest rows; a rewrite is kept only if the
-                                       measurement improves (--max-skills=3, --max-calls=400)
-  jli eval -n [--optimise]             measure, and show the rewrites and their effect, but write nothing:
-                                       no summary is stored and no rewrite is applied
-  jli eval undo [<label>]              put back what the last optimisation changed
-  jli share <label> --to <user>        give another user a copy of one of your skills
-  jli project                          the project this directory is in, from the nearest .jlirc
-  jli project init [<id>]              make this directory a project: what is learned here stays here
-  jli generalize [<label>]             propose making project skills global; each is written only once you approve
-      --all-projects   every project's skills · --approve-all  write what passes the checks unasked · -n  only show
-  jli sync                             sync the local replica with the cloud brain
-  jli shell-init [zsh|bash|fish]       the shell function that lets jli cd and export in your shell:
-                                       eval \"$(jli shell-init zsh)\" in ~/.zshrc
-  jli demo                             watch it learn in a sandbox (about 12 API calls)
-
-{}
-  JLI_DB_URL     file:/path/brain.db (default ~/.jli/brain.db) or libsql://… for a cloud brain
-  JLI_SYNC_URL   libsql://… keeps a local replica in sync with a cloud brain
-  JLI_DB_TOKEN   auth token for the cloud brain
-  JLI_USER_ID    the same as --user-id= (the flag wins)
-  JLI_YES        1 or true: the same as --yes
-  JLI_YOLO       1 or true: the same as --yolo
-  JLI_THRESHOLD  0 to 1: the same as --confidence= (JLI_CONFIDENCE also works)
-",
-        c::bold("jli"),
-        c::bold("Usage"),
-        c::bold("Options"),
-        c::bold("Arguments"),
-        c::bold("The brain"),
-        c::bold("Storage"),
-    )
-}
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Flags {
@@ -1064,10 +981,16 @@ impl App {
         Ok(Some(0))
     }
 
-    fn dispatch(&mut self, flags: &Flags, words: &[String], rest: &[String]) -> Result<i32> {
+    pub(crate) fn dispatch(&mut self, flags: &Flags, words: &[String], rest: &[String]) -> Result<i32> {
+        // `run` answers help before the brain is opened; this keeps words that ask for it from ever
+        // being routed as a request (ADR 25).
+        if let Some(text) = help::asked(words) {
+            say(text);
+            return Ok(0);
+        }
         let Some((first, others)) = words.split_first() else {
             if !self.terminal.interactive() {
-                say(help());
+                say(help::full());
                 return Ok(0);
             }
             self.repl(flags)?;
@@ -1211,14 +1134,15 @@ fn shell_init(name: Option<&str>) -> Result<i32> {
 }
 
 fn run(argv: &[String]) -> Result<i32> {
+    // Before a flag can fail to parse, and with no brain opened and no model asked (ADR 25).
+    if let Some(text) = help::asked(argv) {
+        say(text);
+        return Ok(0);
+    }
     let Parsed { mut flags, words, rest } = parse(argv).map_err(|error| coded(USAGE, format!("{error:#}")))?;
     flags.yes |= switched_on(env, "JLI_YES");
     flags.yolo |= switched_on(env, "JLI_YOLO");
     let first = words.first().map(String::as_str);
-    if matches!(first, Some("help" | "--help" | "-h")) {
-        say(help());
-        return Ok(0);
-    }
     let user = resolve_user(&flags, env).map_err(configuration)?;
     if first == Some("demo") && words.len() == 1 {
         return run_demo(&user);
