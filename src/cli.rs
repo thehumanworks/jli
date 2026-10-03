@@ -9,6 +9,7 @@ use crate::demo::run_demo;
 use crate::eval;
 use crate::generalize::{generalize, GeneralizeOptions};
 use crate::hand;
+use crate::help;
 use crate::learn::{learn_phrase, LearnInput};
 use crate::plan::{self, PlanRecord, RunFlags};
 use crate::project::{self, Found};
@@ -22,90 +23,6 @@ use crate::store::{user_id, Brain, BrainConfig, Correction, Shared, DEFAULT_USER
 use crate::types::{coded, error_code, BrainEvent, Mode, Path, Risk, CONFIGURATION, DEFAULT_MODE, USAGE};
 use crate::ui::{bar, c, duration, risk_tag, sparkline, Prompt, Terminal, Ui};
 use crate::Models;
-
-fn help() -> String {
-    format!(
-        "{}  say what you want, it runs the command, and it learns how you say it
-
-{}
-  jli <request in plain language>      route, run, learn
-  jli                                  interactive session
-
-{}
-  -n, --dry-run    show what would run, execute nothing, learn nothing; keep it as a plan for jli run
-  -y, --yes        run without asking (never approves destructive commands)
-  -Y, --yolo       run without asking, destructive commands included
-      --confidence=N   use System 1's pick at or above N for this run (0 to 1)
-      --mode=M         learning mode for this run: manual, semi or auto
-  -q, --quiet      hide the decision trace
-      --json       print the outcome as JSON (for agents); command output is captured
-      --agent      skip the decision model and ask the reasoning agent directly
-      --user-id=ID     whose skills, history and settings to use (default \"default\")
-
-{}
-  jli commit message=\"fix the parser\"  name=value goes straight to the command's {{message}} slot
-  jli commit with message: fix it      so does the slot's name with a colon, or any \"quoted text\"
-  jli go to dir=src                    another name for a slot is worked out once by the agent, then kept
-  Stated values are passed as written, by no model, and never influence which command is picked.
-
-{}
-  jli skills                           what it knows, and the phrasings it learned
-  jli stats                            how much it has learned
-  jli history                          recent requests and how they were routed
-  jli teach \"<phrase>\" -- <command>    link a phrase to a command (repeat to add more phrasings)
-  jli teach --global \"<phrase>\" -- …  the same, for every project, from inside one
-  jli config                           show settings
-  jli config confidence <0..1>         confidence System 1 needs before its pick is used (default 0.5)
-  jli config mode <manual|semi|auto>   who does the teaching (default semi)
-  jli fix                              the last command run here was wrong: unlearn it and try again
-  jli fix <eventId>                    the same for that event (eventId in --json), from anywhere
-  jli fix <eventId> -- <command>       that was wrong, this is right: learn it, and return a plan of it
-  jli fix <eventId> --expected <words> ask the agent again with what you expected, and return a plan
-                                       (add --run to either to run the correction instead)
-  jli run <planId> [<planId> …]        run plans (planId in --json) exactly as shown, in order, with no
-                                       model call; stops at the first that fails. name=value fills a gap
-  jli forget <label>                   delete a skill (inside a project, one of the project's: --global for the user's)
-  jli forget-phrase <label> <phrase>   take one phrasing back from a skill; it is kept as a counter-example
-  jli alias <label> <slot> <name>      give a slot another name for name=value (--remove takes one away)
-  jli slot <label> <slot> <setting>…   how a slot is filled and written; each setting is written with =
-      --default=<value>                the value it takes when the request names none (--default= for none)
-      --optional | --required          whether it, and its --flag=<flag>, may be left out of the command
-      --choice=<value>=<text> …        the only values it takes, each with what it puts in the command
-                                       (--choice=debug= puts nothing; --no-choices takes them away)
-  jli eval [<label>] [--limit N]       route every stored example with itself held out, and replay accepted
-                                       requests: how often each skill comes home (System 1 calls, priced first)
-  jli eval --optimise                  the agent rewrites the weakest rows; a rewrite is kept only if the
-                                       measurement improves (--max-skills=3, --max-calls=400)
-  jli eval -n [--optimise]             measure, and show the rewrites and their effect, but write nothing:
-                                       no summary is stored and no rewrite is applied
-  jli eval undo [<label>]              put back what the last optimisation changed
-  jli share <label> --to <user>        give another user a copy of one of your skills
-  jli project                          the project this directory is in, from the nearest .jlirc
-  jli project init [<id>]              make this directory a project: what is learned here stays here
-  jli generalize [<label>]             propose making project skills global; each is written only once you approve
-      --all-projects   every project's skills · --approve-all  write what passes the checks unasked · -n  only show
-  jli sync                             sync the local replica with the cloud brain
-  jli shell-init [zsh|bash|fish]       the shell function that lets jli cd and export in your shell:
-                                       eval \"$(jli shell-init zsh)\" in ~/.zshrc
-  jli demo                             watch it learn in a sandbox (about 12 API calls)
-
-{}
-  JLI_DB_URL     file:/path/brain.db (default ~/.jli/brain.db) or libsql://… for a cloud brain
-  JLI_SYNC_URL   libsql://… keeps a local replica in sync with a cloud brain
-  JLI_DB_TOKEN   auth token for the cloud brain
-  JLI_USER_ID    the same as --user-id= (the flag wins)
-  JLI_YES        1 or true: the same as --yes
-  JLI_YOLO       1 or true: the same as --yolo
-  JLI_THRESHOLD  0 to 1: the same as --confidence= (JLI_CONFIDENCE also works)
-",
-        c::bold("jli"),
-        c::bold("Usage"),
-        c::bold("Options"),
-        c::bold("Arguments"),
-        c::bold("The brain"),
-        c::bold("Storage"),
-    )
-}
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Flags {
@@ -136,6 +53,11 @@ pub(crate) enum ProjectFlag {
 }
 
 impl Flags {
+    /// The trace of a route: `--quiet` keeps its warnings, `--json` hides them too.
+    pub(crate) fn ui(&self) -> Ui {
+        Ui::of(self.quiet, self.json)
+    }
+
     /// No flags but `--quiet`, for tests that drive a subcommand.
     #[cfg(test)]
     pub(crate) fn quiet() -> Flags {
@@ -208,6 +130,14 @@ fn resolve_user(flags: &Flags, lookup: impl Fn(&str) -> Option<String>) -> Resul
 /// An on/off environment variable: 1 or true (any case) turns it on. Anything else is ignored.
 fn switched_on(lookup: impl Fn(&str) -> Option<String>, name: &str) -> bool {
     lookup(name).is_some_and(|value| matches!(value.trim().to_lowercase().as_str(), "1" | "true"))
+}
+
+/// `JLI_YES`, `JLI_YOLO` and `JLI_QUIET` turn on their flags. The environment never turns a flag off.
+pub(crate) fn switches_from(mut flags: Flags, lookup: impl Fn(&str) -> Option<String>) -> Flags {
+    flags.yes |= switched_on(&lookup, "JLI_YES");
+    flags.yolo |= switched_on(&lookup, "JLI_YOLO");
+    flags.quiet |= switched_on(&lookup, "JLI_QUIET");
+    flags
 }
 
 pub(crate) struct Parsed {
@@ -404,7 +334,7 @@ impl App {
         clarification: Option<String>,
         cwd: PathBuf,
     ) -> Result<Outcome> {
-        let ui = Ui::new(!flags.quiet && !flags.json);
+        let ui = flags.ui();
         let threshold = resolve_threshold(&self.brain, flags).map_err(configuration)?;
         let options = RouteOptions {
             yes: flags.yes,
@@ -666,7 +596,8 @@ impl App {
             threshold: resolve_threshold(&self.brain, flags)?,
             cwd: cwd()?,
         };
-        let (models, ui) = (&self.models, Ui::new(!flags.quiet));
+        // Teaching has no JSON outcome, so --json leaves its trace on.
+        let (models, ui) = (&self.models, Ui::of(flags.quiet, false));
         let teach = |brain: &Brain| -> Result<_> {
             let learned = learn_phrase(brain, models, &input, &ui)?;
             let skill = brain.skill(&learned.label)?;
@@ -838,7 +769,8 @@ impl App {
                 }
             }
         }
-        let ui = Ui::new(!flags.quiet);
+        // generalize has no JSON outcome, so --json leaves its trace on.
+        let ui = Ui::of(flags.quiet, false);
         let done = generalize(&self.brain, &self.models, &options, &ui, &mut self.terminal)?;
         Ok(if done.nothing { 1 } else { 0 })
     }
@@ -967,7 +899,7 @@ impl App {
             }
             return Ok(0);
         }
-        let ui = Ui::new(!flags.quiet && !flags.json);
+        let ui = flags.ui();
         let options = RouteOptions::new(
             at.clone(),
             resolve_threshold(&self.brain, flags).map_err(configuration)?,
@@ -1045,7 +977,7 @@ impl App {
 
     /// `jli run <planId> …`: each plan as stored, in order, until one fails or is refused.
     fn run_plans(&mut self, ids: &[i64], values: &[(String, String)], flags: &Flags) -> Result<i32> {
-        let ui = Ui::new(!flags.quiet && !flags.json);
+        let ui = flags.ui();
         let outcomes = plan::run_plans(
             &self.brain,
             &self.models,
@@ -1069,7 +1001,7 @@ impl App {
     /// `jli eval …`. Returns None when the words do not fit its shape, so they are a request instead.
     fn measure(&self, args: &[String], flags: &Flags) -> Result<Option<i32>> {
         // The trace and the price go to stderr even with --json: stdout is the report alone.
-        let ui = Ui::new(!flags.quiet);
+        let ui = Ui::of(flags.quiet, false);
         if args.first().map(String::as_str) == Some("undo") {
             let label = match args {
                 [_] => None,
@@ -1190,6 +1122,12 @@ impl App {
     }
 
     pub(crate) fn dispatch(&mut self, flags: &Flags, words: &[String], rest: &[String]) -> Result<i32> {
+        // `run` answers help before the brain is opened; this keeps words that ask for it from ever
+        // being routed as a request (ADR 25).
+        if let Some(text) = help::asked(words) {
+            say(text);
+            return Ok(0);
+        }
         // `jli skills --project=<id>` says so in its listing instead, and `jli project init` refuses the flag.
         let no_note = rest.is_empty()
             && match words {
@@ -1202,7 +1140,7 @@ impl App {
         }
         let Some((first, others)) = words.split_first() else {
             if !self.terminal.interactive() {
-                say(help());
+                say(help::full());
                 return Ok(0);
             }
             self.repl(flags)?;
@@ -1350,14 +1288,14 @@ fn shell_init(name: Option<&str>) -> Result<i32> {
 }
 
 fn run(argv: &[String]) -> Result<i32> {
-    let Parsed { mut flags, words, rest } = parse(argv).map_err(|error| coded(USAGE, format!("{error:#}")))?;
-    flags.yes |= switched_on(env, "JLI_YES");
-    flags.yolo |= switched_on(env, "JLI_YOLO");
-    let first = words.first().map(String::as_str);
-    if matches!(first, Some("help" | "--help" | "-h")) {
-        say(help());
+    // Before a flag can fail to parse, and with no brain opened and no model asked (ADR 25).
+    if let Some(text) = help::asked(argv) {
+        say(text);
         return Ok(0);
     }
+    let Parsed { flags, words, rest } = parse(argv).map_err(|error| coded(USAGE, format!("{error:#}")))?;
+    let flags = switches_from(flags, env);
+    let first = words.first().map(String::as_str);
     let user = resolve_user(&flags, env).map_err(configuration)?;
     if first == Some("demo") && words.len() == 1 {
         return run_demo(&user);
@@ -1445,6 +1383,27 @@ mod tests {
             assert!(!with(Some(value)), "{value} does not switch it on");
         }
         assert!(!with(None));
+    }
+
+    #[test]
+    fn quiet_comes_from_the_flag_or_jli_quiet() {
+        for flag in ["-q", "--quiet"] {
+            assert!(parse(&args(&[flag, "list", "files"])).unwrap().flags.quiet, "{flag}");
+        }
+        let quiet = |value: &str| {
+            let value = value.to_string();
+            switches_from(Flags::default(), move |name| (name == "JLI_QUIET").then(|| value.clone())).quiet
+        };
+        for value in ["1", "true", "TRUE", " True "] {
+            assert!(quiet(value), "JLI_QUIET={value} is --quiet");
+        }
+        for value in ["0", "yes", "", "false"] {
+            assert!(!quiet(value), "JLI_QUIET={value} is not");
+        }
+        let only_quiet = switches_from(Flags::default(), |name| (name == "JLI_QUIET").then(|| "1".to_string()));
+        assert_eq!(only_quiet, Flags::quiet(), "it turns on nothing else");
+        let flagged = switches_from(Flags::quiet(), |_| Some("0".to_string()));
+        assert!(flagged.quiet, "the environment never turns a flag off");
     }
 
     #[test]
