@@ -29,6 +29,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [16](0016-measuring-the-matrix.md) | The matrix is measured against the brain's own evidence, optimised only where the measurement improves, and every new row is checked against its closest skills |
 | [17](0017-project-scope.md) | What is learned inside a project stays with it, global skills are still used there, and a project skill becomes global only with approval |
 | [18](0018-agent-contract.md) | A contract for agent callers: pinned plans, run in order, and corrections without a terminal |
+| [23](0023-shell-fixes-and-number-words.md) | The install line follows the running shell, the function cleans up after ctrl-c, and a hyphenated number word is not a count |
 
 ## Known gaps, by record
 
@@ -66,3 +67,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   skips the System 1 check; `jli run` refuses a plan with a `cd` even under the shell function; a plan
   blocked on an unknown argument runs without it once its slots are filled; `corrections` is shown
   nowhere; and the claim, like the rest of the cloud setup, has run only against local files.
+- [23](0023-shell-fixes-and-number-words.md): whether fish removes the hand-off file after a ctrl-c
+  is not measured; with no shell among jli's ancestors the install line still follows `$SHELL`, as
+  `jli shell-init` with no argument does; digits joined by `-` are still numbers; and the number-word
+  fix was tested offline only.

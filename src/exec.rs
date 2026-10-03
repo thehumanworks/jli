@@ -93,6 +93,13 @@ pub fn try_builtins(script: &str, cwd: &Path, capture: bool) -> Result<RunResult
     })
 }
 
+/// Every process's id, parent's id and program, one per line, as `ps` prints them, so the
+/// shell jli was started from can be found (ADR 23). None when `ps` cannot be run.
+pub fn process_table() -> Option<String> {
+    let done = Command::new("ps").args(["-A", "-o", "pid=,ppid=,comm="]).stdin(Stdio::null()).output().ok()?;
+    done.status.success().then(|| String::from_utf8_lossy(&done.stdout).into_owned())
+}
+
 /// Run shell steps in order with `bash -c`, stopping at the first failure.
 pub fn run(commands: &[String], cwd: &Path, options: RunOptions) -> Result<RunResult> {
     let mut output = String::new();
