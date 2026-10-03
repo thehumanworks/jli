@@ -47,6 +47,8 @@ use crate::http::{HttpClient, HttpRequest};
 pub const DEVICE_CODE_LIFETIME: Duration = Duration::from_secs(15 * 60);
 /// The pause between polls when the server does not give one (RFC 8628, section 3.2).
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(5);
+/// The shortest pause, so that an interval of `"0"` does not poll without rest.
+const MINIMUM_INTERVAL: Duration = Duration::from_secs(1);
 /// What `slow_down` adds to the pause (RFC 8628, section 3.5).
 const SLOW_DOWN_STEP: Duration = Duration::from_secs(5);
 
@@ -132,7 +134,7 @@ impl DeviceCode {
         Ok(DeviceCode {
             user_code: reply.user_code,
             verification_url: format!("{issuer}/codex/device"),
-            interval: reply.interval.as_ref().and_then(seconds).unwrap_or(DEFAULT_INTERVAL),
+            interval: reply.interval.as_ref().and_then(seconds).unwrap_or(DEFAULT_INTERVAL).max(MINIMUM_INTERVAL),
             expires_at: reply.expires_at.unwrap_or_else(|| Utc::now() + lifetime),
             device_auth_id: reply.device_auth_id,
             issuer,
@@ -268,6 +270,13 @@ mod tests {
         let code = DeviceCode::request(&fake.http(), FAKE_ISSUER).unwrap();
         let error = code.wait(&fake.http(), &mut |_| panic!("a refusal is not waited on")).unwrap_err();
         assert!(matches!(&error, Error::OAuth(oauth) if oauth.error == "access_denied"), "{error}");
+    }
+
+    #[test]
+    fn an_interval_of_zero_still_rests_between_polls() {
+        let http =
+            |_: HttpRequest| Ok(crate::HttpResponse::new(200, r#"{"device_auth_id":"d","user_code":"C-1","interval":"0"}"#));
+        assert_eq!(DeviceCode::request(&http, "https://issuer.test").unwrap().interval, MINIMUM_INTERVAL);
     }
 
     #[test]

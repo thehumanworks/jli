@@ -66,7 +66,7 @@ backend's models.
 
 | Part | What it does |
 | --- | --- |
-| `DeviceCode::request` | `POST {issuer}/api/accounts/deviceauth/usercode` with `{"client_id": CODEX_CLIENT_ID}`; reads `interval` as a string or a number (5 s when missing) and `expires_at` (15 minutes when missing); the page is `{issuer}/codex/device` |
+| `DeviceCode::request` | `POST {issuer}/api/accounts/deviceauth/usercode` with `{"client_id": CODEX_CLIENT_ID}`; reads `interval` as a string or a number (5 s when missing, 1 s at least) and `expires_at` (15 minutes when missing); the page is `{issuer}/codex/device` |
 | `DeviceCode::wait` | polls `{issuer}/api/accounts/deviceauth/token`: 403, 404 and `authorization_pending` are "not entered yet", `slow_down` adds 5 s to the pause (RFC 8628), any other error stops at once; ends with `CodeExpired` at `expires_at`, counted by the clock and by the pauses taken, since an unknown code also gets 404; then exchanges the code, form-encoded, with no `resource` |
 | `CodexAuth::create` | writes the tokens in Codex's format, the account id from the ID token's `https://api.openai.com/auth` claim |
 | `CodexAuth::revoke` | a JSON body to `https://auth.openai.com/oauth/revoke` (`CODEX_REVOKE_TOKEN_URL_OVERRIDE`), as `codex logout` does; a token the server no longer accepts counts as revoked |
