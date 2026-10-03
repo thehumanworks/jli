@@ -8,6 +8,7 @@ use crate::args;
 use crate::demo::run_demo;
 use crate::learn::{learn_phrase, LearnInput};
 use crate::router::{route, split_steps, Outcome, RouteOptions, DEFAULT_THRESHOLD};
+use crate::shell::{init_script, HandOff, Shell};
 use crate::slots::learned_phrase;
 use crate::store::{Brain, BrainConfig};
 use crate::types::{BrainEvent, Mode, Path, Risk, DEFAULT_MODE};
@@ -49,6 +50,8 @@ fn help() -> String {
   jli fix                              the last command run here was wrong: unlearn it and try again
   jli forget <label>                   delete a skill
   jli sync                             sync the local replica with the cloud brain
+  jli shell-init [zsh|bash|fish]       the shell function that lets jli cd and export in your shell:
+                                       eval \"$(jli shell-init zsh)\" in ~/.zshrc
   jli demo                             watch it learn in a sandbox (about 12 API calls)
 
 {}
@@ -199,6 +202,7 @@ impl App {
             capture: flags.json,
             agent_only: flags.agent,
             rejected,
+            hand_off: HandOff::from_env(env),
             ..RouteOptions::new(cwd()?, resolve_threshold(&self.brain, flags)?, resolve_mode(&self.brain, flags)?)
         };
         let outcome = route(&self.brain, &self.models, query, &ui, &mut self.terminal, &options)?;
@@ -517,6 +521,21 @@ fn path_tag(path: Path) -> String {
     }
 }
 
+/// Print the shell function for the named shell, or for `$SHELL`. Needs no brain and no keys.
+fn shell_init(name: Option<&str>) -> Result<i32> {
+    let names = || Shell::ALL.map(Shell::as_str).join(", ");
+    let shell = match name {
+        Some(name) => {
+            Shell::parse(name).ok_or_else(|| anyhow!("no shell function for {name}: there is one for {}", names()))?
+        }
+        None => Shell::of_user().ok_or_else(|| {
+            anyhow!("cannot tell your shell from $SHELL; name it: jli shell-init <{}>", names().replace(", ", "|"))
+        })?,
+    };
+    say(init_script(shell).trim_end());
+    Ok(0)
+}
+
 fn run(argv: &[String]) -> Result<i32> {
     let Parsed { mut flags, words, rest } = parse(argv)?;
     flags.yes |= switched_on(env, "JLI_YES");
@@ -528,6 +547,9 @@ fn run(argv: &[String]) -> Result<i32> {
     }
     if first == Some("demo") && words.len() == 1 {
         return run_demo();
+    }
+    if first == Some("shell-init") && words.len() <= 2 && rest.is_empty() {
+        return shell_init(words.get(1).map(String::as_str));
     }
 
     let mut app =
