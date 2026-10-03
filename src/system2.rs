@@ -78,10 +78,11 @@ Rules:
   {slot}, with its value for this request in slotValues. Never quote placeholders; quoting is added for you.
 - Slot kinds: "file" is a path in the working directory, "branch" a git branch, "number" an integer,
   "text" free text such as a commit message.
-- A value given with a flag (-n {count}, --profile {profile}) is usually optional: set optional to true and
-  flag to the flag ("-n"), keep the flag right before its placeholder in steps, and give no default. When this
-  request does not name the value, leave it out of slotValues, and the flag is left out of the command with it.
-  A value the command cannot run without is not optional, and its flag is null.
+- A value given with a flag is optional when the command does the same job without the flag, as git log lists
+  commits without -n {count}: set optional to true and flag to the flag ("-n"), keep the flag right before its
+  placeholder in steps, and give no default. When this request does not name the value, leave it out of
+  slotValues, and the flag is left out of the command with it. A value the command cannot do its job without,
+  such as the path of cargo install --path {directory}, is not optional, and its flag is null.
 - Use several steps only when the task truly is a chain of commands.
 - Commands must be non-interactive: no editors, pagers or prompts (use flags such as --no-pager).
 - risk: "safe" only reads; "modifies" changes local state and can be undone; "destructive" deletes data,

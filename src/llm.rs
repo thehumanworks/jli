@@ -265,7 +265,7 @@ pub fn slots_schema() -> Value {
             },
             "optional": {
                 "type": "boolean",
-                "description": "true when the command also runs without this value and its flag, as git log runs without -n {count}",
+                "description": "true only when the command does the same job without this value and its flag, as git log lists commits without -n {count}; false when the command needs it, as cargo install needs --path {path}",
             },
             "flag": nullable(
                 "string",

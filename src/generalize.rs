@@ -322,7 +322,11 @@ fn show(ui: &Ui, title: &str, skill: &Skill) {
         ui.line(format!("     {} {step}", c::green("$")));
     }
     for slot in &skill.slots {
-        let also = if slot.aliases.is_empty() { String::new() } else { format!(", also {}", slot.aliases.join(", ")) };
+        let mut also = if slot.aliases.is_empty() { String::new() } else { format!(", also {}", slot.aliases.join(", ")) };
+        let settings = slot.settings();
+        if !settings.is_empty() {
+            also = format!("{also}; {settings}");
+        }
         ui.line(format!("     {}", c::dim(format!("{{{}}} {}: {}{also}", slot.name, slot.kind.as_str(), slot.description))));
     }
     ui.line(format!("     {}", c::dim(&skill.scenario)));

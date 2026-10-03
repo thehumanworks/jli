@@ -172,33 +172,6 @@ pub fn slot_shape(words: &[String], dry_run: bool) -> Option<SlotEdit> {
     }
 }
 
-/// What a slot's settings say, for `jli skills` and the message of `jli slot`: "optional, left out
-/// with -n; release → --release, debug → nothing; default release". Empty for a slot with none.
-pub fn describe(slot: &Slot) -> String {
-    let mut said: Vec<String> = Vec::new();
-    if slot.optional {
-        said.push(match &slot.flag {
-            Some(flag) => format!("optional, left out with {flag}"),
-            None => "optional".to_string(),
-        });
-    }
-    if !slot.choices.is_empty() {
-        let each: Vec<String> = slot
-            .choices
-            .iter()
-            .map(|choice| match choice.text.trim() {
-                "" => format!("{} → nothing", choice.value),
-                text => format!("{} → {text}", choice.value),
-            })
-            .collect();
-        said.push(each.join(", "));
-    }
-    if let Some(default) = &slot.default {
-        said.push(format!("default {default}"));
-    }
-    said.join("; ")
-}
-
 /// A list of quoted phrasings, or of names, for a message.
 fn listed(items: &[String], quoted: bool) -> String {
     let items: Vec<String> = items.iter().map(|item| if quoted { format!("\"{item}\"") } else { item.clone() }).collect();
@@ -457,7 +430,7 @@ fn slot_in(brain: &Brain, edit: &SlotEdit, from: Option<&str>) -> Result<Edited>
     } else {
         brain.skill(label)?.and_then(|skill| skill.slots.into_iter().find(|slot| slot.name == name)).unwrap_or(next)
     };
-    let settings = match describe(&now) {
+    let settings = match now.settings() {
         said if said.is_empty() => "it must have a value, and it has no default".to_string(),
         said => said,
     };
@@ -621,9 +594,9 @@ mod tests {
     #[test]
     fn a_slot_is_described_by_what_was_set_on_it() {
         let mut slot = Slot { name: "count".into(), optional: true, flag: Some("-n".into()), ..Slot::default() };
-        assert_eq!(describe(&slot), "optional, left out with -n");
+        assert_eq!(slot.settings(), "optional, left out with -n");
         slot.default = Some("3".into());
-        assert_eq!(describe(&slot), "optional, left out with -n; default 3");
+        assert_eq!(slot.settings(), "optional, left out with -n; default 3");
         let profile = Slot {
             choices: vec![
                 Choice { value: "release".into(), text: "--release".into() },
@@ -631,8 +604,8 @@ mod tests {
             ],
             ..Slot::default()
         };
-        assert_eq!(describe(&profile), "release → --release, debug → nothing");
-        assert_eq!(describe(&Slot::default()), "");
+        assert_eq!(profile.settings(), "release → --release, debug → nothing");
+        assert_eq!(Slot::default().settings(), "");
     }
 
     #[test]

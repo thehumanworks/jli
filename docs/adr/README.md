@@ -34,6 +34,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [21](0021-hand-edits.md) | One slot name and one phrasing can be changed by hand, written where the router would write the same lesson |
 | [22](0022-project-scenarios.md) | A scenario rewritten inside a project is kept for that project, and the global row is left as it was |
 | [23](0023-shell-fixes-and-number-words.md) | The install line follows the running shell, the function cleans up after ctrl-c, and a hyphenated number word is not a count |
+| [24](0024-optional-slots.md) | A slot can be left out with its flag, a person can give it a default, and choices say how each value is written |
 
 ## Known gaps, by record
 
@@ -99,3 +100,9 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 - [23](0023-shell-fixes-and-number-words.md): whether fish removes the hand-off file after a ctrl-c
   is not measured; with no shell among jli's ancestors the install line still follows `$SHELL`, as
   `jli shell-init` with no argument does; and digits joined by `-` are still numbers.
+- [24](0024-optional-slots.md): an older jli renders a slot with choices as its bare value
+  (`cargo build release`); the models mark a flag's value optional unevenly (13 of 15 for the
+  translator, 3 of 6 for the agent), and can still call a needed flag optional; a number word fills an
+  optional count even when it counts something else; a choice is found only by the word that names
+  it; nothing checks a value left out by hand or a choice's text; the translator's scenario can still
+  be narrower than an optional value makes the skill; and `jli slot` inside a project ran live once.

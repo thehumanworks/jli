@@ -67,8 +67,9 @@ fn help() -> String {
   jli forget <label>                   delete a skill (inside a project, one of the project's: --global for the user's)
   jli forget-phrase <label> <phrase>   take one phrasing back from a skill; it is kept as a counter-example
   jli alias <label> <slot> <name>      give a slot another name for name=value (--remove takes one away)
-  jli slot <label> <slot> --default=<value>   the value a slot takes when the request names none (--default= for none)
-      --optional | --required          whether the slot, and its --flag=<flag>, may be left out of the command
+  jli slot <label> <slot> <setting>…   how a slot is filled and written; each setting is written with =
+      --default=<value>                the value it takes when the request names none (--default= for none)
+      --optional | --required          whether it, and its --flag=<flag>, may be left out of the command
       --choice=<value>=<text> …        the only values it takes, each with what it puts in the command
                                        (--choice=debug= puts nothing; --no-choices takes them away)
   jli eval [<label>] [--limit N]       route every stored example with itself held out, and replay accepted
@@ -407,7 +408,7 @@ impl App {
                 say(format!("  {}", c::dim(format!("{{{}}} is also {}", slot.name, slot.aliases.join(", ")))));
             }
             for slot in &skill.slots {
-                let settings = hand::describe(slot);
+                let settings = slot.settings();
                 if !settings.is_empty() {
                     say(format!("  {}", c::dim(format!("{{{}}}: {settings}", slot.name))));
                 }

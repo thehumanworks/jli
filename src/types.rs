@@ -116,6 +116,33 @@ impl Slot {
         self.choices.iter().find(|choice| choice.value.eq_ignore_ascii_case(said))
     }
 
+    /// What was set on it, for `jli skills`, `jli slot` and `jli generalize`: "optional, left out with
+    /// -n; release → --release, debug → nothing; default release". Empty for a slot with none of it.
+    pub fn settings(&self) -> String {
+        let mut said: Vec<String> = Vec::new();
+        if self.optional {
+            said.push(match &self.flag {
+                Some(flag) => format!("optional, left out with {flag}"),
+                None => "optional".to_string(),
+            });
+        }
+        if !self.choices.is_empty() {
+            let each: Vec<String> = self
+                .choices
+                .iter()
+                .map(|choice| match choice.text.trim() {
+                    "" => format!("{} → nothing", choice.value),
+                    text => format!("{} → {text}", choice.value),
+                })
+                .collect();
+            said.push(each.join(", "));
+        }
+        if let Some(default) = &self.default {
+            said.push(format!("default {default}"));
+        }
+        said.join("; ")
+    }
+
     /// The values of its choices, for a message: `release or debug`.
     pub fn choice_list(&self) -> String {
         let values: Vec<&str> = self.choices.iter().map(|choice| choice.value.as_str()).collect();
