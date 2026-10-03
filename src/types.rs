@@ -72,12 +72,18 @@ impl Slot {
     }
 }
 
+/// Whether a name could be typed as the key of `name=value`: a letter or `_`, then letters, digits,
+/// `_` or `-`.
+pub fn is_key(name: &str) -> bool {
+    let mut letters = name.trim().bytes();
+    letters.next().is_some_and(|first| first.is_ascii_alphabetic() || first == b'_')
+        && letters.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
 /// Give the slot called `slot` another name. Refused when the alias could not be typed as a key,
 /// or when it already means a slot of this skill.
 pub fn add_alias(slots: &mut [Slot], slot: &str, alias: &str) -> bool {
-    let mut letters = alias.trim().bytes();
-    let typable = letters.next().is_some_and(|first| first.is_ascii_alphabetic() || first == b'_')
-        && letters.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+    let typable = is_key(alias);
     let alias = normal_name(alias.trim());
     if !typable || slots.iter().any(|known| known.answers_to(&alias)) {
         return false;
@@ -89,6 +95,16 @@ pub fn add_alias(slots: &mut [Slot], slot: &str, alias: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// Take `alias` from the slot called `slot`, compared as names are. Returns false when it was not
+/// one of that slot's other names. A slot left with none is written without the field, as before ADR 12.
+pub fn remove_alias(slots: &mut [Slot], slot: &str, alias: &str) -> bool {
+    let alias = normal_name(alias.trim());
+    let Some(known) = slots.iter_mut().find(|known| known.name == slot) else { return false };
+    let before = known.aliases.len();
+    known.aliases.retain(|kept| normal_name(kept) != alias);
+    known.aliases.len() != before
 }
 
 /// Slots as a model wrote them, with only the aliases that hold up: the first slot to claim a name keeps it.

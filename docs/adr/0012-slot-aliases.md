@@ -1,6 +1,7 @@
 # 12. A slot answers to several names, and a new name is worked out once and kept
 
-- Status: accepted
+- Status: accepted; superseded in part by [ADR 21](0021-hand-edits.md), which adds and removes one
+  alias by hand with `jli alias`
 - Date: 2026-10-03
 - Origin: the Rust version
 - Supersedes in part: [ADR 11](0011-stated-arguments.md), on how a key is matched to a slot and on
