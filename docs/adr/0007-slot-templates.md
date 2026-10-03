@@ -1,6 +1,7 @@
 # 7. Skills are templates with `{slot}` placeholders, filled cheapest first and always shell-quoted
 
-- Status: accepted
+- Status: accepted; superseded in part by [ADR 14](0014-shell-integration.md), which expands `~`
+  and `$NAME` in a file value before it is quoted, and quotes a value that starts with `=`
 - Date: 2026-10-02
 - Origin: the TypeScript prototype; kept unchanged by the Rust port
 

@@ -9,7 +9,8 @@ use serde_json::{json, Value};
 
 use crate::learn::{learn_phrase, LearnInput};
 use crate::llm::Llm;
-use crate::router::{route, Outcome, RouteOptions, DRY_RUN, NOT_A_COMMAND};
+use crate::router::{route, Outcome, RouteOptions, DRY_RUN, NEEDS_CALLER_SHELL, NOT_A_COMMAND};
+use crate::shell::{HandOff, Shell};
 use crate::store::{now_iso, Brain, BrainConfig, NewSkill};
 use crate::system1::{System1, NONE};
 use crate::types::{Mode, Origin, Path, Risk, Slot, SlotKind};
@@ -887,13 +888,229 @@ fn the_json_outcome_keeps_its_field_names_and_order() {
             "answer",
             "output",
             "msSystem1",
-            "msSystem2"
+            "msSystem2",
+            "callerShell",
+            "handedOff"
         ]
     );
     assert_eq!(value["path"], "system1");
     assert_eq!(value["risk"], "safe");
     assert!(value["output"].as_str().unwrap().trim_end().ends_with("work"));
     assert_eq!(value["learned"], json!([]), "a 0.99 route teaches nothing new");
+}
+
+/// A skill with one step template per entry and one file slot called `directory`.
+fn directory_skill(scratch: &Scratch, label: &str, steps: &[&str]) {
+    scratch
+        .brain
+        .add_skill(&NewSkill {
+            label: label.into(),
+            steps: steps.iter().map(|step| step.to_string()).collect(),
+            scenario: format!("the user wants {label}"),
+            risk: Risk::Safe,
+            origin: Origin::Agent,
+            examples: vec![],
+            slots: vec![Slot {
+                name: "directory".into(),
+                kind: SlotKind::File,
+                description: "the directory".into(),
+                default: None,
+                aliases: vec!["dir".into()],
+            }],
+        })
+        .unwrap();
+}
+
+/// The file the shell function would have made, empty.
+fn hand_off(scratch: &Scratch, shell: Shell) -> HandOff {
+    let path = scratch.root.join("handoff");
+    std::fs::write(&path, "").unwrap();
+    HandOff { path, shell }
+}
+
+#[test]
+fn a_cd_without_the_shell_function_is_refused_and_teaches_nothing() {
+    let scratch = Scratch::new("cd-refused");
+    std::fs::create_dir(scratch.work.join("sub")).unwrap();
+    directory_skill(&scratch, "go-to", &["cd {directory}"]);
+    let (first, _) = models(|_| decision("go-to", 0.9, 0.9, SAFE), no_language_model());
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &first, "go to dir=sub", &mut Script::default(), &options);
+    assert!(!outcome.ran && !outcome.handed_off);
+    assert_eq!(outcome.blocked.as_deref(), Some(NEEDS_CALLER_SHELL));
+    assert_eq!(outcome.exit_code(), 3, "not reported as a success");
+    assert_eq!(outcome.caller_shell, ["cd sub"], "an agent can apply it itself");
+    assert!(outcome.learned.is_empty());
+    let skill = scratch.brain.skill("go-to").unwrap().unwrap();
+    assert!(skill.examples.is_empty() && skill.uses == 0, "no phrasing, no use");
+
+    // A new skill the agent proposes is not learned either.
+    let proposal = json!({
+        "kind": "new", "existingLabel": null, "label": "enter-directory", "steps": ["cd {directory}"],
+        "scenario": "the user wants to move into a directory",
+        "slots": [{ "name": "directory", "kind": "file", "description": "where to go", "default": null }],
+        "slotValues": [{ "name": "directory", "value": "sub" }],
+        "risk": "safe", "explanation": "Changes directory.", "answer": null,
+    });
+    let (models, _) = models(|_| decision(NONE, 0.7, 0.95, SAFE), vec![("proposal", proposal)]);
+    let outcome = go(&scratch, &models, "move into sub", &mut Script::default(), &options);
+    assert_eq!(outcome.blocked.as_deref(), Some(NEEDS_CALLER_SHELL));
+    assert!(scratch.brain.skill("enter-directory").unwrap().is_none());
+}
+
+#[test]
+fn a_cd_is_handed_to_the_shell_function_and_learned_like_any_command() {
+    let scratch = Scratch::new("cd-handed");
+    std::fs::create_dir(scratch.work.join("my sub")).unwrap();
+    directory_skill(&scratch, "go-to", &["cd {directory}"]);
+    let (models, _) = models(|_| decision("go-to", 0.9, 0.9, SAFE), no_language_model());
+    let target = hand_off(&scratch, Shell::Zsh);
+    let options = RouteOptions { yes: true, hand_off: Some(target.clone()), ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "go to dir=\"my sub\"", &mut Script::default(), &options);
+    assert!(outcome.ran && outcome.handed_off);
+    assert_eq!((outcome.exit_code(), outcome.blocked.as_deref()), (0, None));
+    assert_eq!(outcome.caller_shell, ["cd 'my sub'"]);
+    assert_eq!(std::fs::read_to_string(&target.path).unwrap(), "cd 'my sub'\n", "exactly the rendered step");
+    assert_eq!(outcome.learned, ["\"go to dir=\"…\"\" means go-to"]);
+    let json = serde_json::to_value(&outcome).unwrap();
+    assert_eq!((json["callerShell"].clone(), json["handedOff"].clone()), (json!(["cd 'my sub'"]), json!(true)));
+}
+
+#[test]
+fn a_cd_that_would_fail_fails_here_and_is_not_handed_over() {
+    let scratch = Scratch::new("cd-missing");
+    directory_skill(&scratch, "go-to", &["cd {directory}"]);
+    let (models, _) = models(|_| decision("go-to", 0.9, 0.9, SAFE), no_language_model());
+    let target = hand_off(&scratch, Shell::Bash);
+    let options = RouteOptions { yes: true, hand_off: Some(target.clone()), ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "go to dir=nowhere", &mut Script::default(), &options);
+    assert!(outcome.ran && !outcome.handed_off);
+    assert_eq!(outcome.exit_code(), 1);
+    assert!(outcome.output.as_deref().unwrap().contains("nowhere"), "{:?}", outcome.output);
+    assert_eq!(std::fs::read_to_string(&target.path).unwrap(), "");
+    assert!(outcome.learned.is_empty(), "--yes needs a clean exit");
+}
+
+#[test]
+fn steps_after_a_cd_run_in_the_calling_shell_too() {
+    let scratch = Scratch::new("cd-chain");
+    directory_skill(&scratch, "make-and-enter", &["mkdir -p {directory}", "cd {directory}", "touch it's-here"]);
+    let (models, _) = models(|_| decision("make-and-enter", 0.9, 0.9, SAFE), no_language_model());
+    let target = hand_off(&scratch, Shell::Zsh);
+    let options = RouteOptions { yes: true, hand_off: Some(target.clone()), ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "make and enter dir=new", &mut Script::default(), &options);
+    assert!(scratch.work.join("new").is_dir(), "the step before the cd ran here");
+    assert!(!scratch.work.join("new/it's-here").exists(), "the step after it did not");
+    assert_eq!(outcome.caller_shell, ["cd new", "touch it's-here"]);
+    assert_eq!(std::fs::read_to_string(&target.path).unwrap(), "{ cd new\n} && { touch it's-here\n}\n");
+    assert!(outcome.handed_off);
+}
+
+#[test]
+fn a_fish_shell_gets_values_quoted_for_fish() {
+    let scratch = Scratch::new("cd-fish");
+    std::fs::create_dir(scratch.work.join("it's")).unwrap();
+    directory_skill(&scratch, "go-to", &["cd {directory}"]);
+    let (models, _) = models(|_| decision("go-to", 0.9, 0.9, SAFE), no_language_model());
+    let target = hand_off(&scratch, Shell::Fish);
+    let options = RouteOptions { yes: true, hand_off: Some(target.clone()), ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "go to dir=\"it's\"", &mut Script::default(), &options);
+    assert_eq!(outcome.commands, [r"cd 'it'\''s'"], "jli's own shell is still bash");
+    assert_eq!(std::fs::read_to_string(&target.path).unwrap(), "cd 'it\\'s'\n");
+}
+
+#[test]
+fn a_dry_run_shows_what_the_calling_shell_would_run() {
+    let scratch = Scratch::new("cd-dry");
+    directory_skill(&scratch, "go-to", &["cd {directory}"]);
+    let (models, _) = models(|_| decision("go-to", 0.9, 0.9, SAFE), no_language_model());
+    let target = hand_off(&scratch, Shell::Zsh);
+    for hand_off in [None, Some(target.clone())] {
+        let options = RouteOptions { dry_run: true, hand_off, ..scratch.options(Mode::Semi) };
+        let outcome = go(&scratch, &models, "go to dir=src", &mut Script::default(), &options);
+        assert_eq!((outcome.blocked.as_deref(), outcome.exit_code()), (Some(DRY_RUN), 0));
+        assert_eq!((outcome.caller_shell.as_slice(), outcome.handed_off), (["cd src".to_string()].as_slice(), false));
+    }
+    assert_eq!(std::fs::read_to_string(&target.path).unwrap(), "");
+}
+
+#[test]
+fn a_typed_cd_after_a_no_needs_the_shell_function_too() {
+    let scratch = Scratch::new("cd-typed");
+    std::fs::create_dir(scratch.work.join("sub")).unwrap();
+    let (models, _) = models(|_| decision("list-files", 0.9, 0.9, SAFE), no_language_model());
+    let mut script = Script::new(&[Some(false)], &["cd sub"]);
+    let outcome = go(&scratch, &models, "into sub", &mut script, &scratch.options(Mode::Manual));
+    assert_eq!(outcome.blocked.as_deref(), Some(NEEDS_CALLER_SHELL));
+    assert!(!outcome.ran);
+    assert!(!scratch.brain.skills().unwrap().iter().any(|skill| skill.steps == ["cd sub"]), "not learned");
+
+    let target = hand_off(&scratch, Shell::Bash);
+    let mut script = Script::new(&[Some(false)], &["cd sub"]);
+    let options = RouteOptions { hand_off: Some(target.clone()), ..scratch.options(Mode::Manual) };
+    let outcome = go(&scratch, &models, "into sub", &mut script, &options);
+    assert!(outcome.ran && outcome.handed_off);
+    assert_eq!(outcome.path, Path::Taught);
+    assert_eq!(std::fs::read_to_string(&target.path).unwrap(), "cd sub\n");
+}
+
+#[test]
+fn a_home_path_reaches_the_command_expanded_and_text_stays_literal() {
+    let scratch = Scratch::new("expand");
+    directory_skill(&scratch, "list-dir", &["ls {directory}"]);
+    let home = std::env::var("HOME").unwrap();
+    let (listing, _) = models(|_| decision("list-dir", 0.9, 0.9, SAFE), no_language_model());
+    let options = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let expected = |path: &str| crate::slots::render(&["ls {d}".to_string()], &[("d".into(), path.into())].into());
+    for request in ["list dir=~/notes", "list dir=$HOME/notes", "list dir=${HOME}/notes", "list dir: ~/notes"] {
+        let outcome = go(&scratch, &listing, request, &mut Script::default(), &options);
+        assert_eq!(outcome.commands, expected(&format!("{home}/notes")), "{request}");
+    }
+    let outcome = go(&scratch, &listing, "list dir='$(touch pwned)/x'", &mut Script::default(), &options);
+    assert_eq!(outcome.commands, ["ls '$(touch pwned)/x'"], "nothing is run to expand a value");
+
+    let (models, _) = models(|_| decision("git-commit", 0.9, 0.9, [0.2, 0.8, 0.0]), no_language_model());
+    let outcome = go(&scratch, &models, "commit message='costs $5, see ~/x and $HOME'", &mut Script::default(), &options);
+    assert_eq!(outcome.commands, ["git commit -m 'costs $5, see ~/x and $HOME'"], "a text value is as written");
+}
+
+#[test]
+fn a_path_in_the_request_is_offered_to_the_file_pick() {
+    let scratch = Scratch::new("pick-path");
+    std::fs::write(scratch.work.join("n.txt"), "x\n").unwrap();
+    scratch
+        .brain
+        .add_skill(&NewSkill {
+            label: "count-lines".into(),
+            steps: vec!["wc -l {file}".into()],
+            scenario: "the user wants the lines of a file counted".into(),
+            risk: Risk::Safe,
+            origin: Origin::Agent,
+            examples: vec![],
+            slots: vec![Slot {
+                name: "file".into(),
+                kind: SlotKind::File,
+                description: "the file to count".into(),
+                default: None,
+                aliases: vec![],
+            }],
+        })
+        .unwrap();
+    let (models, _) = models(
+        |request| {
+            let Some(pick) = request["questions"].get("value") else { return decision("count-lines", 0.9, 0.9, SAFE) };
+            let options = pick.to_string();
+            assert!(options.contains("n.txt") && options.contains("~/notes/n.txt"), "{options}");
+            json!({"model": "m", "answers": {"value": {"type": "choice", "choice": "~/notes/n.txt", "confidence": 0.9,
+                                                      "probabilities": {"~/notes/n.txt": 0.9}}}})
+        },
+        no_language_model(),
+    );
+    let options = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "count the lines of ~/notes/n.txt", &mut Script::default(), &options);
+    let home = std::env::var("HOME").unwrap();
+    let expected = crate::slots::render(&["wc -l {f}".to_string()], &[("f".into(), format!("{home}/notes/n.txt"))].into());
+    assert_eq!(outcome.commands, expected);
 }
 
 #[test]
