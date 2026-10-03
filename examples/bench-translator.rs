@@ -174,10 +174,14 @@ fn evaluate(models: &Models, context: &Context, brain: &Brain, cases: &[&Case]) 
             let mut command = "(nothing)".to_string();
             if let Some(skill) = chosen.filter(|_| routed) {
                 // Slots are filled without the agent here: the question is what System 1 alone can do.
+                // An optional slot is never asked of the agent, so it keeps no default and is left out.
                 let slots: Vec<Slot> = skill
                     .slots
                     .iter()
-                    .map(|slot| Slot { default: Some(slot.default.clone().unwrap_or_else(|| "?".into())), ..slot.clone() })
+                    .map(|slot| match slot.optional {
+                        true => slot.clone(),
+                        false => Slot { default: Some(slot.default.clone().unwrap_or_else(|| "?".into())), ..slot.clone() },
+                    })
                     .collect();
                 let values = if slots.is_empty() {
                     Default::default()
@@ -185,7 +189,7 @@ fn evaluate(models: &Models, context: &Context, brain: &Brain, cases: &[&Case]) 
                     let template = Template { steps: &skill.steps, scenario: &skill.scenario, slots: &slots };
                     fill_slots(models, request, &template, context, &Default::default())?.values
                 };
-                command = render(&skill.steps, &values).join(" && ");
+                command = render(&skill.steps, &slots, &values).join(" && ");
             }
             if command == expected {
                 score.correct += 1;

@@ -16,7 +16,7 @@ use crate::router::{
 };
 use crate::slots::render;
 use crate::store::{now_iso, Brain, PlanRow};
-use crate::types::{coded, error_code, Mode, Path, Risk, Slot, SlotKind, USAGE};
+use crate::types::{coded, error_code, Choice, Mode, Path, Risk, Slot, SlotKind, USAGE};
 use crate::ui::{Prompt, Ui};
 use crate::Models;
 
@@ -46,6 +46,12 @@ pub struct SlotInfo {
     pub description: String,
     pub aliases: Vec<String>,
     pub default: Option<String>,
+    /// Left out of the command when it has no value (ADR 24).
+    pub optional: bool,
+    /// The flag left out with it.
+    pub flag: Option<String>,
+    /// The only values it takes, each with what it puts in the command.
+    pub choices: Vec<Choice>,
 }
 
 impl SlotInfo {
@@ -56,12 +62,15 @@ impl SlotInfo {
             description: slot.description.clone(),
             aliases: slot.aliases.clone(),
             default: slot.default.clone(),
+            optional: slot.optional,
+            flag: slot.flag.clone(),
+            choices: slot.choices.clone(),
         }
     }
 
     /// A placeholder the steps use that no slot declares: it can still be given a value by its name.
     fn undeclared(name: &str) -> SlotInfo {
-        SlotInfo { name: name.to_string(), kind: SlotKind::Text, description: String::new(), aliases: vec![], default: None }
+        SlotInfo::of(&Slot { name: name.to_string(), ..Slot::default() })
     }
 }
 
@@ -284,21 +293,38 @@ fn run_one(
         record.values.iter().map(|value| (value.name.clone(), value.value.clone())).collect();
     let mut given = record.values.clone();
     let mut missing = record.missing.clone();
+    let mut refused: Vec<String> = Vec::new();
     for (key, value) in values {
         let Some(name) = record.missing_slot(key) else { continue };
-        let is_number = record.slots.iter().any(|slot| slot.name == name && slot.kind == SlotKind::Number);
+        let slot = record.slots.iter().find(|slot| slot.name == name);
+        let is_number = slot.is_some_and(|slot| slot.kind == SlotKind::Number);
         let value = if is_number { args::as_number(value) } else { value.clone() };
+        // A slot with choices takes one of them, under its own spelling, as when the request states it (ADR 24).
+        let value = match slot.filter(|slot| !slot.choices.is_empty()) {
+            Some(slot) => match slot.choice(&value) {
+                Some(choice) => choice.value.clone(),
+                None => {
+                    refused.push(format!("{{{name}}} takes {}, not {value}", slot.choice_list()));
+                    continue;
+                }
+            },
+            None => value,
+        };
         missing.retain(|open| *open != name);
         pinned.insert(name.clone(), value.clone());
         given.push(SlotValue { name, value, source: "caller".into() });
     }
-    let commands = if record.missing.is_empty() { record.commands.clone() } else { render(&record.steps, &pinned) };
+    let commands =
+        if record.missing.is_empty() { record.commands.clone() } else { render(&record.steps, &record.slots, &pinned) };
     let mut outcome = Outcome { commands: commands.clone(), values: given.clone(), ..outcome };
     if !missing.is_empty() {
         let names: Vec<String> = missing.iter().map(|name| format!("{name}=")).collect();
         let still = PlanRecord { missing, ..record.clone() };
         outcome.missing = still.missing_info();
-        let why = format!("plan {id} still needs a value: give it as jli run {id} {}", names.join(" "));
+        let mut why = format!("plan {id} still needs a value: give it as jli run {id} {}", names.join(" "));
+        if !refused.is_empty() {
+            why = format!("{why} ({})", refused.join("; "));
+        }
         return Ok(blocked(outcome, MISSING_VALUE, why, ui));
     }
     outcome.unknown_arguments = record.unknown_arguments.clone();

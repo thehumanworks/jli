@@ -15,7 +15,7 @@ use crate::router::{route, Outcome, RouteOptions, DRY_RUN, NEEDS_CALLER_SHELL, N
 use crate::shell::{HandOff, Shell};
 use crate::store::{now_iso, Brain, BrainConfig, NewSkill};
 use crate::system1::{System1, NONE};
-use crate::types::{error_code, Coded, Mode, Origin, Path, Risk, Slot, SlotKind};
+use crate::types::{error_code, Choice, Coded, Mode, Origin, Path, Risk, Slot, SlotKind};
 use crate::ui::{Prompt, Ui};
 use crate::Models;
 
@@ -194,9 +194,8 @@ fn greeting_skill(scratch: &Scratch) {
     let slot = |name: &str, kind: SlotKind, default: Option<&str>| Slot {
         name: name.into(),
         kind,
-        description: String::new(),
         default: default.map(String::from),
-        aliases: vec![],
+        ..Slot::default()
     };
     scratch
         .brain
@@ -606,6 +605,7 @@ fn teaching_a_template_variant_needs_no_model() {
                 description: "how many".into(),
                 default: None,
                 aliases: vec![],
+                ..Slot::default()
             }],
         })
         .unwrap();
@@ -762,6 +762,7 @@ fn first_lines_skill(scratch: &Scratch) {
                 description: "how many lines".into(),
                 default: None,
                 aliases: vec![],
+                ..Slot::default()
             }],
         })
         .unwrap();
@@ -966,6 +967,7 @@ fn directory_skill(scratch: &Scratch, label: &str, steps: &[&str]) {
                 description: "the directory".into(),
                 default: None,
                 aliases: vec!["dir".into()],
+                ..Slot::default()
             }],
         })
         .unwrap();
@@ -1111,7 +1113,7 @@ fn a_home_path_reaches_the_command_expanded_and_text_stays_literal() {
     let home = std::env::var("HOME").unwrap();
     let (listing, _) = models(|_| decision("list-dir", 0.9, 0.9, SAFE), no_language_model());
     let options = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
-    let expected = |path: &str| crate::slots::render(&["ls {d}".to_string()], &[("d".into(), path.into())].into());
+    let expected = |path: &str| crate::slots::render(&["ls {d}".to_string()], &[], &[("d".into(), path.into())].into());
     for request in ["list dir=~/notes", "list dir=$HOME/notes", "list dir=${HOME}/notes", "list dir: ~/notes"] {
         let outcome = go(&scratch, &listing, request, &mut Script::default(), &options);
         assert_eq!(outcome.commands, expected(&format!("{home}/notes")), "{request}");
@@ -1143,6 +1145,7 @@ fn a_path_in_the_request_is_offered_to_the_file_pick() {
                 description: "the file to count".into(),
                 default: None,
                 aliases: vec![],
+                ..Slot::default()
             }],
         })
         .unwrap();
@@ -1159,7 +1162,8 @@ fn a_path_in_the_request_is_offered_to_the_file_pick() {
     let options = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
     let outcome = go(&scratch, &models, "count the lines of ~/notes/n.txt", &mut Script::default(), &options);
     let home = std::env::var("HOME").unwrap();
-    let expected = crate::slots::render(&["wc -l {f}".to_string()], &[("f".into(), format!("{home}/notes/n.txt"))].into());
+    let expected =
+        crate::slots::render(&["wc -l {f}".to_string()], &[], &[("f".into(), format!("{home}/notes/n.txt"))].into());
     assert_eq!(outcome.commands, expected);
 }
 
@@ -1963,8 +1967,7 @@ fn an_approved_generalization_moves_the_skill_to_the_global_ones() {
     assert!(event.learned.unwrap().contains("the project row was removed"));
 
     // --approve-all writes what passes without asking; a command a global skill runs joins that skill.
-    let slot =
-        Slot { name: "script".into(), kind: SlotKind::Text, description: String::new(), default: None, aliases: vec![] };
+    let slot = Slot { name: "script".into(), kind: SlotKind::Text, ..Slot::default() };
     scratch
         .brain
         .add_skill(&NewSkill {
@@ -2196,6 +2199,7 @@ fn a_template_wins_over_a_literal_skill_that_runs_the_same_command() {
                 description: "how many".into(),
                 default: None,
                 aliases: vec![],
+                ..Slot::default()
             }],
         })
         .unwrap();
@@ -2245,6 +2249,7 @@ fn a_literal_skill_another_writer_made_general_first_is_joined() {
                 description: String::new(),
                 default: None,
                 aliases: vec![],
+                ..Slot::default()
             }],
         };
         other.upgrade_skill("recent-three", &["git log --oneline -n 3".into()], &general).unwrap();
@@ -2600,6 +2605,7 @@ fn directory_size(brain: &Brain, label: &str) {
                 description: "the directory".into(),
                 default: Some(".".into()),
                 aliases: vec![],
+                ..Slot::default()
             }],
         })
         .unwrap();
@@ -2839,4 +2845,350 @@ fn a_hand_edit_never_reaches_another_users_skill() {
         Some("default"),
         "still shown as shared"
     );
+}
+
+// ── Optional slots, defaults and choices (ADR 24) ───────────────────────────────
+
+use crate::hand::SlotEdit;
+
+fn release_or_debug() -> Vec<Choice> {
+    vec![Choice { value: "release".into(), text: "--release".into() }, Choice { value: "debug".into(), text: String::new() }]
+}
+
+/// `echo ran --count {count}`, whose count may be left out with its flag, and `echo build {profile}`,
+/// whose profile is release or debug, and release when the request names neither.
+fn optional_skills(scratch: &Scratch) {
+    let add = |label: &str, step: &str, slot: Slot| {
+        let skill = NewSkill {
+            label: label.into(),
+            steps: vec![step.into()],
+            scenario: format!("the user wants {label}"),
+            risk: Risk::Safe,
+            origin: Origin::Taught,
+            examples: vec![],
+            slots: vec![slot],
+        };
+        scratch.brain.add_skill(&skill).unwrap();
+    };
+    let count = Slot {
+        name: "count".into(),
+        kind: SlotKind::Number,
+        optional: true,
+        flag: Some("--count".into()),
+        ..Slot::default()
+    };
+    add("count-run", "echo ran --count {count}", count);
+    let profile = Slot {
+        name: "profile".into(),
+        description: "the cargo profile".into(),
+        default: Some("release".into()),
+        choices: release_or_debug(),
+        ..Slot::default()
+    };
+    add("build-app", "echo build {profile}", profile);
+}
+
+#[test]
+fn an_optional_slot_nothing_names_is_left_out_with_its_flag_and_no_model() {
+    let scratch = Scratch::new("optional");
+    optional_skills(&scratch);
+    // Any language model call panics: the agent is never asked to fill an optional slot.
+    let (models, _) = models(|_| decision("count-run", 0.9, 0.9, SAFE), no_language_model());
+    let outcome = go(&scratch, &models, "run it", &mut Script::default(), &yes(&scratch));
+    assert_eq!(
+        (outcome.commands.as_slice(), outcome.output.as_deref()),
+        (["echo ran".to_string()].as_slice(), Some("ran\n"))
+    );
+    assert!(outcome.values.is_empty());
+    assert_eq!((outcome.accepts[0].optional, outcome.accepts[0].flag.as_deref()), (true, Some("--count")));
+
+    let command =
+        |request: &str| go(&scratch, &models, request, &mut Script::default(), &yes(&scratch)).commands.join(" && ");
+    assert_eq!(command("run it 5 times"), "echo ran --count 5", "a number in the request");
+    assert_eq!(command("run it count=two"), "echo ran --count 2", "stated by name");
+
+    // A dry run's plan is ready: an optional slot is not a value it waits for, nor one it takes later.
+    let dry = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "run it", &mut Script::default(), &dry);
+    assert!(outcome.missing.is_empty());
+    let late = [("count".to_string(), "3".to_string())];
+    let flags = RunFlags { yolo: false, capture: true };
+    let refused = run_plans(
+        &scratch.brain,
+        &no_model_at_all(),
+        &[outcome.plan_id.unwrap()],
+        &late,
+        &quiet(),
+        &mut Script::default(),
+        flags,
+    );
+    assert_eq!(refused.unwrap_err().to_string(), "none of these plans is missing a value for count=");
+    let ran = plans(&scratch, &no_model_at_all(), &[outcome.plan_id.unwrap()], &[], &mut Script::default());
+    assert_eq!((ran[0].commands.as_slice(), ran[0].output.as_deref()), (["echo ran".to_string()].as_slice(), Some("ran\n")));
+}
+
+#[test]
+fn a_slot_with_choices_writes_what_the_choice_says_and_its_default_when_none_is_named() {
+    let scratch = Scratch::new("choices");
+    optional_skills(&scratch);
+    let (models, _) = models(|_| decision("build-app", 0.9, 0.9, SAFE), no_language_model());
+    let options = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let route = |request: &str| go(&scratch, &models, request, &mut Script::default(), &options);
+    let outcome = route("build the app");
+    assert_eq!(outcome.commands, ["echo build --release"]);
+    assert_eq!(outcome.values, [SlotValue { name: "profile".into(), value: "release".into(), source: "default".into() }]);
+    let outcome = route("build the app in debug mode");
+    assert_eq!(outcome.commands, ["echo build"], "a choice with no text writes nothing");
+    assert_eq!((outcome.values[0].value.as_str(), outcome.values[0].source.as_str()), ("debug", "pattern"));
+    assert_eq!(outcome.phrase.as_deref(), Some("build the app in … mode"), "the value is hidden from what is learned");
+    assert_eq!(route("build profile=DEBUG").values[0].value, "debug", "named without case, kept as the choice spells it");
+    assert_eq!(route("build profile: debug please").commands, ["echo build"], "a label takes one word");
+    assert_eq!(route("a release build, not a debug one").commands, ["echo build --release"], "two named is the default");
+    assert_eq!(route("build the debugging tools").commands, ["echo build --release"], "debug inside a word is not named");
+}
+
+#[test]
+fn a_value_a_slot_does_not_offer_blocks_the_run_until_one_it_does() {
+    let scratch = Scratch::new("not-a-choice");
+    optional_skills(&scratch);
+    let (models, _) = models(|_| decision("build-app", 0.9, 0.9, SAFE), no_language_model());
+    let outcome = go(&scratch, &models, "build profile=fast", &mut Script::default(), &yes(&scratch));
+    assert!(!outcome.ran);
+    assert_eq!(code(&outcome), Some("missing_value"));
+    assert_eq!(outcome.blocked.as_deref(), Some("{profile} takes release or debug, not fast"));
+    assert_eq!((outcome.missing[0].name.as_str(), outcome.missing[0].choices.len()), ("profile", 2));
+
+    let id = outcome.plan_id.unwrap();
+    let refused = plans(&scratch, &no_model_at_all(), &[id], &[("profile", "fast")], &mut Script::default());
+    assert_eq!(code(&refused[0]), Some("missing_value"));
+    assert!(refused[0].blocked.as_deref().unwrap().ends_with("({profile} takes release or debug, not fast)"));
+    let ran = plans(&scratch, &no_model_at_all(), &[id], &[("profile", "Release")], &mut Script::default());
+    assert_eq!(ran[0].commands, ["echo build --release"]);
+    assert_eq!(ran[0].output.as_deref(), Some("build --release\n"));
+}
+
+#[test]
+fn a_slot_with_choices_and_no_default_is_picked_by_system1_among_them() {
+    let scratch = Scratch::new("choice-pick");
+    let target = Slot {
+        name: "target".into(),
+        description: "where to deploy".into(),
+        choices: vec![
+            Choice { value: "staging".into(), text: "--staging".into() },
+            Choice { value: "production".into(), text: "--prod".into() },
+        ],
+        ..Slot::default()
+    };
+    let skill = NewSkill {
+        label: "deploy".into(),
+        steps: vec!["echo deploy {target}".into()],
+        scenario: "the user wants the app deployed".into(),
+        risk: Risk::Modifies,
+        origin: Origin::Taught,
+        examples: vec![],
+        slots: vec![target],
+    };
+    scratch.brain.add_skill(&skill).unwrap();
+    let (models, _) = models(
+        |request| {
+            let Some(pick) = request["questions"].get("value") else { return decision("deploy", 0.9, 0.9, SAFE) };
+            let options = pick.to_string();
+            assert!(options.contains("staging") && options.contains("production"), "{options}");
+            json!({"model": "m", "answers": {"value": {"type": "choice", "choice": "staging", "confidence": 0.8,
+                                                      "probabilities": {"staging": 0.8}}}})
+        },
+        no_language_model(),
+    );
+    let options = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "ship it to the test servers", &mut Script::default(), &options);
+    assert_eq!(outcome.commands, ["echo deploy --staging"]);
+    assert_eq!(outcome.values[0].source, "system1");
+}
+
+#[test]
+fn the_agent_makes_a_flag_and_its_value_optional_but_never_a_bare_value() {
+    let scratch = Scratch::new("optional-proposed");
+    let slots = json!([
+        { "name": "count", "kind": "number", "description": "how many", "default": "3", "aliases": [], "optional": true, "flag": "--count" },
+        { "name": "word", "kind": "text", "description": "a word", "default": null, "aliases": [], "optional": true, "flag": null },
+    ]);
+    let values = json!([{ "name": "word", "value": "hi" }]);
+    let proposal = new_proposal("count-run", "echo ran --count {count} {word}", slots, values);
+    let (models, _) = models(once_known("count-run", decision(NONE, 0.4, 0.95, SAFE)), vec![("proposal", proposal)]);
+    let outcome = go(&scratch, &models, "run it saying hi", &mut Script::default(), &yes(&scratch));
+    assert_eq!(outcome.commands, ["echo ran hi"]);
+    assert_eq!(outcome.output.as_deref(), Some("ran hi\n"));
+    let slots = scratch.brain.skill("count-run").unwrap().unwrap().slots;
+    assert_eq!((slots[0].optional, slots[0].flag.as_deref(), &slots[0].default), (true, Some("--count"), &None));
+    assert!(!slots[1].optional, "an optional value with no flag is not the agent's to drop");
+
+    // Next time the count can be said, and is written with its flag; nobody is asked.
+    let (silent, _) = self::models(|_| decision("count-run", 0.9, 0.9, SAFE), no_language_model());
+    let outcome = go(&scratch, &silent, "run it 4 times saying \"yo\"", &mut Script::default(), &yes(&scratch));
+    assert_eq!(outcome.output.as_deref(), Some("ran --count 4 yo\n"));
+}
+
+#[test]
+fn a_taught_flag_value_is_optional_and_the_command_without_it_joins_the_skill() {
+    let scratch = Scratch::new("teach-optional");
+    let mut row = draft("git log --oneline -n {count}", "3");
+    row["slots"][0]["optional"] = json!(true);
+    row["slots"][0]["flag"] = json!("-n");
+    row["slots"][0]["default"] = json!("3");
+    let (models, _) = models(
+        |request| {
+            if request["state"]["request"] == "show the last 3 commits" {
+                decision("git-recent-commits", 0.92, 0.9, SAFE)
+            } else {
+                decision("git-status", 0.9, 0.9, SAFE)
+            }
+        },
+        vec![("matrix_row", row)],
+    );
+    let teach = |phrase: &str, command: &str, models: &Models| {
+        let input = LearnInput {
+            phrase: phrase.into(),
+            steps: vec![command.into()],
+            risk: None,
+            mode: Mode::Semi,
+            threshold: 0.5,
+            cwd: scratch.work.clone(),
+        };
+        learn_phrase(&scratch.brain, models, &input, &quiet()).unwrap()
+    };
+    assert!(teach("show the last 3 commits", "git log --oneline -n 3", &models).created);
+    let skill = scratch.brain.skill("git-recent-commits").unwrap().unwrap();
+    assert_eq!((skill.slots[0].optional, skill.slots[0].flag.as_deref()), (true, Some("-n")));
+    assert_eq!(skill.slots[0].default, None, "a model's default would never let the count be left out");
+
+    // The command without the count is the same skill: no model is asked.
+    let (silent, _) = self::models(|_| panic!("System 1 must not be asked"), no_language_model());
+    let learned = teach("show the log", "git log --oneline", &silent);
+    assert_eq!((learned.label.as_str(), learned.created), ("git-recent-commits", false));
+    let skill = scratch.brain.skill("git-recent-commits").unwrap().unwrap();
+    assert_eq!(skill.examples, ["show the last 3 commits", "show the log"]);
+}
+
+#[test]
+fn the_agent_is_shown_a_slot_as_its_prompt_was_measured() {
+    let scratch = Scratch::new("placeholders");
+    let message = Slot {
+        name: "message".into(),
+        description: "the commit message".into(),
+        flag: Some("-m".into()),
+        ..Slot::default()
+    };
+    assert!(scratch.brain.set_slot("git-commit", &message).unwrap());
+    let written = json!({ "values": [{ "name": "message", "value": "wip" }] });
+    let (models, replies) = models(|_| decision("git-commit", 0.9, 0.9, [0.2, 0.8, 0.0]), vec![("slot_values", written)]);
+    let dry = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "commit my work", &mut Script::default(), &dry);
+    assert_eq!(outcome.commands, ["git commit -m wip"]);
+    let seen = replies.seen.lock().unwrap();
+    let input: Value = serde_json::from_str(seen[0]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        input["placeholders"],
+        json!([{ "name": "message", "kind": "text", "description": "the commit message" }]),
+        "a flag, like any setting of ADR 24, is not part of what the agent is shown"
+    );
+}
+
+fn slot_edit(label: &str, slot: &str) -> SlotEdit {
+    SlotEdit { label: label.into(), slot: slot.into(), ..SlotEdit::default() }
+}
+
+#[test]
+fn a_placeholder_is_given_choices_and_a_default_by_hand() {
+    let scratch = Scratch::new("hand-slot");
+    // Taught as written, with a placeholder no slot declares: it blocks until `jli slot` declares it.
+    let (label, _) = scratch.brain.learn_command("build the app", &["echo build {profile}".into()], Risk::Safe).unwrap();
+    assert_eq!(label, "echo-build-profile");
+    let (models, _) = models(|_| decision("echo-build-profile", 0.9, 0.9, SAFE), no_language_model());
+    let dry = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    assert_eq!(code(&go(&scratch, &models, "build the app", &mut Script::default(), &dry)), Some("missing_value"));
+
+    let mut brain = mutable(&scratch);
+    let edit = SlotEdit {
+        choices: Some(release_or_debug()),
+        default: Some(Some("Release".into())),
+        ..slot_edit(&label, "profile")
+    };
+    let dry_edit = hand::slot(&mut brain, &SlotEdit { dry_run: true, ..edit.clone() }).unwrap();
+    assert!(dry_edit.message.starts_with("Dry run: nothing was written."), "{}", dry_edit.message);
+    assert!(scratch.brain.skill(&label).unwrap().unwrap().slots.is_empty());
+    let done = hand::slot(&mut brain, &edit).unwrap();
+    assert_eq!(done.refused, None);
+    assert_eq!(
+        done.message,
+        "{profile} in echo-build-profile is now a slot: release → --release, debug → nothing; default release."
+    );
+    assert_eq!((done.json["declared"].as_bool(), done.json["default"].as_str()), (Some(true), Some("release")));
+    assert_eq!(go(&scratch, &models, "build the app", &mut Script::default(), &dry).commands, ["echo build --release"]);
+    assert_eq!(go(&scratch, &models, "a debug build", &mut Script::default(), &dry).commands, ["echo build"]);
+    let again = hand::slot(&mut brain, &edit).unwrap();
+    assert!(again.message.ends_with("Nothing was changed."), "{}", again.message);
+}
+
+#[test]
+fn a_slot_is_made_optional_with_its_flag_by_hand_and_keeps_its_aliases() {
+    let scratch = Scratch::new("hand-optional");
+    first_lines_skill(&scratch);
+    let mut brain = mutable(&scratch);
+    hand::alias(&mut brain, &alias_edit("first-lines", "count", "n", false)).unwrap();
+    let edit = SlotEdit { optional: Some(true), flag: Some(Some("-n".into())), ..slot_edit("first-lines", "N") };
+    let done = hand::slot(&mut brain, &edit).unwrap();
+    assert_eq!(done.message, "{count} in first-lines is now: optional, left out with -n.");
+    assert_eq!(aliases(&scratch.brain, "first-lines", "count"), ["n"]);
+    let (models, _) = models(|_| decision("first-lines", 0.9, 0.9, SAFE), no_language_model());
+    let outcome = go(&scratch, &models, "top of the notes", &mut Script::default(), &yes(&scratch));
+    assert_eq!(outcome.commands, ["head notes.txt"]);
+    assert_eq!(outcome.output.as_deref(), Some("one\ntwo\nthree\n"));
+
+    // `--required` puts it back as it was.
+    hand::slot(&mut brain, &SlotEdit { optional: Some(false), ..slot_edit("first-lines", "count") }).unwrap();
+    assert!(!scratch.brain.skill("first-lines").unwrap().unwrap().slots[0].optional);
+}
+
+#[test]
+fn a_slot_setting_that_cannot_hold_is_refused_and_changes_nothing() {
+    let scratch = Scratch::new("hand-slot-refused");
+    first_lines_skill(&scratch);
+    optional_skills(&scratch);
+    let joined = NewSkill {
+        label: "cargo-profile".into(),
+        steps: vec!["cargo build --profile={profile}".into()],
+        scenario: "the user wants a build".into(),
+        risk: Risk::Safe,
+        origin: Origin::Taught,
+        examples: vec![],
+        slots: vec![Slot { name: "profile".into(), ..Slot::default() }],
+    };
+    scratch.brain.add_skill(&joined).unwrap();
+    let before = scratch.brain.skills().unwrap();
+    let mut brain = mutable(&scratch);
+    let choice = |value: &str| Choice { value: value.into(), text: value.into() };
+    for (edit, code) in [
+        (SlotEdit { default: Some(Some("1".into())), ..slot_edit("no-such-skill", "count") }, hand::SKILL_NOT_FOUND),
+        (SlotEdit { default: Some(Some("1".into())), ..slot_edit("first-lines", "lines") }, hand::SLOT_NOT_FOUND),
+        (SlotEdit { flag: Some(Some("-x".into())), ..slot_edit("first-lines", "count") }, hand::FLAG_INVALID),
+        (SlotEdit { flag: Some(Some("n".into())), ..slot_edit("first-lines", "count") }, hand::FLAG_INVALID),
+        (SlotEdit { optional: Some(true), ..slot_edit("cargo-profile", "profile") }, hand::FLAG_INVALID),
+        (SlotEdit { choices: Some(vec![choice("-x")]), ..slot_edit("build-app", "profile") }, hand::CHOICE_INVALID),
+        (SlotEdit { choices: Some(vec![choice("two words")]), ..slot_edit("build-app", "profile") }, hand::CHOICE_INVALID),
+        (
+            SlotEdit { choices: Some(vec![choice("a"), choice("A")]), ..slot_edit("build-app", "profile") },
+            hand::CHOICE_INVALID,
+        ),
+        (SlotEdit { default: Some(Some("fast".into())), ..slot_edit("build-app", "profile") }, hand::DEFAULT_INVALID),
+        (SlotEdit { choices: Some(vec![choice("dev")]), ..slot_edit("build-app", "profile") }, hand::DEFAULT_INVALID),
+    ] {
+        let done = hand::slot(&mut brain, &edit).unwrap();
+        assert_eq!(done.refused, Some(code), "{edit:?}: {}", done.message);
+    }
+    let joined = SlotEdit { optional: Some(true), ..slot_edit("cargo-profile", "profile") };
+    assert_eq!(
+        hand::slot(&mut brain, &joined).unwrap().message,
+        "{profile} is joined to --profile= in cargo build --profile={profile}, so leaving it out would leave --profile= behind. Name it as its flag too: --flag=--profile="
+    );
+    assert_eq!(scratch.brain.skills().unwrap(), before);
 }

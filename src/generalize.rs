@@ -8,11 +8,11 @@ use anyhow::Result;
 
 use crate::context::read_context;
 use crate::eval::{in_parallel, verify_row, with_row};
-use crate::llm::AGENT_MODEL;
-use crate::slots::{match_proposal, match_template, slots_a_flag, undeclared};
+use crate::llm::{SlotDraft, AGENT_MODEL};
+use crate::slots::{checked_slots, keep_settings, match_proposal, match_template, slots_a_flag, undeclared};
 use crate::store::{slug, Brain, NewEvent, NewSkill, Promote};
 use crate::system2::{generalize as propose, Generality, Generalization, GeneralizeInput};
-use crate::types::{with_checked_aliases, Path, Skill, Slot};
+use crate::types::{Path, Skill, Slot};
 use crate::ui::{c, duration, fixed, risk_tag, Prompt, Ui};
 use crate::Models;
 
@@ -278,18 +278,15 @@ fn plan(proposal: &Generalization, skill: &Skill, global: &[Skill]) -> std::resu
     if proposal.steps.is_empty() {
         return Err("it proposed no command".into());
     }
-    let slots: Vec<Slot> = proposal
+    let mut slots = checked_slots(proposal.slots.iter().map(SlotDraft::to_slot).collect(), &proposal.steps);
+    // How the project skill's slots are written goes with it (ADR 24). A default does only when it is one
+    // of the slot's choices: otherwise it is usually a value of this project, such as its package.
+    let known: Vec<Slot> = skill
         .slots
         .iter()
-        .map(|slot| Slot {
-            name: slot.name.clone(),
-            kind: slot.kind,
-            description: slot.description.clone(),
-            default: slot.default.clone(),
-            aliases: slot.aliases.clone(),
-        })
+        .map(|slot| Slot { default: slot.default.clone().filter(|_| !slot.choices.is_empty()), ..slot.clone() })
         .collect();
-    let slots = with_checked_aliases(slots);
+    keep_settings(&mut slots, &known, &proposal.steps);
     let Some(values) = match_template(&proposal.steps, &command) else {
         if slots_a_flag(&proposal.steps, &command) {
             return Err("it made a flag a slot".into());
@@ -300,8 +297,9 @@ fn plan(proposal: &Generalization, skill: &Skill, global: &[Skill]) -> std::resu
     if !missing.is_empty() {
         return Err(format!("it uses {{{}}} without declaring it", missing.join("}, {")));
     }
-    let known =
-        global.iter().find(|known| runs_it(known) || match_proposal(&known.steps, &proposal.steps, &values).is_some());
+    let known = global
+        .iter()
+        .find(|known| runs_it(known) || match_proposal(&known.steps, &known.slots, &proposal.steps, &values).is_some());
     if let Some(known) = known {
         return Ok(Plan::Into(known.clone()));
     }
@@ -324,8 +322,12 @@ fn show(ui: &Ui, title: &str, skill: &Skill) {
         ui.line(format!("     {} {step}", c::green("$")));
     }
     for slot in &skill.slots {
-        let also = if slot.aliases.is_empty() { String::new() } else { format!(", also {}", slot.aliases.join(", ")) };
-        ui.line(format!("     {}", c::dim(format!("{{{}}} {}: {}{also}", slot.name, kind(slot), slot.description))));
+        let mut also = if slot.aliases.is_empty() { String::new() } else { format!(", also {}", slot.aliases.join(", ")) };
+        let settings = slot.settings();
+        if !settings.is_empty() {
+            also = format!("{also}; {settings}");
+        }
+        ui.line(format!("     {}", c::dim(format!("{{{}}} {}: {}{also}", slot.name, slot.kind.as_str(), slot.description))));
     }
     ui.line(format!("     {}", c::dim(&skill.scenario)));
     for example in &skill.examples {
@@ -333,15 +335,6 @@ fn show(ui: &Ui, title: &str, skill: &Skill) {
     }
     for example in &skill.counter_examples {
         ui.line(format!("     {} \"{example}\"", c::red("−")));
-    }
-}
-
-fn kind(slot: &Slot) -> &'static str {
-    match slot.kind {
-        crate::types::SlotKind::File => "file",
-        crate::types::SlotKind::Branch => "branch",
-        crate::types::SlotKind::Number => "number",
-        crate::types::SlotKind::Text => "text",
     }
 }
 
