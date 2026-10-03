@@ -17,7 +17,7 @@ struct Command {
 /// How wide the first column is: what a command, an option or a variable does begins after it.
 const WIDTH: usize = 36;
 const OPTION_WIDTH: usize = 21;
-const ENVIRONMENT_WIDTH: usize = 14;
+const ENVIRONMENT_WIDTH: usize = 15;
 
 const USAGE: &[Line] = &[
     ("jli <request in plain language>", "route, run, learn"),
@@ -77,8 +77,28 @@ const COMMANDS: &[Command] = &[
             ("jli config", "show settings"),
             ("jli config confidence <0..1>", "confidence System 1 needs before its pick is used (default 0.5)"),
             ("jli config mode <manual|semi|auto>", "who does the teaching (default semi)"),
+            ("jli config model <slug>", "the model the agent and the translator run on your ChatGPT plan"),
         ],
         options: &[],
+    },
+    Command {
+        name: "login",
+        lines: &[
+            ("jli login", "continue with ChatGPT: the agent and the translator run on your\nChatGPT plan instead of an API key"),
+            ("jli login --new", "the same with another ChatGPT account than the one saved here"),
+            ("jli login --codex", "use the ChatGPT account the Codex CLI is signed in with"),
+        ],
+        options: &[QUIET, JSON],
+    },
+    Command {
+        name: "logout",
+        lines: &[("jli logout", "stop using your ChatGPT plan, and end jli's session with it")],
+        options: &[JSON],
+    },
+    Command {
+        name: "models",
+        lines: &[("jli models", "the models your ChatGPT plan has; jli config model picks one")],
+        options: &[JSON],
     },
     Command {
         name: "fix",
@@ -202,6 +222,9 @@ const ENVIRONMENT: &[Line] = &[
     ("JLI_QUIET", "1 or true: the same as --quiet"),
     ("JLI_THRESHOLD", "0 to 1: the same as --confidence= (JLI_CONFIDENCE also works)"),
     ("JLI_MODE", "manual, semi or auto: the same as --mode= (the flag wins)"),
+    ("JLI_PROVIDER", "chatgpt, openrouter, gateway or custom: where language model requests go\n(default: a ChatGPT sign-in, then OPENROUTER_API_KEY, then AI_GATEWAY_API_KEY)"),
+    ("JLI_CHATGPT_DIR", "where this host keeps its ChatGPT sign-in (default ~/.jli/chatgpt)"),
+    ("JLI_AGENT_MODEL", "the agent's model, over jli config model; JLI_TRANSLATOR_MODEL the translator's"),
 ];
 
 /// Lines in two columns, what is typed padded to `width`.
@@ -300,6 +323,9 @@ mod tests {
             "history",
             "teach",
             "config",
+            "login",
+            "logout",
+            "models",
             "fix",
             "run",
             "forget",

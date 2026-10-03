@@ -5,7 +5,7 @@ pkl = "0.32.1"
 
 [tasks.check]
 description = "Everything a commit must pass: format, clippy, ast-grep rules and the offline tests"
-run = ["hk check --all", "cargo test --quiet"]
+run = ["hk check --all", "cargo test --workspace --quiet"]
 
 [tasks.fix]
 description = "Apply the fixes the linters can make"

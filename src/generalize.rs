@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use crate::context::read_context;
 use crate::eval::{in_parallel, verify_row, with_row};
-use crate::llm::{SlotDraft, AGENT_MODEL};
+use crate::llm::SlotDraft;
 use crate::slots::{checked_slots, keep_settings, match_proposal, match_template, slots_a_flag, undeclared};
 use crate::store::{slug, Brain, NewEvent, NewSkill, Promote};
 use crate::system2::{generalize as propose, Generality, Generalization, GeneralizeInput};
@@ -110,7 +110,7 @@ fn consider(
         "\n{} {} {}",
         c::magenta("◆ generalize"),
         c::bold(&skill.label),
-        c::dim(format!("· project {project} · {}", *AGENT_MODEL))
+        c::dim(format!("· project {project} · {}", models.llm.agent_label()))
     ));
     let asked = propose(&models.llm, &GeneralizeInput { project, skill, elsewhere: &elsewhere, global: &global });
     let (proposal, ms) = match asked {

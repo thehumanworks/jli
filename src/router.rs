@@ -9,7 +9,7 @@ use crate::context::{list_entries, read_context, Context};
 use crate::eval::verify_row;
 use crate::exec::{run, try_builtins, RunOptions, RunResult};
 use crate::learn::{learn_phrase, settle_proposed, LearnInput, Learned, Settled};
-use crate::llm::{SlotDraft, AGENT_MODEL};
+use crate::llm::SlotDraft;
 use crate::plan::{self, CandidateInfo, PlanRecord, SlotInfo, SlotValue};
 use crate::shell::{first_caller_step, hand_off_text, safe_to_try, HandOff, Shell};
 use crate::slots::{
@@ -477,7 +477,7 @@ impl Route<'_> {
         let plan = match plan {
             Some(plan) => plan,
             None => {
-                ui.escalate(&escalation, &AGENT_MODEL);
+                ui.escalate(&escalation, &self.models.llm.agent_label());
                 let skills = self.skills();
                 let rejected: Vec<Rejected> = self
                     .all_skills

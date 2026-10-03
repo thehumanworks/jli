@@ -1,8 +1,25 @@
+[workspace]
+members = [".", "crates/chatgpt-sdk"]
+
+# Strict by default: a warning fails the build in the hooks and in CI (`-D warnings`).
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+panic = "deny"
+
 [package]
 name = "jli"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+# 1.89: chatgpt-sdk serialises token refreshes with `File::lock`.
+rust-version = "1.89"
 description = "Plain-language CLI that routes requests with a System 1 decision model and learns from use"
 publish = false
 
@@ -18,21 +35,12 @@ path = "examples/bench-translator.rs"
 name = "bench-context"
 path = "examples/bench-context.rs"
 
-# Strict by default: a warning fails the build in the hooks and in CI (`-D warnings`).
-[lints.rust]
-unsafe_code = "forbid"
-unused_must_use = "deny"
-
-[lints.clippy]
-all = { level = "deny", priority = -1 }
-unwrap_used = "deny"
-dbg_macro = "deny"
-todo = "deny"
-unimplemented = "deny"
-panic = "deny"
+[lints]
+workspace = true
 
 [dependencies]
 anyhow = "1"
+chatgpt-sdk = { path = "crates/chatgpt-sdk", version = "0.1" }
 gethostname = "1"
 libsql = "0.9"
 regex = "1"
@@ -43,3 +51,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["rt"] }
 typesafe-jev = "0.2"
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
+
+[dev-dependencies]
+# The offline tests sign in to a fake ChatGPT.
+chatgpt-sdk = { path = "crates/chatgpt-sdk", version = "0.1", features = ["testing"] }

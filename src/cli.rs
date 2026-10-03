@@ -4,9 +4,11 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 
+use crate::account::{Accounts, SignedIn, SignedOut, Source, MANAGE_USAGE_URL};
 use crate::args;
 use crate::demo::run_demo;
 use crate::eval;
+use crate::exec::open_in_browser;
 use crate::generalize::{generalize, GeneralizeOptions};
 use crate::hand;
 use crate::help;
@@ -1103,7 +1105,11 @@ impl App {
                 self.brain.set_setting("mode", parse_mode(value)?.as_str())?;
                 say(format!("Learning mode saved in the brain: {value}"));
             }
-            (None | Some("confidence" | "mode"), _) => {
+            (Some("model"), Some(value)) => {
+                Accounts::from_env()?.set_model(value)?;
+                say(format!("Model saved for your ChatGPT plan on this host: {value}"));
+            }
+            (None | Some("confidence" | "mode" | "model"), _) => {
                 say(format!(
                     "confidence  {}  {}",
                     resolve_threshold(&self.brain, flags)?,
@@ -1114,7 +1120,11 @@ impl App {
                     resolve_mode(&self.brain, flags)?,
                     c::dim("manual: stored as taught · semi: a fast model generalises what you teach · auto: also learns from a no or a failed command")
                 ));
-                say(c::dim("\nSet with: jli config confidence 0.7 · jli config mode auto\nOr per shell with JLI_THRESHOLD / JLI_MODE, or per run with --confidence= / --mode="));
+                let llm = &self.models.llm;
+                let (agent, translator) = (llm.agent_model(), llm.translator_model());
+                let models = if agent == translator { agent } else { format!("{agent} (agent), {translator} (translator)") };
+                say(format!("model       {models}  {}", c::dim(format!("on {}", llm.describe()))));
+                say(c::dim("\nSet with: jli config confidence 0.7 · jli config mode auto · jli config model gpt-6-luna (after jli login)\nOr per shell with JLI_THRESHOLD / JLI_MODE / JLI_AGENT_MODEL, or per run with --confidence= / --mode="));
             }
             _ => return Ok(None),
         }
@@ -1272,6 +1282,111 @@ fn path_tag(path: Path) -> String {
     }
 }
 
+/// `jli login`, `jli login --codex`, `jli logout` and `jli models`: the ChatGPT plan on this host.
+/// They need no brain (ADR 28). `None` when the words are not one of them.
+fn account(words: &[String], flags: &Flags) -> Result<Option<i32>> {
+    let shape: Vec<&str> = words.iter().map(String::as_str).collect();
+    // `jli models` only reads, so -n changes nothing there; signing in or out cannot be previewed.
+    if flags.dry_run && account_shape(&shape) && shape != ["models"] {
+        let why = format!("jli {} signs in or out, so -n cannot apply: run it without -n", shape.join(" "));
+        return Ok(Some(refuse(flags, USAGE, &why)));
+    }
+    match shape.as_slice() {
+        ["login"] | ["login", "--new"] => {
+            let trace = Ui::new(!flags.quiet && !flags.json);
+            // The URL is the sign-in itself, so it reaches stderr even with --quiet or --json.
+            let show = |url: &str| eprintln!("{} Open this page to continue with ChatGPT:\n  {url}", c::yellow("!"));
+            let signed_in = Accounts::from_env()?.login(&trace, &open_in_browser, &show, shape.len() == 2)?;
+            say_signed_in(&signed_in, flags);
+        }
+        ["login", "--codex"] => say_signed_in(&Accounts::from_env()?.login_codex()?, flags),
+        ["logout"] => say_signed_out(&Accounts::from_env()?.logout()?, flags),
+        ["models"] => {
+            let (models, current) = Accounts::from_env()?.models()?;
+            if flags.json {
+                let list: Vec<serde_json::Value> = models
+                    .iter()
+                    .map(|model| serde_json::json!({ "slug": model.slug, "name": model.name(), "current": model.slug == current }))
+                    .collect();
+                say(serde_json::to_string_pretty(&list)?);
+            } else {
+                let width = models.iter().map(|model| model.slug.len()).max().unwrap_or(0);
+                for model in &models {
+                    let mark = if model.slug == current { c::green("← in use") } else { String::new() };
+                    say(format!("  {:width$}  {}  {mark}", model.slug, c::dim(model.name())));
+                }
+                say(c::dim(format!(
+                    "Using ChatGPT plan · pick one with jli config model <slug> · manage usage at {MANAGE_USAGE_URL}"
+                )));
+            }
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(0))
+}
+
+/// Whether the words are exactly one of the account commands.
+fn account_shape(shape: &[&str]) -> bool {
+    matches!(shape, ["login"] | ["login", "--new" | "--codex"] | ["logout"] | ["models"])
+}
+
+fn say_signed_in(signed_in: &SignedIn, flags: &Flags) {
+    if flags.json {
+        let value = serde_json::json!({
+            "signedIn": true,
+            "source": signed_in.source,
+            "email": signed_in.email,
+            "planUsage": signed_in.plan_usage,
+            "model": signed_in.model,
+            "manageUsage": MANAGE_USAGE_URL,
+        });
+        say(serde_json::to_string_pretty(&value).unwrap_or_default());
+        return;
+    }
+    let who = signed_in.email.as_deref().unwrap_or("your ChatGPT account");
+    if !signed_in.plan_usage {
+        say(format!(
+            "Signed in with ChatGPT as {who}, but jli was not allowed to use your ChatGPT plan, so nothing changed. Run jli login again to allow it."
+        ));
+        return;
+    }
+    match signed_in.source {
+        Source::SignIn => say(format!("Signed in with ChatGPT as {who}.")),
+        Source::Codex => {
+            let plan = signed_in.plan_type.as_deref().map(|plan| format!(", {plan} plan")).unwrap_or_default();
+            say(format!("Using the ChatGPT account Codex is signed in with: {who}{plan}."));
+        }
+    }
+    say(format!(
+        "The agent and the translator now run on {} using your ChatGPT plan. jli models lists the others.",
+        signed_in.model
+    ));
+    if signed_in.welcome {
+        say(format!(
+            "\nYou're using your ChatGPT plan. What jli asks a language model counts toward your plan's usage, which you can review and limit at {MANAGE_USAGE_URL}"
+        ));
+    }
+}
+
+fn say_signed_out(out: &SignedOut, flags: &Flags) {
+    if flags.json {
+        let value = serde_json::json!({ "signedOut": out.source.is_some(), "source": out.source, "email": out.email, "revoked": out.revoked });
+        say(serde_json::to_string_pretty(&value).unwrap_or_default());
+        return;
+    }
+    let who = out.email.as_deref().map(|email| format!(" ({email})")).unwrap_or_default();
+    match out.source {
+        None => say("jli was not using a ChatGPT plan."),
+        Some(Source::Codex) => say(format!("jli no longer uses Codex's ChatGPT sign-in{who}. Codex stays signed in.")),
+        Some(Source::SignIn) => {
+            say(format!("Signed out of ChatGPT{who}. jli no longer uses your ChatGPT plan."));
+            if !out.revoked {
+                say("The session could not be ended remotely: to end it now, disconnect jli in ChatGPT's settings.");
+            }
+        }
+    }
+}
+
 /// Print the shell function for the named shell, or for `$SHELL`. Needs no brain and no keys.
 fn shell_init(name: Option<&str>) -> Result<i32> {
     let names = || Shell::ALL.map(Shell::as_str).join(", ");
@@ -1302,6 +1417,11 @@ fn run(argv: &[String]) -> Result<i32> {
     }
     if first == Some("shell-init") && words.len() <= 2 && rest.is_empty() {
         return shell_init(words.get(1).map(String::as_str));
+    }
+    if rest.is_empty() {
+        if let Some(code) = account(&words, &flags)? {
+            return Ok(code);
+        }
     }
 
     let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -1363,6 +1483,25 @@ mod tests {
         assert_eq!(teach.rest, ["git", "log", "-y"], "flags after -- belong to the command");
         assert_eq!(teach.flags.risk, Some(Risk::Safe));
         assert!(!teach.flags.yes);
+    }
+
+    #[test]
+    fn only_the_account_commands_exact_words_are_taken() {
+        // Each of these is a request in plain words, and must reach the router untouched.
+        for words in [
+            &["models", "are", "slow"][..],
+            &["login", "to", "the", "server"],
+            &["logout", "--now"],
+            &["login", "--codex", "x"],
+        ] {
+            assert_eq!(account(&args(words), &Flags::quiet()).unwrap(), None, "{words:?}");
+        }
+        // -n would show nothing and change everything: signing in or out refuses it before any account is read.
+        let dry = Flags { dry_run: true, ..Flags::quiet() };
+        for words in [&["login"][..], &["login", "--new"], &["login", "--codex"], &["logout"]] {
+            assert_eq!(account(&args(words), &dry).unwrap(), Some(1), "{words:?}");
+        }
+        assert_eq!(account(&args(&["login", "to", "the", "server"]), &dry).unwrap(), None, "a request stays a request");
     }
 
     #[test]
