@@ -1,0 +1,50 @@
+[package]
+name = "chatgpt-sdk"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Sign in with ChatGPT, and run Responses API requests on the user's ChatGPT plan"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["chatgpt", "openai", "oauth", "responses", "llm"]
+categories = ["api-bindings", "authentication", "web-programming::http-client"]
+include = ["src/**/*", "examples/**/*.rs", "tests/**/*.rs", "README.md", "CHANGELOG.md", "LICENSE-*"]
+
+[features]
+default = ["ureq"]
+# The blocking HTTP client behind `UreqClient`. Turn it off to bring your own `HttpClient`.
+ureq = ["dep:ureq"]
+# `testing::FakeChatGpt`: an authorization server, browser and Responses API for offline tests.
+testing = []
+
+[lints]
+workspace = true
+
+[[example]]
+name = "sign_in"
+required-features = ["ureq"]
+
+[[example]]
+name = "codex"
+required-features = ["ureq"]
+
+[[test]]
+name = "live"
+required-features = ["ureq"]
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+percent-encoding = "2"
+ring = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"], optional = true }
+
+[dev-dependencies]
+# The integration tests use the fake from the `testing` feature.
+chatgpt-sdk = { path = ".", features = ["testing"] }
+
+[package.metadata.docs.rs]
+all-features = true

@@ -9,3 +9,5 @@ ignores:
   - src/ui.rs
   - src/cli.rs
   - examples/**
+  - crates/*/examples/**
+  - crates/*/tests/**
