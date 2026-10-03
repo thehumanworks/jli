@@ -564,10 +564,15 @@ impl Brain {
         self.query(&format!("SELECT {EVENT_COLUMNS} FROM events ORDER BY id DESC LIMIT ?"), vec![limit.into()], to_event)
     }
 
-    pub fn last_executed(&self) -> Result<Option<BrainEvent>> {
+    /// The newest route this host ran in `cwd`. Other hosts and other directories share the brain,
+    /// and their last route is not the one the person here means.
+    pub fn last_executed(&self, cwd: &str) -> Result<Option<BrainEvent>> {
         let rows = self.query(
-            &format!("SELECT {EVENT_COLUMNS} FROM events WHERE label IS NOT NULL AND accepted = 1 ORDER BY id DESC LIMIT 1"),
-            vec![],
+            &format!(
+                "SELECT {EVENT_COLUMNS} FROM events WHERE label IS NOT NULL AND accepted = 1 AND host = ? AND cwd = ?
+                 ORDER BY id DESC LIMIT 1"
+            ),
+            vec![host().into(), cwd.into()],
             to_event,
         )?;
         Ok(rows.into_iter().next())
@@ -801,10 +806,15 @@ mod tests {
         assert_eq!(events[1].path, Path::System1);
         assert_eq!(events[1].ms_system2, None);
         assert_eq!(events[1].ts.len(), "2026-10-02T12:00:00.000Z".len());
-        let last = brain.last_executed().unwrap().unwrap();
+        // Newer routes run in another directory, and on another host in this one, are not this one's last.
+        brain.log_event(&NewEvent { cwd: "/elsewhere".into(), ..event.clone() }).unwrap();
+        let other_host = brain.log_event(&event).unwrap();
+        brain.execute("UPDATE events SET host = 'another-host' WHERE id = ?", vec![other_host.into()]).unwrap();
+        let last = brain.last_executed("/tmp").unwrap().unwrap();
         assert_eq!(last.id, first);
         brain.mark_rejected(first).unwrap();
-        assert!(brain.last_executed().unwrap().is_none());
+        assert!(brain.last_executed("/tmp").unwrap().is_none());
+        assert!(brain.last_executed("/elsewhere").unwrap().is_some());
         assert_eq!(brain.events(1).unwrap().len(), 1);
     }
 

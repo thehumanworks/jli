@@ -200,7 +200,29 @@ pub fn fill_slots(
             None => filled.missing.push(slot.name.clone()),
         }
     }
+    // Learn the shape of the request, not the instance: a value found in it by any means is hidden too.
+    filled.phrase = shape(&filled.phrase, skill.steps, &render(skill.steps, &filled.values).join(" && "));
     Ok(filled)
+}
+
+/// The phrase that is learned for a request that ran `command` with these steps: `phrase`, which
+/// already hides what the request stated, with every value the command was given hidden as well.
+/// The values are read back from the command, so `jli fix` arrives at the same text from the event log.
+fn shape(phrase: &str, steps: &[String], command: &str) -> String {
+    match match_template(steps, command) {
+        Some(values) => args::hide_values(phrase, values.values().map(String::as_str)),
+        None => phrase.to_string(),
+    }
+}
+
+/// What a logged request was learned as, worked out again from the request and the command it ran.
+/// With no command, or steps that no longer produce it, only the stated values are hidden.
+pub fn learned_phrase(query: &str, steps: &[String], slots: &[Slot], command: Option<&str>) -> String {
+    let stated = args::phrase(query, slots);
+    match command {
+        Some(command) => shape(&stated, steps, command),
+        None => stated,
+    }
 }
 
 /// A piece of a step template: literal text, or a `{name}` placeholder.
@@ -327,6 +349,38 @@ pub fn match_template(steps: &[String], command: &str) -> Option<HashMap<String,
     Some(values)
 }
 
+/// If `existing` produces every command a proposed template can, return the values for `existing`'s
+/// own slots. That is the same template with its placeholders renamed, `-n {n}` for `-n {count}`,
+/// or a literal command it produces, `-n 5`. A value proposed for a placeholder moves by name to the
+/// slot it lines up with, never through shell quoting; one with no value is left for the caller.
+///
+/// A proposal more general than `existing`, `-n {n}` against a literal `-n 3`, is not a match:
+/// taking the literal skill would lose the template, and every later count would run `-n 3`.
+pub fn match_proposal(
+    existing: &[String],
+    proposed: &[String],
+    values: &HashMap<String, String>,
+) -> Option<HashMap<String, String>> {
+    let captured = match_template(existing, &proposed.join(" && "))?;
+    let mut out = HashMap::new();
+    for (slot, value) in captured {
+        match parts(&value).as_slice() {
+            [Part::Text(text)] => {
+                out.insert(slot, (*text).to_string());
+            }
+            // One placeholder and nothing around it: the proposal's slot is this one under another name.
+            [Part::Text(""), Part::Slot(name), Part::Text("")] => {
+                if let Some(given) = values.get(*name).filter(|given| !given.is_empty()) {
+                    out.insert(slot, given.clone());
+                }
+            }
+            // Text around a placeholder, `{a}-{b}` for `{text}`: not the same template.
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
 /// Placeholders used in steps that no slot declares, in order of first use.
 pub fn undeclared(steps: &[String], slots: &[Slot]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -393,6 +447,48 @@ mod tests {
         assert!(match_template(&chained, "git add -A && git commit -m wip").is_some());
         let regexy = steps(&["grep -E 'a.b' {file}"]);
         assert!(match_template(&regexy, "grep -E 'axb' notes.txt").is_none(), "literals are escaped");
+    }
+
+    #[test]
+    fn a_proposal_is_recognised_as_a_known_template() {
+        let log = steps(&["git log --oneline -n {count}"]);
+        let renamed = steps(&["git log --oneline -n {n}"]);
+        assert_eq!(match_proposal(&log, &renamed, &values(&[("n", "10")])), Some(values(&[("count", "10")])));
+        assert_eq!(match_proposal(&log, &renamed, &values(&[])), Some(values(&[])), "a value still to find is left open");
+        assert_eq!(match_proposal(&log, &steps(&["git log --oneline -n 5"]), &values(&[])), Some(values(&[("count", "5")])));
+        assert_eq!(match_proposal(&log, &steps(&["git log -n {n}"]), &values(&[("n", "10")])), None);
+
+        let commit = steps(&["git commit -m {message}"]);
+        let said = values(&[("msg", "it's done")]);
+        assert_eq!(
+            match_proposal(&commit, &steps(&["git commit -m {msg}"]), &said),
+            Some(values(&[("message", "it's done")])),
+            "a value moves by name, never through shell quoting"
+        );
+        let literal = steps(&["git log --oneline -n 10"]);
+        assert_eq!(match_proposal(&literal, &steps(&["git log --oneline -n 10"]), &values(&[])), Some(values(&[])));
+        assert_eq!(
+            match_proposal(&literal, &renamed, &values(&[("n", "10")])),
+            None,
+            "a literal skill does not stand in for a template, even with the same value"
+        );
+        let echo = steps(&["echo {text}"]);
+        assert_eq!(match_proposal(&echo, &steps(&["echo {a}-{b}"]), &values(&[("a", "x"), ("b", "y")])), None);
+    }
+
+    #[test]
+    fn the_learned_phrase_can_be_worked_out_again_from_the_command() {
+        let count = steps(&["wc -l {file}"]);
+        assert_eq!(
+            learned_phrase("how many lines in notes.txt?", &count, &[], Some("wc -l notes.txt")),
+            "how many lines in …?"
+        );
+        assert_eq!(learned_phrase("how many lines in notes.txt", &count, &[], None), "how many lines in notes.txt");
+        assert_eq!(
+            learned_phrase("how many lines in notes.txt", &steps(&["cat {file}"]), &[], Some("wc -l notes.txt")),
+            "how many lines in notes.txt",
+            "steps that no longer produce the command hide nothing more"
+        );
     }
 
     #[test]
