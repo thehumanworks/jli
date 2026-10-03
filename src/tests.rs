@@ -2109,6 +2109,12 @@ fn the_agent_cannot_bring_back_a_rejected_command_as_a_second_skill() {
     assert_eq!(scratch.brain.skills().unwrap().len(), before, "no count-lines-in-file-x");
     let refused = scratch.brain.events(1).unwrap().remove(0);
     assert!(!refused.accepted && refused.exit_code.is_none(), "nothing ran");
+    // Not a second verdict: `jli eval` counts the rejection once, the repeat as a retry of it.
+    assert!(!crate::eval::is_corrected(&refused));
+    let mut oldest_first = scratch.brain.events(10).unwrap();
+    oldest_first.reverse();
+    let correctness = crate::eval::correctness(&oldest_first);
+    assert_eq!((correctness.requests, correctness.turned_down, correctness.blocked), (1, 1, 0));
     assert_eq!(scratch.brain.skill("count-lines-in-file").unwrap().unwrap().counter_examples, ["how many lines are in …"]);
 
     // At the router: the same command, a more general one than a rejected literal, or the label itself.
