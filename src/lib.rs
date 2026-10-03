@@ -15,6 +15,7 @@ pub mod learn;
 pub mod llm;
 pub mod router;
 pub mod seed;
+pub mod shell;
 pub mod slots;
 pub mod store;
 pub mod suggest;

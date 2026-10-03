@@ -276,6 +276,63 @@ pub fn phrase(query: &str, slots: &[Slot]) -> String {
     read(query, slots).phrase
 }
 
+/// Part of a word, for finding a value as a whole word: `src` is not hidden inside `src/main.rs`.
+fn in_word(ch: char) -> bool {
+    ch.is_alphanumeric() || "_-/.".contains(ch)
+}
+
+/// Whether a value is worth hiding wherever it appears: a number, or something with two
+/// characters or more that has a letter or digit in it. `.` and `a` are not.
+fn hideable(value: &str) -> bool {
+    let digits = !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
+    digits || (value.chars().count() >= 2 && value.chars().any(char::is_alphanumeric))
+}
+
+/// The phrase with each value hidden wherever it appears verbatim as a whole word, and a number
+/// also where it is written as a word: `notes.txt` and `three` become `…`. A value the request
+/// does not contain, such as one the agent wrote, hides nothing. Whatever filled the values, this
+/// gives the same text, so `jli fix` can work it out again from the command that ran.
+pub fn hide_values<'a>(phrase: &str, values: impl IntoIterator<Item = &'a str>) -> String {
+    let mut words: Vec<String> = Vec::new();
+    for value in values.into_iter().map(str::trim).filter(|value| hideable(value)) {
+        words.push(value.to_string());
+        let named = NUMBER_WORDS.iter().filter(|(_, digits)| *digits == value);
+        words.extend(named.flat_map(|(word, _)| [word.to_string(), capitalised(word)]));
+    }
+    // Longest first, so `notes.txt` is hidden whole before `notes` could be.
+    words.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    for word in &words {
+        let mut from = 0;
+        while let Some(offset) = phrase[from..].find(word.as_str()) {
+            let start = from + offset;
+            let end = start + word.len();
+            from = end;
+            let before = phrase[..start].chars().next_back();
+            let mut after = phrase[end..].chars();
+            let next = after.next();
+            // A full stop ends a sentence unless a word goes on after it.
+            let stops = next == Some('.') && !after.next().is_some_and(char::is_alphanumeric);
+            let whole = !before.is_some_and(in_word) && (!next.is_some_and(in_word) || stops);
+            if whole && !ranges.iter().any(|taken| taken.start < end && start < taken.end) {
+                ranges.push(start..end);
+            }
+        }
+    }
+    let hidden = replace(phrase, &ranges, HIDDEN);
+    // As with stated values, a request that would be nothing but hidden values stays as it is.
+    if hidden.chars().any(char::is_alphanumeric) {
+        hidden
+    } else {
+        phrase.to_string()
+    }
+}
+
+fn capitalised(word: &str) -> String {
+    let mut chars = word.chars();
+    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
 /// The `name=value` arguments of a request, whatever skill it turns out to be for.
 pub fn stated(query: &str) -> Vec<(String, String)> {
     scan(query).into_iter().filter_map(|item| item.key.map(|key| (key, item.value))).collect()
@@ -438,6 +495,27 @@ mod tests {
         assert_eq!(phrase("\"show me the files\"", &[]), "\"show me the files\"");
         assert_eq!(phrase("commit \"wip\"", &[]), "commit \"…\"");
         assert_eq!(stated("deploy env=prod region=\"eu west\" 'x'"), pairs(&[("env", "prod"), ("region", "eu west")]));
+    }
+
+    #[test]
+    fn a_value_is_hidden_wherever_it_is_a_whole_word() {
+        let hide = |phrase: &str, values: &[&str]| hide_values(phrase, values.iter().copied());
+        assert_eq!(hide("how many lines are in notes.txt", &["notes.txt"]), "how many lines are in …");
+        assert_eq!(hide("count the lines of todo.md.", &["todo.md"]), "count the lines of ….", "a full stop ends it");
+        assert_eq!(hide("show the last 3 commits", &["3"]), "show the last … commits");
+        assert_eq!(hide("show the last three commits", &["3"]), "show the last … commits", "a number written as a word");
+        assert_eq!(hide("Three commits please", &["3"]), "… commits please");
+        assert_eq!(hide("push main to origin", &["main"]), "push … to origin");
+
+        assert_eq!(hide("list src/main.rs and src2", &["src"]), "list src/main.rs and src2", "never inside a word");
+        assert_eq!(hide("open .gitignore", &["gitignore"]), "open .gitignore");
+        assert_eq!(hide("show 13 commits", &["3"]), "show 13 commits");
+        assert_eq!(hide("size of this folder", &["."]), "size of this folder", "no letter or digit: not hidden");
+        assert_eq!(hide("make a branch", &["a"]), "make a branch", "one letter is not hidden");
+        assert_eq!(hide("commit my work", &["fix the parser"]), "commit my work", "a value the agent wrote hides nothing");
+        assert_eq!(hide("notes.txt", &["notes.txt"]), "notes.txt", "a request that is only a value stays whole");
+        assert_eq!(hide("cat notes and notes.txt", &["notes", "notes.txt"]), "cat … and …");
+        assert_eq!(hide("commit message=\"…\" about wip", &["wip"]), "commit message=\"…\" about …");
     }
 
     #[test]

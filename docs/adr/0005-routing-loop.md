@@ -1,7 +1,11 @@
 # 5. One routing loop, one confirmation rule, and a CLI that composes in pipes
 
-- Status: accepted; superseded in part by [ADR 16](0016-measuring-the-matrix.md), which checks a proposed skill with System 1
-  before it is stored, logs a declined route as its own event, and counts the suggester in `msSystem2`
+- Status: accepted; superseded in part by [ADR 13](0013-learning-fixes.md), which also learns a
+  new proposal that failed for a reason that is not the command's fault; and by
+  [ADR 14](0014-shell-integration.md), which hands steps such as `cd` to the calling shell and
+  appends `callerShell` and `handedOff` to the `--json` outcome;
+  and by [ADR 16](0016-measuring-the-matrix.md), which checks a proposed skill with System 1 before it is stored, logs a
+  declined route as its own event, and counts the suggester in `msSystem2`
 - Date: 2026-10-02
 - Origin: the TypeScript prototype; kept unchanged by the Rust port
 

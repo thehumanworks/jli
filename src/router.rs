@@ -1,16 +1,17 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use serde::Serialize;
 
 use crate::args;
 use crate::context::{list_entries, read_context, Context};
 use crate::eval::verify_row;
-use crate::exec::{run, RunOptions};
+use crate::exec::{run, try_builtins, RunOptions, RunResult};
 use crate::learn::{learn_phrase, settle_proposed, LearnInput, Settled};
 use crate::llm::AGENT_MODEL;
-use crate::slots::{fill_slots, match_template, render, undeclared, Source, Template};
+use crate::shell::{first_caller_step, hand_off_text, safe_to_try, HandOff, Shell};
+use crate::slots::{fill_slots, match_proposal, match_template, render, render_fish, undeclared, Source, Template};
 use crate::store::{slug, Brain, NewEvent, NewSkill};
 use crate::suggest::{suggest, Failure, SuggestInput, Suggestion, Verdict};
 use crate::system1::Decision;
@@ -29,6 +30,8 @@ const ALREADY_KNOWN_AT: f64 = 0.95;
 /// Why nothing ran. The first two are not failures: the exit code is 0 for them.
 pub const DRY_RUN: &str = "dry run";
 pub const NOT_A_COMMAND: &str = "not a command request";
+/// A step such as `cd` must run in the calling shell, and no shell function is there to take it.
+pub const NEEDS_CALLER_SHELL: &str = "must run in the calling shell";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouteOptions {
@@ -50,6 +53,8 @@ pub struct RouteOptions {
     pub rejected: Vec<String>,
     /// The user's own words about what they expected, passed to the agent.
     pub clarification: Option<String>,
+    /// Where steps such as `cd` go to run in the calling shell, when the shell function started jli.
+    pub hand_off: Option<HandOff>,
 }
 
 impl RouteOptions {
@@ -65,6 +70,7 @@ impl RouteOptions {
             agent_only: false,
             rejected: vec![],
             clarification: None,
+            hand_off: None,
         }
     }
 }
@@ -89,6 +95,10 @@ pub struct Outcome {
     pub output: Option<String>,
     pub ms_system1: u64,
     pub ms_system2: u64,
+    /// The steps that have to run in the calling shell, as they were or would be handed to it.
+    pub caller_shell: Vec<String>,
+    /// Whether they were handed to the shell function, to run once jli has exited.
+    pub handed_off: bool,
 }
 
 /// A whole number without a fraction, 1.0 as `1`, as `--json` has always written it.
@@ -117,6 +127,8 @@ impl Outcome {
             output: None,
             ms_system1: 0,
             ms_system2: 0,
+            caller_shell: vec![],
+            handed_off: false,
         }
     }
 
@@ -345,6 +357,20 @@ impl Route<'_> {
                     }
                     _ => None,
                 };
+                // A "new" command that a known skill already produces is that skill, as in `learn_phrase`:
+                // a second row would compete with it for the same phrasings.
+                let (existing, provided) = match existing {
+                    None if proposal.kind != ProposalKind::NotACommand => skills
+                        .iter()
+                        .find_map(|skill| {
+                            match_proposal(&skill.steps, &proposal.steps, &provided).map(|values| (skill.clone(), values))
+                        })
+                        .map_or((None, provided), |(skill, values)| {
+                            ui.note(format!("{} already runs this command, so that skill is used.", c::bold(&skill.label)));
+                            (Some(skill), values)
+                        }),
+                    existing => (existing, provided),
+                };
                 let confidence = decision.as_ref().map(|decided| decided.confidence);
 
                 if proposal.kind == ProposalKind::NotACommand || (existing.is_none() && proposal.steps.is_empty()) {
@@ -416,13 +442,25 @@ impl Route<'_> {
         let mut unknown = filled.missing.clone();
         unknown.extend(undeclared(&skill.steps, &skill.slots));
         self.outcome.commands = render(&skill.steps, &filled.values);
+        let caller_at = first_caller_step(&self.outcome.commands);
+        if let Some(at) = caller_at {
+            // Read by the calling shell, so quoted for it.
+            let fish = options.hand_off.as_ref().is_some_and(|hand_off| hand_off.shell == Shell::Fish);
+            let for_shell = if fish { render_fish(&skill.steps, &filled.values) } else { self.outcome.commands.clone() };
+            self.outcome.caller_shell = for_shell[at..].to_vec();
+        }
         ui.command(&self.outcome.commands, plan.risk);
         for (name, source) in &filled.sources {
-            if *source != Source::Agent || !plan.is_new {
+            let written = filled.expanded.iter().find(|(slot, _)| slot == name).map(|(_, written)| written);
+            if *source != Source::Agent || !plan.is_new || written.is_some() {
                 let read_as = filled.aliases.iter().find(|(slot, _)| slot == name);
                 let read_as = read_as.map(|(_, alias)| format!(", reading {alias}= as {name}=")).unwrap_or_default();
-                ui.note(format!("{{{name}}} = {} (from {source}{read_as})", filled.values[name]));
+                let written = written.map(|written| format!(", {written} expanded")).unwrap_or_default();
+                ui.note(format!("{{{name}}} = {} (from {source}{read_as}{written})", filled.values[name]));
             }
+        }
+        for (name, variable) in &filled.not_set {
+            ui.note(format!("${variable} is not set, so {{{name}}} is passed as written."));
         }
         if !filled.unmatched.is_empty() {
             let given: Vec<String> = filled.unmatched.iter().map(|name| format!("{name}=")).collect();
@@ -452,13 +490,26 @@ impl Route<'_> {
         }
         if options.dry_run {
             self.outcome.blocked = Some(DRY_RUN.into());
+            if caller_at.is_some() {
+                let those = self.outcome.caller_shell.join(" && ");
+                ui.note(if options.hand_off.is_some() {
+                    format!("{those} would run in your shell, once jli has exited.")
+                } else {
+                    format!("{those} would have to run in your shell, which needs the shell function (jli shell-init).")
+                });
+            }
             ui.note("Dry run: nothing was executed and nothing was learned.");
             return Ok(self.outcome.clone());
+        }
+        if caller_at.is_some() && options.hand_off.is_none() {
+            self.refuse_without_function();
+            return self.finish();
         }
 
         // ── Permission: one question, every time, unless --yes or --yolo ───────────────────
         let destructive = plan.risk == Risk::Destructive;
-        let approved = if options.yolo || (options.yes && !destructive) { Some(true) } else { prompt.confirm("Run it?") };
+        let asked = !(options.yolo || (options.yes && !destructive));
+        let approved = if asked { prompt.confirm("Run it?") } else { Some(true) };
         let Some(approved) = approved else {
             self.outcome.blocked = Some(
                 if destructive { "destructive commands need an interactive yes or --yolo" } else { "needs confirmation" }
@@ -481,22 +532,24 @@ impl Route<'_> {
         }
 
         // ── Execute ───────────────────────────────────────────────────────────────
+        // A new proposal's stderr is watched too, so a failure with nothing to say can be told apart.
+        let watch_stderr = options.mode == Mode::Auto || plan.is_new;
+        let (steps, for_shell) = (self.outcome.commands.clone(), self.outcome.caller_shell.clone());
         // A skill the agent proposed is checked with System 1 while its command runs, so the check
         // never holds up the command's output.
         let proposed = plan.is_new.then(|| Skill { examples: vec![self.phrase.clone()], ..skill.clone() });
+        let (models, known, context, phrase) =
+            (self.models, self.all_skills.clone(), self.context.clone(), self.phrase.clone());
         let (result, checked) = std::thread::scope(|scope| {
             let check = proposed.as_ref().map(|row| {
-                let (models, skills, context, phrase) = (self.models, &self.all_skills, &self.context, &self.phrase);
-                scope.spawn(move || verify_row(models, skills, row, phrase, context, options.threshold))
+                let (known, context, phrase) = (&known, &context, &phrase);
+                scope.spawn(move || verify_row(models, known, row, phrase, context, options.threshold))
             });
-            let result = run(
-                &self.outcome.commands,
-                &options.cwd,
-                RunOptions { capture: options.capture, watch_stderr: options.mode == Mode::Auto },
-            );
+            let result = self.execute(&steps, &for_shell, watch_stderr);
             (result, check.map(|check| check.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))))
         });
         let result = result?;
+        let stderr_seen = options.capture || watch_stderr;
         self.outcome.ran = true;
         self.outcome.exit_code = Some(result.exit_code);
         self.outcome.output = result.output.clone();
@@ -505,6 +558,7 @@ impl Route<'_> {
         }
 
         // ── Auto mode: a failure is feedback, but only a diagnosis says what kind ──
+        let mut diagnosed = None;
         if options.mode == Mode::Auto && result.exit_code != 0 {
             let failure = Failure { exit_code: result.exit_code, stderr: result.stderr.clone() };
             if let Some(diagnosis) = self.diagnose(Some(failure)) {
@@ -518,6 +572,7 @@ impl Route<'_> {
                 ui.line(format!("   {}", diagnosis.explanation));
                 // An environment problem says nothing about the route, so nothing is unlearned or offered.
                 let verdict = diagnosis.verdict;
+                diagnosed = Some(verdict);
                 if matches!(verdict, Verdict::WrongCommand | Verdict::WrongValue) {
                     if let Some(corrected) =
                         self.correct(prompt, &plan, Some(diagnosis), verdict == Verdict::WrongCommand)?
@@ -543,7 +598,20 @@ impl Route<'_> {
             }
         }
         if plan.is_new {
-            if result.exit_code == 0 {
+            // A failure that is not the command's fault still teaches the route: a diagnosis that says
+            // so, or exit 1 with nothing on stderr after a person said yes (grep finding no match,
+            // diff finding a difference). Under --yes or --yolo only a clean exit counts.
+            let blameless = if diagnosed == Some(Verdict::Environment) {
+                Some("the diagnosis put the failure on where it ran")
+            } else if result.exit_code == 1 && asked && stderr_seen && result.stderr.trim().is_empty() {
+                Some("it exited 1 with nothing on stderr, which is an answer and not an error")
+            } else {
+                None
+            };
+            if let Some(reason) = blameless {
+                ui.note(format!("The command did not exit 0, but {reason}, so the proposal is learned."));
+            }
+            if result.exit_code == 0 || blameless.is_some() {
                 let (scenario, settled) = match (checked, &proposed) {
                     (Some(checked), Some(row)) => settle_proposed(
                         self.models,
@@ -557,7 +625,8 @@ impl Route<'_> {
                     ),
                     _ => (skill.scenario.clone(), Settled::Unchecked),
                 };
-                self.brain.add_skill(&NewSkill {
+                // Another writer may have taken the label since it was shown; the skill then gets the next free one.
+                let label = self.brain.add_new_skill(&NewSkill {
                     label: skill.label.clone(),
                     steps: skill.steps.clone(),
                     scenario,
@@ -566,13 +635,11 @@ impl Route<'_> {
                     examples: vec![self.phrase.clone()],
                     slots: skill.slots.clone(),
                 })?;
-                self.brain.record_use(&skill.label)?;
-                self.outcome.learned.push(format!("new skill {}", skill.label));
-                self.outcome.learned.extend(settled.note(&skill.label));
-                ui.learned(format!(
-                    "new skill {}. Next time System 1 handles this without the agent.",
-                    c::bold(&skill.label)
-                ));
+                self.outcome.label = Some(label.clone());
+                self.brain.record_use(&label)?;
+                self.outcome.learned.push(format!("new skill {label}"));
+                self.outcome.learned.extend(settled.note(&label));
+                ui.learned(format!("new skill {}. Next time System 1 handles this without the agent.", c::bold(&label)));
             } else {
                 ui.note("The command failed, so the proposal was not learned.");
             }
@@ -592,6 +659,59 @@ impl Route<'_> {
             }
         }
         self.finish()
+    }
+
+    // ── The calling shell: steps such as cd that only work there (ADR 14) ──────
+
+    /// Run the steps. Those before the first that needs the calling shell run in jli's own; that
+    /// one and every one after it, `for_shell`, go to the shell function, so the later steps see
+    /// what it changed. Builtins that touch nothing else are tried here first, so a `cd` to a
+    /// missing directory fails with its own message and exit code, and nothing is handed over.
+    fn execute(&mut self, steps: &[String], for_shell: &[String], watch_stderr: bool) -> Result<RunResult> {
+        let options = self.options;
+        let at = steps.len() - for_shell.len();
+        let ours = RunOptions { capture: options.capture, watch_stderr };
+        if for_shell.is_empty() {
+            return run(steps, &options.cwd, ours);
+        }
+        let hand_off = options.hand_off.as_ref().ok_or_else(|| anyhow!("no shell function to hand {} to", for_shell[0]))?;
+        let mut result = run(&steps[..at], &options.cwd, ours)?;
+        if result.exit_code != 0 {
+            return Ok(result);
+        }
+        let theirs = &steps[at..];
+        if safe_to_try(theirs) {
+            let tried = try_builtins(&hand_off_text(theirs, Shell::Bash), &options.cwd, options.capture)?;
+            if tried.exit_code != 0 {
+                let output = result.output.take().map(|mut output| {
+                    output.push_str(tried.output.as_deref().unwrap_or_default());
+                    output
+                });
+                return Ok(RunResult { exit_code: tried.exit_code, output, stderr: result.stderr + &tried.stderr });
+            }
+        }
+        hand_off.write(for_shell)?;
+        self.outcome.handed_off = true;
+        self.ui.note(format!("{} runs in your shell as soon as jli exits.", for_shell.join(" && ")));
+        Ok(result)
+    }
+
+    /// Without the shell function, a step such as `cd` would run in a shell of jli's own and
+    /// change nothing. Say so, and how to install it, instead of reporting a success.
+    fn refuse_without_function(&mut self) {
+        let ui = self.ui;
+        self.outcome.blocked = Some(NEEDS_CALLER_SHELL.into());
+        ui.warn(format!(
+            "Not run: {} has to run in your own shell, and jli can only run commands in a shell of its own, where this would change nothing.",
+            self.outcome.caller_shell.join(" && ")
+        ));
+        let shells = Shell::of_user().map_or_else(|| Shell::ALL.to_vec(), |shell| vec![shell]);
+        for shell in shells {
+            let (line, file) = shell.install_hint();
+            ui.note(format!("To let jli hand it to your shell, add this line to {file} and open a new terminal:"));
+            ui.note(format!("    {line}"));
+        }
+        ui.note("Nothing was learned.");
     }
 
     // ── Corrections: how a "no" or a failed run turns into a lesson ────────────
@@ -716,6 +836,15 @@ impl Route<'_> {
             }
             Correction::Steps(steps) => steps,
         };
+        // A typed `cd` is handed to the calling shell like any other, and without the shell
+        // function it can neither run nor be learned.
+        let for_shell = first_caller_step(&steps).map_or_else(Vec::new, |at| steps[at..].to_vec());
+        if !for_shell.is_empty() && options.hand_off.is_none() {
+            self.outcome.commands = steps;
+            self.outcome.caller_shell = for_shell;
+            self.refuse_without_function();
+            return self.finish().map(Some);
+        }
         let taught = learn_phrase(
             self.brain,
             self.models,
@@ -737,7 +866,8 @@ impl Route<'_> {
         ));
         let risk = self.brain.skill(&taught.label)?.map_or(Risk::Modifies, |skill| skill.risk);
         ui.command(&steps, risk);
-        let rerun = run(&steps, &options.cwd, RunOptions { capture: options.capture, watch_stderr: false })?;
+        self.outcome.caller_shell = for_shell.clone();
+        let rerun = self.execute(&steps, &for_shell, false)?;
         self.brain.record_use(&taught.label)?;
         if rerun.exit_code != 0 {
             ui.warn(format!("exited with code {}", rerun.exit_code));

@@ -294,8 +294,8 @@ fn a_proposed_skill_that_fails_twice_keeps_the_request_as_its_scenario() {
     let outcome = go(&scratch, &models, "how many lines are in notes.txt", &mut Script::default(), &options);
     assert_eq!(outcome.learned, ["new skill count-lines", "count-lines keeps the request as its scenario"]);
     let skill = scratch.brain.skill("count-lines").unwrap().unwrap();
-    assert_eq!(skill.scenario, "the user wants: how many lines are in notes.txt");
-    assert_eq!(skill.examples, ["how many lines are in notes.txt"]);
+    assert_eq!(skill.examples.len(), 1);
+    assert_eq!(skill.scenario, format!("the user wants: {}", skill.examples[0]), "the request as it was learned");
 }
 
 // ── jli eval ─────────────────────────────────────────────────────────────────

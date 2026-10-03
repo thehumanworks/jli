@@ -65,8 +65,9 @@ impl Kept {
     }
 }
 
-fn store(brain: &Brain, kept: &Kept, scenario: String, phrase: &str) -> Result<()> {
-    brain.add_skill(&NewSkill {
+/// Returns the label the row was stored under: another writer may have taken the one it was given.
+fn store(brain: &Brain, kept: &Kept, scenario: String, phrase: &str) -> Result<String> {
+    brain.add_new_skill(&NewSkill {
         label: kept.label.clone(),
         steps: kept.steps.clone(),
         scenario,
@@ -144,17 +145,17 @@ pub fn learn_phrase(brain: &Brain, models: &Models, input: &LearnInput, ui: &Ui)
             ui.note("Its slots did not reproduce your command, so the command is stored literally.");
         }
 
-        let mut label = slug(&draft.label);
-        while skills.iter().any(|skill| skill.label == label) {
-            label.push_str("-x");
-        }
-        let row = Kept {
-            label: label.clone(),
+        let mut row = Kept {
+            label: slug(&draft.label),
             steps: if faithful { draft.steps.clone() } else { input.steps.clone() },
             slots: if faithful { slots } else { vec![] },
             risk: input.risk.unwrap_or(draft.risk),
         };
-        // The row is checked in memory and written only once it holds, so a failed check leaves nothing behind.
+        // The row is checked in memory and written only once it holds, so a failed check leaves nothing
+        // behind. In the matrix it is checked against, its label must not be another skill's.
+        while skills.iter().any(|skill| skill.label == row.label) {
+            row.label.push_str("-x");
+        }
         let candidate = row.as_skill(draft.scenario.clone(), &input.phrase);
         let checked = verify_row(models, &skills, &candidate, &input.phrase, &read_context(&input.cwd), input.threshold);
         kept = Some(row);
@@ -162,7 +163,7 @@ pub fn learn_phrase(brain: &Brain, models: &Models, input: &LearnInput, ui: &Ui)
             Ok(Ok(summary)) => {
                 ui.note(format!("Verified with System 1: {summary}."));
                 let row = kept.as_ref().expect("set just above");
-                store(brain, row, draft.scenario.clone(), &input.phrase)?;
+                let label = store(brain, row, draft.scenario.clone(), &input.phrase)?;
                 return Ok(Learned { label, created: true, translated: true });
             }
             Ok(Err(problem)) => {
@@ -178,9 +179,9 @@ pub fn learn_phrase(brain: &Brain, models: &Models, input: &LearnInput, ui: &Ui)
 
     // The model's row did not hold up. Keep what the human said, exactly as they said it.
     if let Some(kept) = kept {
-        store(brain, &kept, format!("the user wants: {}", input.phrase), &input.phrase)?;
+        let label = store(brain, &kept, format!("the user wants: {}", input.phrase), &input.phrase)?;
         ui.note("Stored with your phrase as the scenario instead.");
-        return Ok(Learned { label: kept.label, created: true, translated: false });
+        return Ok(Learned { label, created: true, translated: false });
     }
     let (label, created) = brain.learn_command(&input.phrase, &input.steps, input.risk.unwrap_or(Risk::Modifies))?;
     Ok(Learned { label, created, translated: false })
