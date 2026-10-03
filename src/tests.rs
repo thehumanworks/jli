@@ -537,6 +537,10 @@ fn auto_mode_offers_numbered_options_after_a_no() {
 
 #[test]
 fn auto_mode_reads_an_environment_failure_as_a_right_route() {
+    // A pre-push hook in a linked worktree inherits an absolute GIT_DIR, and with it `git status`
+    // succeeds anywhere. This test needs it to fail outside a repository.
+    std::env::remove_var("GIT_DIR");
+    std::env::remove_var("GIT_WORK_TREE");
     let scratch = Scratch::new("auto-env");
     let suggestion = json!({
         "verdict": "environment", "explanation": "This directory is not a git repository.",
