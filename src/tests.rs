@@ -741,3 +741,136 @@ fn the_json_outcome_keeps_its_field_names_and_order() {
     assert!(value["output"].as_str().unwrap().trim_end().ends_with("work"));
     assert_eq!(value["learned"], json!([]), "a 0.99 route teaches nothing new");
 }
+
+#[test]
+fn a_skill_one_user_taught_is_invisible_to_every_other_user() {
+    let scratch = Scratch::new("users");
+    let path = scratch.root.join("brain.db");
+    let agent = Brain::open_as(BrainConfig::file(&path), "agent").unwrap();
+    let taught = LearnInput {
+        phrase: "how big is this folder".into(),
+        steps: vec!["du -sh .".into()],
+        risk: Some(Risk::Safe),
+        mode: Mode::Manual,
+        threshold: 0.5,
+        cwd: scratch.work.clone(),
+    };
+    let (silent, _) = models(|_| panic!("manual teaching asks nobody"), no_language_model());
+    assert_eq!(learn_phrase(&agent, &silent, &taught, &quiet()).unwrap().label, "du-sh");
+
+    // System 1 is shown each user's own matrix: the default user's and another user's do not hold it.
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
+    for brain in [&scratch.brain, &Brain::open_as(BrainConfig::file(&path), "other").unwrap()] {
+        let (models, _) = models(
+            |request| {
+                let sent = request.to_string();
+                assert!(
+                    sent.contains("git status") && !sent.contains("du -sh ."),
+                    "another user's skill reached the matrix"
+                );
+                decision(NONE, 0.9, 0.05, SAFE)
+            },
+            no_language_model(),
+        );
+        let outcome = route(brain, &models, "how big is this folder", &quiet(), &mut Script::default(), &options).unwrap();
+        assert!(outcome.label.is_none() && !outcome.ran);
+    }
+
+    let (models, _) = models(
+        |request| {
+            assert!(request.to_string().contains("du -sh ."));
+            decision("du-sh", 0.99, 0.9, SAFE)
+        },
+        no_language_model(),
+    );
+    let outcome = route(&agent, &models, "how big is this folder", &quiet(), &mut Script::default(), &options).unwrap();
+    assert_eq!((outcome.label.as_deref(), outcome.ran), (Some("du-sh"), true));
+    assert_eq!(agent.events(10).unwrap().len(), 1);
+    assert_eq!(agent.skill("du-sh").unwrap().unwrap().uses, 1);
+    assert_eq!(scratch.brain.events(10).unwrap().len(), 1, "the default user's own requests only");
+    assert!(scratch.brain.last_executed().unwrap().is_none(), "so its fix cannot reach the agent's run");
+}
+
+#[test]
+fn a_label_taken_while_the_agent_was_thinking_is_not_overwritten() {
+    let scratch = Scratch::new("label-race");
+    std::fs::write(scratch.work.join("notes.txt"), "one\ntwo\n").unwrap();
+    let path = scratch.root.join("brain.db");
+    let proposal = json!({
+        "kind": "new", "existingLabel": null, "label": "count-lines", "steps": ["wc -l {file}"],
+        "scenario": "the user wants the number of lines in a file",
+        "slots": [{ "name": "file", "kind": "file", "description": "the file to count", "default": null }],
+        "slotValues": [{ "name": "file", "value": "notes.txt" }],
+        "risk": "safe", "explanation": "Counts lines.", "answer": null,
+    });
+    // After this request read the matrix, another jli on the same brain stores its own count-lines.
+    let (models, _) = models(
+        move |_| {
+            let other = Brain::open(BrainConfig::file(&path)).unwrap();
+            other
+                .add_skill_if_missing(&NewSkill {
+                    label: "count-lines".into(),
+                    steps: vec!["grep -c . {file}".into()],
+                    scenario: "theirs".into(),
+                    risk: Risk::Safe,
+                    origin: Origin::Taught,
+                    examples: vec![],
+                    slots: vec![],
+                })
+                .unwrap();
+            decision(NONE, 0.7, 0.95, SAFE)
+        },
+        vec![("proposal", proposal)],
+    );
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "how many lines are in notes.txt", &mut Script::default(), &options);
+    assert!(outcome.ran);
+    assert_eq!(outcome.label.as_deref(), Some("count-lines-x"));
+    assert_eq!(outcome.learned, ["new skill count-lines-x"]);
+    assert_eq!(scratch.brain.skill("count-lines").unwrap().unwrap().steps, ["grep -c . {file}"]);
+    let mine = scratch.brain.skill("count-lines-x").unwrap().unwrap();
+    assert_eq!((mine.steps.as_slice(), mine.uses), (["wc -l {file}".to_string()].as_slice(), 1));
+    assert_eq!(scratch.brain.events(1).unwrap()[0].label.as_deref(), Some("count-lines-x"));
+}
+
+#[test]
+fn a_label_taken_while_the_translator_was_writing_is_not_overwritten() {
+    let scratch = Scratch::new("teach-race");
+    let path = scratch.root.join("brain.db");
+    let row = draft("git log --oneline -n {count}", "3");
+    let llm = Llm::with_transport(move |_| {
+        // Another jli takes the label between this teach reading the matrix and writing its row.
+        Brain::open(BrainConfig::file(&path))
+            .unwrap()
+            .add_skill_if_missing(&NewSkill {
+                label: "git-recent-commits".into(),
+                steps: vec!["git log -n {count}".into()],
+                scenario: "theirs".into(),
+                risk: Risk::Safe,
+                origin: Origin::Taught,
+                examples: vec![],
+                slots: vec![],
+            })
+            .unwrap();
+        Ok((200, json!({ "choices": [{ "message": { "content": row.to_string() } }] }).to_string()))
+    });
+    let system1 = System1::fake(|request| {
+        if request["state"]["request"] == "show the last 3 commits" {
+            decision("git-recent-commits-x", 0.92, 0.9, SAFE)
+        } else {
+            decision("git-status", 0.9, 0.9, SAFE)
+        }
+    });
+    let input = LearnInput {
+        phrase: "show the last 3 commits".into(),
+        steps: vec!["git log --oneline -n 3".into()],
+        risk: None,
+        mode: Mode::Semi,
+        threshold: 0.5,
+        cwd: scratch.work.clone(),
+    };
+    let learned = learn_phrase(&scratch.brain, &Models { system1, llm }, &input, &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created, learned.translated), ("git-recent-commits-x", true, true));
+    assert_eq!(scratch.brain.skill("git-recent-commits").unwrap().unwrap().scenario, "theirs");
+    assert_eq!(scratch.brain.skill("git-recent-commits-x").unwrap().unwrap().steps, ["git log --oneline -n {count}"]);
+}
