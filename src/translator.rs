@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use crate::llm::{
     nullable_string, object, risk_schema, slot_values_schema, slots_schema, JsonRequest, Llm, Reasoning, SlotDraft,
-    SlotValue, TRANSLATOR_MODEL,
+    SlotValue,
 };
 use crate::types::{Risk, Skill};
 
@@ -101,7 +101,7 @@ pub fn translate(llm: &Llm, input: &TranslateInput) -> Result<(Draft, u64)> {
         .map(|skill| json!({ "label": skill.label, "steps": skill.steps, "scenario": skill.scenario }))
         .collect();
     llm.complete_json(&JsonRequest {
-        model: &TRANSLATOR_MODEL,
+        model: &llm.translator_model(),
         system: INSTRUCTIONS,
         name: "matrix_row",
         timeout: Duration::from_secs(8),

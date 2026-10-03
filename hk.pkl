@@ -5,8 +5,8 @@ import "package://github.com/jdx/hk/releases/download/v2.4.0/hk@2.4.0#/Builtins.
 local linters = new Mapping<String, Step> {
     ["cargo_fmt"] = Builtins.cargo_fmt
     ["cargo_clippy"] = (Builtins.cargo_clippy) {
-        check = "cargo clippy --all-targets --quiet -- -D warnings"
-        fix = "cargo clippy --all-targets --quiet --fix --allow-dirty --allow-staged -- -D warnings"
+        check = "cargo clippy --workspace --all-targets --quiet -- -D warnings"
+        fix = "cargo clippy --workspace --all-targets --quiet --fix --allow-dirty --allow-staged -- -D warnings"
     }
     // The architecture rules in rules/: each one is a decision from docs/adr.
     ["ast_grep"] {
@@ -21,7 +21,7 @@ local linters = new Mapping<String, Step> {
 local tests = new Mapping<String, Step> {
     ["cargo_test"] {
         glob = List("**/*.rs", "Cargo.toml", "Cargo.lock")
-        check = "cargo test --quiet"
+        check = "cargo test --workspace --quiet"
     }
 }
 

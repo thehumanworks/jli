@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::context::Context;
-use crate::llm::{object, JsonRequest, Llm, Reasoning, TRANSLATOR_MODEL};
+use crate::llm::{object, JsonRequest, Llm, Reasoning};
 use crate::types::Skill;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,7 +99,7 @@ pub fn suggest(llm: &Llm, input: &SuggestInput) -> Result<(Suggestion, u64)> {
     let known: Vec<Value> =
         input.skills.iter().map(|skill| json!({ "steps": skill.steps, "scenario": skill.scenario })).collect();
     let (mut data, ms) = llm.complete_json::<Suggestion>(&JsonRequest {
-        model: &TRANSLATOR_MODEL,
+        model: &llm.translator_model(),
         system: INSTRUCTIONS,
         name: "suggestion",
         schema: schema(),
