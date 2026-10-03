@@ -472,9 +472,31 @@ fn unquote(value: &str) -> &str {
     value
 }
 
+/// A flag is part of what a command does, never a value (ADR 7): `-`, `-n`, `--all`, `'-x'`.
+pub fn is_flag(value: &str) -> bool {
+    value.trim_start().starts_with('-')
+}
+
+/// True when the steps hold no placeholder: a skill that runs one command and no other.
+pub fn is_literal(steps: &[String]) -> bool {
+    !steps.iter().any(|step| parts(step).iter().any(|part| matches!(part, Part::Slot(_))))
+}
+
 /// If `command` is what `steps` would produce for some slot values, return those values.
 /// Lets a taught command be recognised as a known skill with different values, with no model call.
+/// A value that would be a flag is not a match: `cd -` is not `cd {directory}` with `-` (ADR 19).
 pub fn match_template(steps: &[String], command: &str) -> Option<HashMap<String, String>> {
+    captures(steps, command).filter(|values| !values.values().any(|value| is_flag(value)))
+}
+
+/// True when `steps` produce `command` only by taking a flag as a slot value, as `date {format}` does
+/// for `date -I`.
+pub fn slots_a_flag(steps: &[String], command: &str) -> bool {
+    captures(steps, command).is_some_and(|values| values.values().any(|value| is_flag(value)))
+}
+
+/// The value of each slot that makes `steps` produce `command`, flags included.
+fn captures(steps: &[String], command: &str) -> Option<HashMap<String, String>> {
     let joined = steps.join(" && ");
     let mut names = Vec::new();
     let mut pattern = String::from("^");
@@ -595,6 +617,33 @@ mod tests {
         assert!(match_template(&chained, "git add -A && git commit -m wip").is_some());
         let regexy = steps(&["grep -E 'a.b' {file}"]);
         assert!(match_template(&regexy, "grep -E 'axb' notes.txt").is_none(), "literals are escaped");
+    }
+
+    #[test]
+    fn a_flag_is_never_a_slot_value() {
+        let cd = steps(&["cd {directory}"]);
+        assert_eq!(match_template(&cd, "cd -"), None, "cd - goes back; it is not a directory called -");
+        assert_eq!(match_template(&cd, "cd src"), Some(values(&[("directory", "src")])));
+        assert!(slots_a_flag(&cd, "cd -"));
+        assert!(!slots_a_flag(&cd, "cd src"));
+        let list = steps(&["ls {directory}"]);
+        assert_eq!(match_template(&list, "ls -la"), None);
+        assert_eq!(match_template(&list, "ls '-la'"), None, "quoting a flag does not make it a value");
+        let head = steps(&["head -n {count} {file}"]);
+        assert_eq!(match_template(&head, "head -n -5 notes.txt"), None);
+        assert_eq!(match_template(&head, "head -n 5 notes.txt"), Some(values(&[("count", "5"), ("file", "notes.txt")])));
+        let commit = steps(&["git commit -m {message}"]);
+        assert_eq!(
+            match_template(&commit, "git commit -m 'fix -x handling'"),
+            Some(values(&[("message", "fix -x handling")]))
+        );
+        assert_eq!(
+            match_proposal(&list, &steps(&["ls -la"]), &values(&[])),
+            None,
+            "a proposal with a flag where a skill has a slot is another command"
+        );
+        assert!(is_literal(&steps(&["ls -ltr", "find . -exec ls {} \\;"])));
+        assert!(!is_literal(&steps(&["git add -A", "git commit -m {message}"])));
     }
 
     #[test]

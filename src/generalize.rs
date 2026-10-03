@@ -9,7 +9,7 @@ use anyhow::Result;
 use crate::context::read_context;
 use crate::eval::{in_parallel, verify_row, with_row};
 use crate::llm::AGENT_MODEL;
-use crate::slots::{match_proposal, match_template, undeclared};
+use crate::slots::{match_proposal, match_template, slots_a_flag, undeclared};
 use crate::store::{slug, Brain, NewEvent, NewSkill, Promote};
 use crate::system2::{generalize as propose, Generality, Generalization, GeneralizeInput};
 use crate::types::{with_checked_aliases, Path, Skill, Slot};
@@ -291,14 +291,14 @@ fn plan(proposal: &Generalization, skill: &Skill, global: &[Skill]) -> std::resu
         .collect();
     let slots = with_checked_aliases(slots);
     let Some(values) = match_template(&proposal.steps, &command) else {
+        if slots_a_flag(&proposal.steps, &command) {
+            return Err("it made a flag a slot".into());
+        }
         return Err(format!("{} does not give back the project's command, {command}", proposal.steps.join(" && ")));
     };
     let missing = undeclared(&proposal.steps, &slots);
     if !missing.is_empty() {
         return Err(format!("it uses {{{}}} without declaring it", missing.join("}, {")));
-    }
-    if values.values().any(|value| value.trim().starts_with('-')) {
-        return Err("it made a flag a slot".into());
     }
     let known =
         global.iter().find(|known| runs_it(known) || match_proposal(&known.steps, &proposal.steps, &values).is_some());
