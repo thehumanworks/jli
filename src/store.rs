@@ -210,12 +210,7 @@ pub fn now_iso() -> String {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{millis:03}Z",
-        of_day / 3600,
-        of_day % 3600 / 60,
-        of_day % 60
-    )
+    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{millis:03}Z", of_day / 3600, of_day % 3600 / 60, of_day % 60)
 }
 
 fn same(a: &str, b: &str) -> bool {
@@ -296,19 +291,22 @@ impl Brain {
             }
         }
         let token = config.auth_token.clone().unwrap_or_default();
-        let db = rt.block_on(async {
-            match (&config.sync_url, &local) {
-                (Some(sync_url), Some(path)) => {
-                    let db = Builder::new_remote_replica(path, sync_url.clone(), token).build().await?;
-                    db.sync().await?;
-                    Ok(db)
+        let db = rt
+            .block_on(async {
+                match (&config.sync_url, &local) {
+                    (Some(sync_url), Some(path)) => {
+                        let db = Builder::new_remote_replica(path, sync_url.clone(), token).build().await?;
+                        db.sync().await?;
+                        Ok(db)
+                    }
+                    (Some(_), None) => {
+                        Err(anyhow!("JLI_SYNC_URL needs JLI_DB_URL to be a file: path for the local replica"))
+                    }
+                    (None, Some(path)) => Ok(Builder::new_local(path).build().await?),
+                    (None, None) => Ok(Builder::new_remote(config.url.clone(), token).build().await?),
                 }
-                (Some(_), None) => Err(anyhow!("JLI_SYNC_URL needs JLI_DB_URL to be a file: path for the local replica")),
-                (None, Some(path)) => Ok(Builder::new_local(path).build().await?),
-                (None, None) => Ok(Builder::new_remote(config.url.clone(), token).build().await?),
-            }
-        })
-        .with_context(|| format!("could not open the brain at {}", config.url))?;
+            })
+            .with_context(|| format!("could not open the brain at {}", config.url))?;
         let conn = db.connect()?;
         if local.is_some() && config.sync_url.is_none() {
             // Two jli processes at once wait for each other instead of failing.
@@ -381,7 +379,8 @@ impl Brain {
     }
 
     pub fn skill(&self, label: &str) -> Result<Option<Skill>> {
-        let rows = self.query(&format!("SELECT {SKILL_COLUMNS} FROM skills WHERE label = ?"), vec![label.into()], to_skill)?;
+        let rows =
+            self.query(&format!("SELECT {SKILL_COLUMNS} FROM skills WHERE label = ?"), vec![label.into()], to_skill)?;
         Ok(rows.into_iter().next())
     }
 
@@ -621,7 +620,8 @@ mod tests {
 
     impl Scratch {
         fn new(name: &str) -> Scratch {
-            let dir = std::env::temp_dir().join(format!("jli-store-{name}-{}-{}", std::process::id(), now_iso().replace(':', "")));
+            let dir =
+                std::env::temp_dir().join(format!("jli-store-{name}-{}-{}", std::process::id(), now_iso().replace(':', "")));
             std::fs::create_dir_all(&dir).unwrap();
             Scratch(dir)
         }
@@ -720,7 +720,10 @@ mod tests {
         let brain = scratch.brain();
         // A row written before aliases existed reads as it always did, and is written back unchanged.
         let stored = |brain: &Brain| {
-            brain.query("SELECT slots FROM skills WHERE label = 'git-commit'", vec![], |row| text(row.get_value(0).unwrap())).unwrap().remove(0)
+            brain
+                .query("SELECT slots FROM skills WHERE label = 'git-commit'", vec![], |row| text(row.get_value(0).unwrap()))
+                .unwrap()
+                .remove(0)
         };
         assert_eq!(stored(&brain), r#"[{"name":"message","kind":"text","description":"the commit message"}]"#);
 
@@ -732,7 +735,10 @@ mod tests {
         assert!(!brain.add_alias("git-commit", "subject", "s").unwrap(), "no such slot");
         assert!(!brain.add_alias("no-such-skill", "message", "m").unwrap());
         assert_eq!(brain.skill("git-commit").unwrap().unwrap().slots[0].aliases, ["msg"]);
-        assert_eq!(stored(&brain), r#"[{"name":"message","kind":"text","description":"the commit message","aliases":["msg"]}]"#);
+        assert_eq!(
+            stored(&brain),
+            r#"[{"name":"message","kind":"text","description":"the commit message","aliases":["msg"]}]"#
+        );
     }
 
     #[test]

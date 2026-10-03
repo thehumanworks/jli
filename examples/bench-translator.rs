@@ -28,46 +28,96 @@ struct Case {
 }
 
 const CASES: [Case; 10] = [
-    Case { phrase: "diff of changes in this project", command: "git diff", tests: [
-        ("what exactly did I modify, line by line", "git diff"),
-        ("show my uncommitted edits", "git diff"),
-        ("let me see the patch of my working tree", "git diff")] },
-    Case { phrase: "summary of what changed per file", command: "git diff --stat", tests: [
-        ("which files changed and by how much", "git diff --stat"),
-        ("how many lines did I touch in each file", "git diff --stat"),
-        ("short overview of my modifications by file", "git diff --stat")] },
-    Case { phrase: "show the last 3 commits", command: "git log --oneline -n 3", tests: [
-        ("give me the 7 most recent commits", "git log --oneline -n 7"),
-        ("what were the latest 5 commits", "git log --oneline -n 5"),
-        ("recent history, 12 entries", "git log --oneline -n 12")] },
-    Case { phrase: "which branch am I on", command: "git branch --show-current", tests: [
-        ("what's the current branch", "git branch --show-current"),
-        ("name of the branch I have checked out", "git branch --show-current"),
-        ("where is HEAD pointing, branch-wise", "git branch --show-current")] },
-    Case { phrase: "how big is this folder", command: "du -sh .", tests: [
-        ("total disk space used by this directory", "du -sh ."),
-        ("how much room does everything here take up", "du -sh ."),
-        ("size of the current directory overall", "du -sh .")] },
-    Case { phrase: "count lines in Cargo.toml", command: "wc -l Cargo.toml", tests: [
-        ("how many lines does README.md have", "wc -l README.md"),
-        ("how long is Cargo.lock in lines", "wc -l Cargo.lock"),
-        ("number of lines in .gitignore", "wc -l .gitignore")] },
-    Case { phrase: "what's listening on port 3000", command: "lsof -i :3000", tests: [
-        ("which process is using port 8080", "lsof -i :8080"),
-        ("who has port 5432 open", "lsof -i :5432"),
-        ("is anything bound to port 9000", "lsof -i :9000")] },
-    Case { phrase: "show hidden files too", command: "ls -la", tests: [
-        ("list everything including dotfiles", "ls -la"),
-        ("all files, even the invisible ones, with details", "ls -la"),
-        ("long listing that includes entries starting with a dot", "ls -la")] },
-    Case { phrase: "who changed this repo the most", command: "git shortlog -sn", tests: [
-        ("commit counts per author", "git shortlog -sn"),
-        ("rank contributors by number of commits", "git shortlog -sn"),
-        ("how many commits has each person made", "git shortlog -sn")] },
-    Case { phrase: "what's my node version", command: "node --version", tests: [
-        ("which version of node is installed", "node --version"),
-        ("node release I'm running", "node --version"),
-        ("print the nodejs version number", "node --version")] },
+    Case {
+        phrase: "diff of changes in this project",
+        command: "git diff",
+        tests: [
+            ("what exactly did I modify, line by line", "git diff"),
+            ("show my uncommitted edits", "git diff"),
+            ("let me see the patch of my working tree", "git diff"),
+        ],
+    },
+    Case {
+        phrase: "summary of what changed per file",
+        command: "git diff --stat",
+        tests: [
+            ("which files changed and by how much", "git diff --stat"),
+            ("how many lines did I touch in each file", "git diff --stat"),
+            ("short overview of my modifications by file", "git diff --stat"),
+        ],
+    },
+    Case {
+        phrase: "show the last 3 commits",
+        command: "git log --oneline -n 3",
+        tests: [
+            ("give me the 7 most recent commits", "git log --oneline -n 7"),
+            ("what were the latest 5 commits", "git log --oneline -n 5"),
+            ("recent history, 12 entries", "git log --oneline -n 12"),
+        ],
+    },
+    Case {
+        phrase: "which branch am I on",
+        command: "git branch --show-current",
+        tests: [
+            ("what's the current branch", "git branch --show-current"),
+            ("name of the branch I have checked out", "git branch --show-current"),
+            ("where is HEAD pointing, branch-wise", "git branch --show-current"),
+        ],
+    },
+    Case {
+        phrase: "how big is this folder",
+        command: "du -sh .",
+        tests: [
+            ("total disk space used by this directory", "du -sh ."),
+            ("how much room does everything here take up", "du -sh ."),
+            ("size of the current directory overall", "du -sh ."),
+        ],
+    },
+    Case {
+        phrase: "count lines in Cargo.toml",
+        command: "wc -l Cargo.toml",
+        tests: [
+            ("how many lines does README.md have", "wc -l README.md"),
+            ("how long is Cargo.lock in lines", "wc -l Cargo.lock"),
+            ("number of lines in .gitignore", "wc -l .gitignore"),
+        ],
+    },
+    Case {
+        phrase: "what's listening on port 3000",
+        command: "lsof -i :3000",
+        tests: [
+            ("which process is using port 8080", "lsof -i :8080"),
+            ("who has port 5432 open", "lsof -i :5432"),
+            ("is anything bound to port 9000", "lsof -i :9000"),
+        ],
+    },
+    Case {
+        phrase: "show hidden files too",
+        command: "ls -la",
+        tests: [
+            ("list everything including dotfiles", "ls -la"),
+            ("all files, even the invisible ones, with details", "ls -la"),
+            ("long listing that includes entries starting with a dot", "ls -la"),
+        ],
+    },
+    Case {
+        phrase: "who changed this repo the most",
+        command: "git shortlog -sn",
+        tests: [
+            ("commit counts per author", "git shortlog -sn"),
+            ("rank contributors by number of commits", "git shortlog -sn"),
+            ("how many commits has each person made", "git shortlog -sn"),
+        ],
+    },
+    Case {
+        phrase: "what's my node version",
+        command: "node --version",
+        tests: [
+            ("which version of node is installed", "node --version"),
+            ("node release I'm running", "node --version"),
+            ("print the nodejs version number", "node --version"),
+        ],
+    },
 ];
 
 const SLOTTED: [&str; 3] = ["git log --oneline -n 3", "wc -l Cargo.toml", "lsof -i :3000"];

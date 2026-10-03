@@ -367,7 +367,8 @@ mod tests {
         let reading = read("commit msg=wip", &[slot("message", SlotKind::Text)]);
         assert!(reading.named.is_empty());
         assert_eq!(reading.unmatched, pairs(&[("msg", "wip")]));
-        let dashed = read("tag it tag-name=v1 count=three", &[slot("tag_name", SlotKind::Text), slot("count", SlotKind::Number)]);
+        let dashed =
+            read("tag it tag-name=v1 count=three", &[slot("tag_name", SlotKind::Text), slot("count", SlotKind::Number)]);
         assert_eq!(dashed.named, pairs(&[("tag_name", "v1"), ("count", "3")]));
     }
 
@@ -410,7 +411,11 @@ mod tests {
 
         assert_eq!(read("go to dir: src please", &slots).named, pairs(&[("directory", "src")]));
         assert_eq!(read("go to dir \"my files\"", &slots).named, pairs(&[("directory", "my files")]));
-        assert_eq!(read("open dir: a, not directory: b", &slots).named, pairs(&[("directory", "a,")]), "the first label wins");
+        assert_eq!(
+            read("open dir: a, not directory: b", &slots).named,
+            pairs(&[("directory", "a,")]),
+            "the first label wins"
+        );
         assert!(read("plan d: go home", &slots).named.is_empty(), "a short alias is not read as a label");
     }
 
@@ -437,11 +442,18 @@ mod tests {
 
     #[test]
     fn command_line_words_get_their_quotes_back() {
-        assert_eq!(request_from(&["commit", "this", "with", "a", "message:", "the message"]), "commit this with a message: \"the message\"");
+        assert_eq!(
+            request_from(&["commit", "this", "with", "a", "message:", "the message"]),
+            "commit this with a message: \"the message\""
+        );
         assert_eq!(request_from(&["commit", "message=fix the bug"]), "commit message=\"fix the bug\"");
         assert_eq!(request_from(&["commit", "message=say \"hi\" now"]), "commit message='say \"hi\" now'");
         assert_eq!(request_from(&["commit", "message=wip"]), "commit message=wip");
-        assert_eq!(request_from(&["commit with message 'x y'"]), "commit with message 'x y'", "one word is the whole request");
+        assert_eq!(
+            request_from(&["commit with message 'x y'"]),
+            "commit with message 'x y'",
+            "one word is the whole request"
+        );
         assert_eq!(request_from(&["echo", ""]), "echo \"\"");
         let typed = "commit message=\"fix the bug\"";
         let message = [slot("message", SlotKind::Text)];

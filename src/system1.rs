@@ -53,10 +53,7 @@ impl System1 {
     }
 
     fn client(&self) -> Result<&Client> {
-        self.client
-            .get_or_init(|| Client::from_env(interactive()))
-            .as_ref()
-            .map_err(|error| explain(error.clone()))
+        self.client.get_or_init(|| Client::from_env(interactive())).as_ref().map_err(|error| explain(error.clone()))
     }
 
     /// Requests, tokens and an estimated cost so far, when a client has been made.

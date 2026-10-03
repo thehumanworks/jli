@@ -1,0 +1,12 @@
+[tools]
+ast-grep = "0.45.3"
+hk = "2.4.0"
+pkl = "0.32.1"
+
+[tasks.check]
+description = "Everything a commit must pass: format, clippy, ast-grep rules and the offline tests"
+run = ["hk check --all", "cargo test --quiet"]
+
+[tasks.fix]
+description = "Apply the fixes the linters can make"
+run = "hk fix --all"

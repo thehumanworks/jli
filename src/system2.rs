@@ -173,7 +173,13 @@ struct ExtractedValue {
 }
 
 /// Free-text slot filling. Classification cannot write text, so this is agent work.
-pub fn extract(llm: &Llm, query: &str, steps: &[String], scenario: &str, slots: &[&Slot]) -> Result<(HashMap<String, String>, u64)> {
+pub fn extract(
+    llm: &Llm,
+    query: &str,
+    steps: &[String],
+    scenario: &str,
+    slots: &[&Slot],
+) -> Result<(HashMap<String, String>, u64)> {
     let (data, ms) = llm.complete_json::<Extracted>(&JsonRequest {
         model: &AGENT_MODEL,
         system: "Fill in the placeholder values for a command from the user's request. Return each value unquoted. \

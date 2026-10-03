@@ -208,6 +208,12 @@ The app makes two kinds of HTTP call and uses one database. It is synchronous th
 Models are set with `JLI_AGENT_MODEL` (default `inception/mercury-2.5`) and `JLI_TRANSLATOR_MODEL`
 (default `inception/mercury-2.5`).
 
+## Contributing
+
+`AGENTS.md` has the rules for changing this code, for people and for coding agents. `mise install`
+then `hk install` sets up the git hooks: format, strict clippy, the `ast-grep` architecture rules in
+`rules/`, and the offline tests before a push. `mise run check` runs all of it.
+
 ## Design decisions
 
 The reasons behind all of this are in [docs/adr](docs/adr/README.md): why there are two systems,

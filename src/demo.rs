@@ -62,11 +62,8 @@ fn make_sandbox(dir: &FsPath) -> Result<PathBuf> {
     let repo = dir.join("repo");
     std::fs::create_dir_all(&repo)?;
     git(&repo, &["init", "-q", "-b", "main"])?;
-    let files = [
-        ("notes.txt", "one\ntwo\nthree\nfour\n"),
-        ("todo.md", "- learn\n- adapt\n"),
-        ("app.ts", "console.log('hello');\n"),
-    ];
+    let files =
+        [("notes.txt", "one\ntwo\nthree\nfour\n"), ("todo.md", "- learn\n- adapt\n"), ("app.ts", "console.log('hello');\n")];
     for (name, body) in files {
         std::fs::write(repo.join(name), body)?;
         git(&repo, &["add", name])?;

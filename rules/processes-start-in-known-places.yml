@@ -1,0 +1,10 @@
+id: processes-start-in-known-places
+language: rust
+severity: error
+message: Commands are started only by src/exec.rs (the user's steps), src/context.rs (git facts) and src/demo.rs.
+rule:
+  pattern: Command::new($$$ARGS)
+ignores:
+  - src/exec.rs
+  - src/context.rs
+  - src/demo.rs
