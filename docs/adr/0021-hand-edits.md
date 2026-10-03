@@ -55,8 +55,9 @@ jli forget-phrase <label> "<phrase>"        # the phrasing no longer means <labe
   remove one).
 - A name the slot already answers to is not an error: nothing is written and the outcome says
   `changed: false`, exit 0.
-- Removing a name the slot does not have, or the slot's own name, is refused (`alias_not_found`),
-  and the message lists the names it has.
+- Removing a name the slot does not have, or the slot's own name, is refused (`alias_not_found`).
+  For a name it does not have, the message lists the other names it has; for its own name, the
+  message says that name is the one in the command and cannot be removed.
 - A slot whose last alias is removed is written without the `aliases` field, so the row is byte for
   byte what it was before ADR 12 ([ADR 2](0002-brain-in-libsql.md)). A test checks this.
 

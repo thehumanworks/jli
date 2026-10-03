@@ -54,9 +54,10 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   as words of a request), two writers teaching the same new command at once get two skills, a share
   cannot be undone except by `forget`, and the safe writes have not run against a live remote.
 - [16](0016-measuring-the-matrix.md): a stored example is ground truth, so one taught by mistake cannot
-  be dropped through the gate (it can now be dropped by hand with `jli forget-phrase`, ADR 21); the gate checks a skill's competitors, not the whole matrix; rewrites are
-  not repeatable; examples carry no context, and a replay in a directory that is gone runs in an
-  inferred one; a `jli fix` made after other requests counts as a request of its own.
+  be dropped through the gate (it can now be dropped by hand with `jli forget-phrase`, ADR 21); the
+  gate checks a skill's competitors, not the whole matrix; rewrites are not repeatable; examples carry
+  no context, and a replay in a directory that is gone runs in an inferred one; a `jli fix` made after
+  other requests counts as a request of its own.
 - [17](0017-project-scope.md): an older jli ignores `.jlirc` and teaches the global skills inside a
   project; a lesson about a global skill blocks only the phrasing it was learned from, and has no
   path to global but `teach --global`; a stop between `generalize`'s two writes leaves both rows; a

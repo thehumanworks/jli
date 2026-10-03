@@ -161,7 +161,7 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | `jli fix <eventId> --expected "<words>"` | unlearn it and ask the agent with what you expected; returns a plan (`--run` runs it) |
 | `jli forget <label>` | delete a skill; inside a project only the project's own, `--global` for a global one |
 | `jli forget-phrase <label> "<phrase>"` | take one phrasing back from a skill and keep it as a counter-example, so it is not learned straight back; inside a project, for a global skill, in that project only (`--global` for every project) |
-| `jli alias <label> <slot> <name>` | give a slot another name for `name=value`; `--remove` takes one away. Inside a project an alias of a global skill holds in every project |
+| `jli alias <label> <slot> <name>` | give a slot another name for `name=value`; `--remove` takes one away. Inside a project an alias of a global skill holds in every project; `--global` reaches a global skill that a project skill of the same label hides |
 | `jli project` | the project this directory is in, from the nearest `.jlirc`, and how many skills are its own |
 | `jli project init [<id>]` | make this directory a project: what jli learns here stays with it |
 | `jli generalize [<label>]` | the agent proposes how to make project skills global; each is written only once you approve (`--all-projects`, `--approve-all`, `-n`) |
