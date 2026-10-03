@@ -1,19 +1,23 @@
-//! The only way this app talks to a language model: one POST to an
-//! OpenAI-compatible `/chat/completions` endpoint with a JSON Schema for the
-//! reply. No SDK.
+//! The only way this app talks to a language model: one request with a JSON Schema for the
+//! reply, to the first of these that is set up.
 //!
-//!   JLI_LLM_API_KEY + JLI_LLM_BASE_URL           any other compatible endpoint
-//!   OPENROUTER_API_KEY (+ OPENROUTER_BASE_URL)   OpenRouter, the default
-//!   AI_GATEWAY_API_KEY                           Vercel AI Gateway, the fallback
+//!   JLI_LLM_API_KEY + JLI_LLM_BASE_URL           any OpenAI-compatible /chat/completions endpoint
+//!   a ChatGPT plan (jli login, jli login --codex) a streamed Responses request through chatgpt-sdk
+//!   OPENROUTER_API_KEY (+ OPENROUTER_BASE_URL)   OpenRouter
+//!   AI_GATEWAY_API_KEY                           Vercel AI Gateway
+//!
+//! `JLI_PROVIDER` (chatgpt, openrouter, gateway or custom) picks one of them instead (ADR 25).
 
-use std::sync::LazyLock;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
+use chatgpt_sdk::{InputItem, ReasoningEffort, Recovery, ResponseRequest, MANAGE_USAGE_URL};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+use crate::account::Accounts;
 use crate::types::{coded, Slot, SlotKind, CONFIGURATION, MODEL};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,32 +30,89 @@ fn clean(value: Option<String>) -> Option<String> {
     value.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
 }
 
-/// Which endpoint to call, from the environment `get` reads.
+fn openrouter(var: &impl Fn(&str) -> Option<String>) -> Option<Endpoint> {
+    let api_key = var("OPENROUTER_API_KEY")?;
+    let base_url = var("OPENROUTER_BASE_URL").unwrap_or_else(|| "https://openrouter.ai/api/v1".into());
+    Some(Endpoint { base_url, api_key })
+}
+
+fn gateway(var: &impl Fn(&str) -> Option<String>) -> Option<Endpoint> {
+    Some(Endpoint { base_url: "https://ai-gateway.vercel.sh/v1".into(), api_key: var("AI_GATEWAY_API_KEY")? })
+}
+
+fn custom(var: &impl Fn(&str) -> Option<String>) -> Option<Endpoint> {
+    Some(Endpoint { api_key: var("JLI_LLM_API_KEY")?, base_url: var("JLI_LLM_BASE_URL")? })
+}
+
+/// Which API-key endpoint to call, from the environment `get` reads: the custom one, OpenRouter,
+/// then the Vercel AI Gateway.
 pub fn endpoint_from(get: impl Fn(&str) -> Option<String>) -> Result<Endpoint> {
     let var = |name: &str| clean(get(name));
-    if let (Some(api_key), Some(base_url)) = (var("JLI_LLM_API_KEY"), var("JLI_LLM_BASE_URL")) {
-        return Ok(Endpoint { base_url, api_key });
-    }
-    if let Some(api_key) = var("OPENROUTER_API_KEY") {
-        let base_url = var("OPENROUTER_BASE_URL").unwrap_or_else(|| "https://openrouter.ai/api/v1".into());
-        return Ok(Endpoint { base_url, api_key });
-    }
-    if let Some(api_key) = var("AI_GATEWAY_API_KEY") {
-        return Ok(Endpoint { base_url: "https://ai-gateway.vercel.sh/v1".into(), api_key });
-    }
-    Err(coded(CONFIGURATION, "No language model key found. Set OPENROUTER_API_KEY or AI_GATEWAY_API_KEY."))
+    custom(&var).or_else(|| openrouter(&var)).or_else(|| gateway(&var)).ok_or_else(|| {
+        coded(CONFIGURATION, "No language model found. Run `jli login` to use your ChatGPT plan, or set OPENROUTER_API_KEY or AI_GATEWAY_API_KEY.")
+    })
 }
 
-pub fn endpoint() -> Result<Endpoint> {
-    endpoint_from(|name| std::env::var(name).ok())
+/// The model the agent and the translator use with an API key.
+pub const MERCURY: &str = "inception/mercury-2.5";
+
+/// The user's ChatGPT plan, as `jli login` or `jli login --codex` set it up.
+pub struct ChatGpt {
+    pub client: chatgpt_sdk::Client,
+    /// The model `jli config model` picked, or the default.
+    pub model: String,
+    pub email: Option<String>,
+    /// What to run when the sign-in stops working: `jli login`, or `codex login`.
+    pub sign_in: &'static str,
 }
 
-/// Fast model: rewrites what was taught and suggests alternatives.
-pub static TRANSLATOR_MODEL: LazyLock<String> =
-    LazyLock::new(|| clean(std::env::var("JLI_TRANSLATOR_MODEL").ok()).unwrap_or_else(|| "inception/mercury-2.5".into()));
-/// Reasoning agent: proposes commands for requests nothing in the matrix fits.
-pub static AGENT_MODEL: LazyLock<String> =
-    LazyLock::new(|| clean(std::env::var("JLI_AGENT_MODEL").ok()).unwrap_or_else(|| "inception/mercury-2.5".into()));
+/// Where language model requests go.
+pub enum Provider {
+    /// An OpenAI-compatible `/chat/completions` endpoint with an API key.
+    Compatible(Endpoint),
+    /// The user's ChatGPT plan, through chatgpt-sdk.
+    ChatGpt(ChatGpt),
+}
+
+/// The provider, from the environment `get` reads and the ChatGPT plan `chatgpt` finds: what
+/// `JLI_PROVIDER` names, else the custom endpoint, the ChatGPT plan, OpenRouter and the gateway,
+/// in that order. `chatgpt` is asked only when it is needed.
+pub fn provider_from(
+    get: impl Fn(&str) -> Option<String>,
+    chatgpt: impl FnOnce() -> Result<Option<ChatGpt>>,
+) -> Result<Provider> {
+    let var = |name: &str| clean(get(name));
+    let missing = |what: &str| coded(CONFIGURATION, format!("JLI_PROVIDER is {what}, but {}", needs(what)));
+    match var("JLI_PROVIDER").map(|name| name.to_lowercase()).as_deref() {
+        Some("chatgpt") => return chatgpt()?.map(Provider::ChatGpt).ok_or_else(|| missing("chatgpt")),
+        Some("openrouter") => return openrouter(&var).map(Provider::Compatible).ok_or_else(|| missing("openrouter")),
+        Some("gateway") => return gateway(&var).map(Provider::Compatible).ok_or_else(|| missing("gateway")),
+        Some("custom") => return custom(&var).map(Provider::Compatible).ok_or_else(|| missing("custom")),
+        Some(other) => {
+            return Err(coded(
+                CONFIGURATION,
+                format!("JLI_PROVIDER must be chatgpt, openrouter, gateway or custom, not {other}"),
+            ))
+        }
+        None => {}
+    }
+    if let Some(endpoint) = custom(&var) {
+        return Ok(Provider::Compatible(endpoint));
+    }
+    if let Some(chatgpt) = chatgpt()? {
+        return Ok(Provider::ChatGpt(chatgpt));
+    }
+    endpoint_from(get).map(Provider::Compatible)
+}
+
+fn needs(provider: &str) -> &'static str {
+    match provider {
+        "chatgpt" => "jli is not signed in with ChatGPT: run `jli login`.",
+        "openrouter" => "OPENROUTER_API_KEY is not set.",
+        "gateway" => "AI_GATEWAY_API_KEY is not set.",
+        _ => "JLI_LLM_API_KEY and JLI_LLM_BASE_URL are not both set.",
+    }
+}
 
 /// Reasoning is off everywhere: Mercury stalls with it on, and every default model is Mercury.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +146,8 @@ pub type Transport = dyn Fn(&HttpCall) -> std::result::Result<(u16, String), Str
 /// The language model client. Real HTTP unless built with a fake transport.
 pub struct Llm {
     fake: Option<Box<Transport>>,
+    /// Found on first use, so that commands that ask no model need no key and no sign-in.
+    provider: OnceLock<std::result::Result<Provider, (&'static str, String)>>,
 }
 
 impl Default for Llm {
@@ -136,29 +199,109 @@ fn first_chars(text: &str, count: usize) -> String {
     text.chars().take(count).collect()
 }
 
+/// The user message: the input as JSON indented by one space, or the text as it is.
+fn user_message(input: &Value) -> String {
+    match input {
+        Value::String(text) => text.clone(),
+        other => one_space_json(other),
+    }
+}
+
 impl Llm {
     pub fn from_env() -> Llm {
-        Llm { fake: None }
+        Llm { fake: None, provider: OnceLock::new() }
     }
 
     /// A client that sends every request to `transport` instead of the network.
     pub fn with_transport(
         transport: impl Fn(&HttpCall) -> std::result::Result<(u16, String), String> + Send + Sync + 'static,
     ) -> Llm {
-        Llm { fake: Some(Box::new(transport)) }
+        Llm { fake: Some(Box::new(transport)), provider: OnceLock::new() }
+    }
+
+    /// A client for one provider, whatever the environment says.
+    pub fn with_provider(provider: Provider) -> Llm {
+        Llm { fake: None, provider: OnceLock::from(Ok(provider)) }
+    }
+
+    fn provider(&self) -> Result<&Provider> {
+        let found = self.provider.get_or_init(|| {
+            provider_from(|name| std::env::var(name).ok(), || Accounts::from_env()?.provider())
+                .map_err(|error| (crate::types::error_code(&error), format!("{error:#}")))
+        });
+        found.as_ref().map_err(|(code, message)| coded(code, message.clone()))
+    }
+
+    /// The ChatGPT plan requests go to, if they go to one.
+    pub fn chatgpt(&self) -> Option<&ChatGpt> {
+        match (&self.fake, self.provider()) {
+            (None, Ok(Provider::ChatGpt(chatgpt))) => Some(chatgpt),
+            _ => None,
+        }
+    }
+
+    fn model(&self, variable: &str) -> String {
+        if let Some(model) = clean(std::env::var(variable).ok()) {
+            return model;
+        }
+        self.chatgpt().map(|chatgpt| chatgpt.model.clone()).unwrap_or_else(|| MERCURY.into())
+    }
+
+    /// Reasoning agent: proposes commands for requests nothing in the matrix fits.
+    /// `JLI_AGENT_MODEL`, else the ChatGPT plan's model, else Mercury.
+    pub fn agent_model(&self) -> String {
+        self.model("JLI_AGENT_MODEL")
+    }
+
+    /// Fast model: rewrites what was taught and suggests alternatives.
+    /// `JLI_TRANSLATOR_MODEL`, else the ChatGPT plan's model, else Mercury.
+    pub fn translator_model(&self) -> String {
+        self.model("JLI_TRANSLATOR_MODEL")
+    }
+
+    /// The agent as the trace names it: on a ChatGPT plan, says so.
+    pub fn agent_label(&self) -> String {
+        self.label(self.agent_model())
+    }
+
+    /// The translator as the trace names it.
+    pub fn translator_label(&self) -> String {
+        self.label(self.translator_model())
+    }
+
+    fn label(&self, model: String) -> String {
+        match self.chatgpt() {
+            Some(_) => format!("{model} · using ChatGPT plan"),
+            None => model,
+        }
+    }
+
+    /// Where requests go, in words, for `jli config`.
+    pub fn describe(&self) -> String {
+        if self.fake.is_some() {
+            return "a fake transport".into();
+        }
+        match self.provider() {
+            Ok(Provider::ChatGpt(chatgpt)) => match &chatgpt.email {
+                Some(email) => format!("ChatGPT plan ({email})"),
+                None => "ChatGPT plan".into(),
+            },
+            Ok(Provider::Compatible(endpoint)) => endpoint.base_url.clone(),
+            Err(error) => format!("none: {error:#}"),
+        }
     }
 
     /// Ask for a reply that conforms to `schema`. The caller owns the type `T`.
     pub fn complete_json<T: DeserializeOwned>(&self, request: &JsonRequest) -> Result<(T, u64)> {
-        let Endpoint { base_url, api_key } = match self.fake {
+        let Endpoint { base_url, api_key } = match &self.fake {
             Some(_) => Endpoint { base_url: "http://fake.invalid/v1".into(), api_key: "fake".into() },
-            None => endpoint()?,
+            None => match self.provider()? {
+                Provider::ChatGpt(chatgpt) => return complete_on_plan(chatgpt, request),
+                Provider::Compatible(endpoint) => endpoint.clone(),
+            },
         };
         let started = Instant::now();
-        let user = match &request.input {
-            Value::String(text) => text.clone(),
-            other => one_space_json(other),
-        };
+        let user = user_message(&request.input);
         let reasoning = match request.reasoning {
             Reasoning::Off => json!({ "enabled": false }),
         };
@@ -212,6 +355,58 @@ fn read_reply<T: DeserializeOwned>(text: &str) -> Result<T> {
     let content =
         reply.pointer("/choices/0/message/content").and_then(Value::as_str).ok_or_else(|| anyhow!("no message content"))?;
     Ok(serde_json::from_str(strip_fence(content))?)
+}
+
+/// The same request on the user's ChatGPT plan: the system prompt as `instructions`, the same user
+/// message, the same strict schema, streamed and unstored. Two attempts, as for an API key, but
+/// only for a failure that is temporary: a usage limit, an ineligible plan or an ended sign-in
+/// stops at once, and says what to do.
+fn complete_on_plan<T: DeserializeOwned>(chatgpt: &ChatGpt, request: &JsonRequest) -> Result<(T, u64)> {
+    let started = Instant::now();
+    let effort = match request.reasoning {
+        Reasoning::Off => ReasoningEffort::None,
+    };
+    let body = ResponseRequest::new(request.model)
+        .instructions(request.system)
+        .input(InputItem::user(user_message(&request.input)))
+        .reasoning_effort(effort)
+        .json_schema(request.name, request.schema.clone());
+    let client = chatgpt.client.with_timeout(request.timeout);
+    let mut last_error = "no attempt made".to_string();
+    for _ in 0..ATTEMPTS {
+        match client.create(&body) {
+            Ok(completion) => match serde_json::from_str::<T>(strip_fence(&completion.text)) {
+                Ok(data) => return Ok((data, started.elapsed().as_millis() as u64)),
+                Err(error) => last_error = format!("{} returned an unreadable reply: {error}", request.model),
+            },
+            Err(error) => {
+                let (code, message) = plan_failure(chatgpt, request.model, &error);
+                if error.recovery() != Recovery::RetryLater {
+                    return Err(coded(code, message));
+                }
+                last_error = message;
+            }
+        }
+    }
+    Err(coded(MODEL, last_error))
+}
+
+/// What to tell the person when the plan refuses a request, and the error's kind.
+fn plan_failure(chatgpt: &ChatGpt, model: &str, error: &chatgpt_sdk::Error) -> (&'static str, String) {
+    match error.recovery() {
+        Recovery::RetryLater => (MODEL, format!("{model} did not answer on your ChatGPT plan: {error}")),
+        Recovery::ManageUsage => {
+            (MODEL, format!("Usage limit reached on your ChatGPT plan ({error}). Manage usage at {MANAGE_USAGE_URL}"))
+        }
+        Recovery::NotEligible => (MODEL, format!("Your ChatGPT plan cannot be used here: {error}")),
+        Recovery::SignInAgain | Recovery::EnablePlanUsage => {
+            (CONFIGURATION, format!("Your ChatGPT sign-in no longer works ({error}). Run `{}`.", chatgpt.sign_in))
+        }
+        Recovery::FixRequest => {
+            (MODEL, format!("{model} refused the request: {error}. `jli models` lists the models your plan has."))
+        }
+        _ => (MODEL, format!("{model} failed on your ChatGPT plan: {error}")),
+    }
 }
 
 // ── Schema fragments shared by every skill-shaped reply ─────────────────────
@@ -444,5 +639,131 @@ mod tests {
         assert_eq!(strip_fence("```json\n{}\n```"), "{}");
         assert_eq!(strip_fence("  ```\n[1]```  "), "[1]");
         assert_eq!(strip_fence("{\"a\": 1}"), "{\"a\": 1}");
+    }
+
+    use chatgpt_sdk::testing::{FakeChatGpt, FakeReply};
+    use chatgpt_sdk::{AccessToken, Backend, Client};
+
+    fn on_plan(fake: &Arc<FakeChatGpt>) -> Llm {
+        let client = Client::builder(AccessToken::new(Backend::Codex, "static-token").account_id("acct-1"))
+            .http_client(fake.http())
+            .originator("jli")
+            .build();
+        Llm::with_provider(Provider::ChatGpt(ChatGpt {
+            client,
+            model: "gpt-6-luna".into(),
+            email: Some("user@example.com".into()),
+            sign_in: "codex login",
+        }))
+    }
+
+    #[test]
+    fn on_a_chatgpt_plan_the_same_request_is_a_streamed_responses_request() {
+        let fake = FakeChatGpt::new();
+        fake.reply("```json\n{\"value\": \"ok\"}\n```");
+        let llm = on_plan(&fake);
+        let schema = object(json!({ "value": { "type": "string" } }));
+        let (thing, _) = llm.complete_json::<Thing>(&request(schema.clone())).unwrap();
+        assert_eq!(thing, Thing { value: "ok".into() });
+        let sent = fake.requests().pop().unwrap();
+        assert_eq!(sent.url, "https://chatgpt.com/backend-api/codex/responses");
+        assert_eq!(sent.header_value("chatgpt-account-id"), Some("acct-1"));
+        let body: Value = serde_json::from_slice(&sent.body).unwrap();
+        assert_eq!(body["model"], "test/model");
+        assert_eq!(body["instructions"], "be brief", "the system prompt is the instructions, never a system message");
+        assert_eq!(
+            body["input"],
+            json!([{ "type": "message", "role": "user", "content": [{ "type": "input_text",
+                "text": "{\n \"request\": \"hi\",\n \"list\": [\n  1,\n  2\n ]\n}" }] }]),
+            "the user message is the one the prompts were measured with"
+        );
+        assert_eq!(body["reasoning"], json!({ "effort": "none" }), "reasoning off is effort none");
+        assert_eq!(
+            body["text"],
+            json!({ "format": { "type": "json_schema", "name": "thing", "schema": schema, "strict": true } })
+        );
+        assert_eq!((body["store"].clone(), body["stream"].clone()), (json!(false), json!(true)));
+    }
+
+    #[test]
+    fn on_a_plan_a_temporary_failure_is_retried_and_a_limit_is_not() {
+        let fake = FakeChatGpt::new();
+        let llm = on_plan(&fake);
+        let schema = object(json!({ "value": { "type": "string" } }));
+        fake.script(FakeReply::Status(503, r#"{"detail":"busy"}"#.into()));
+        fake.reply("{\"value\": \"second\"}");
+        assert_eq!(llm.complete_json::<Thing>(&request(schema.clone())).unwrap().0.value, "second");
+
+        let before = fake.requests().len();
+        fake.script(FakeReply::Failed("subscription_sharing_usage_limit_exceeded".into()));
+        let error = llm.complete_json::<Thing>(&request(schema.clone())).unwrap_err();
+        assert_eq!(fake.requests().len(), before + 1, "a usage limit is not retried");
+        assert_eq!(crate::types::error_code(&error), MODEL);
+        assert!(error.to_string().contains("https://chatgpt.com/settings/usage"), "{error}");
+
+        fake.script(FakeReply::Status(401, r#"{"detail":"Unauthorized"}"#.into()));
+        let error = llm.complete_json::<Thing>(&request(schema.clone())).unwrap_err();
+        assert_eq!(crate::types::error_code(&error), CONFIGURATION);
+        assert!(error.to_string().contains("codex login"), "{error}");
+
+        fake.script(FakeReply::Status(400, r#"{"detail":"The 'test/model' model is not supported"}"#.into()));
+        let error = llm.complete_json::<Thing>(&request(schema)).unwrap_err();
+        assert!(error.to_string().contains("jli models"), "{error}");
+    }
+
+    #[test]
+    fn the_plan_names_the_models_and_says_it_is_in_use() {
+        let llm = on_plan(&FakeChatGpt::new());
+        if std::env::var("JLI_AGENT_MODEL").is_err() {
+            assert_eq!(llm.agent_model(), "gpt-6-luna");
+            assert_eq!(llm.agent_label(), "gpt-6-luna · using ChatGPT plan");
+        }
+        assert_eq!(llm.describe(), "ChatGPT plan (user@example.com)");
+        let offline = Llm::with_transport(|_| Err("connection refused".into()));
+        assert!(offline.chatgpt().is_none(), "a fake transport never looks for a sign-in");
+        assert!(!offline.agent_label().contains("ChatGPT"));
+    }
+
+    fn signed_in() -> Result<Option<ChatGpt>> {
+        let client =
+            Client::builder(AccessToken::new(Backend::Api, "static")).http_client(FakeChatGpt::new().http()).build();
+        Ok(Some(ChatGpt { client, model: "gpt-6-luna".into(), email: None, sign_in: "jli login" }))
+    }
+
+    fn kind(provider: Result<Provider>) -> String {
+        match provider {
+            Ok(Provider::ChatGpt(_)) => "chatgpt".into(),
+            Ok(Provider::Compatible(endpoint)) => endpoint.base_url,
+            Err(error) => format!("error: {error}"),
+        }
+    }
+
+    #[test]
+    fn providers_resolve_in_order() {
+        let env = |pairs: &[(&str, &str)]| {
+            let map: HashMap<String, String> = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            move |name: &str| map.get(name).cloned()
+        };
+        let openrouter = [("OPENROUTER_API_KEY", "k")];
+        assert_eq!(kind(provider_from(env(&openrouter), signed_in)), "chatgpt", "a sign-in wins over OpenRouter");
+        assert_eq!(kind(provider_from(env(&openrouter), || Ok(None))), "https://openrouter.ai/api/v1");
+        let custom = [("JLI_LLM_API_KEY", "k"), ("JLI_LLM_BASE_URL", "http://local/v1")];
+        assert_eq!(kind(provider_from(env(&custom), signed_in)), "http://local/v1", "an explicit endpoint wins");
+        let picked = [("JLI_PROVIDER", "OpenRouter"), ("OPENROUTER_API_KEY", "k")];
+        assert_eq!(kind(provider_from(env(&picked), signed_in)), "https://openrouter.ai/api/v1");
+        let never =
+            || -> Result<Option<ChatGpt>> { panic!("the sign-in is not looked for when JLI_PROVIDER names another") };
+        assert_eq!(kind(provider_from(env(&picked), never)), "https://openrouter.ai/api/v1");
+        assert!(kind(provider_from(env(&[("JLI_PROVIDER", "chatgpt")]), || Ok(None))).contains("jli login"));
+        assert!(kind(provider_from(env(&[("JLI_PROVIDER", "gateway")]), signed_in)).contains("AI_GATEWAY_API_KEY"));
+        assert!(kind(provider_from(env(&[("JLI_PROVIDER", "mercury")]), signed_in)).contains("must be chatgpt"));
+        let ended = || -> Result<Option<ChatGpt>> { Err(coded(CONFIGURATION, "Your ChatGPT sign-in has ended.")) };
+        assert!(
+            kind(provider_from(env(&openrouter), ended)).contains("has ended"),
+            "an ended sign-in is not a quiet switch"
+        );
+        let none = provider_from(env(&[]), || Ok(None)).err().unwrap();
+        assert_eq!(crate::types::error_code(&none), CONFIGURATION);
+        assert!(none.to_string().contains("jli login"));
     }
 }

@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use crate::context::Context;
 use crate::llm::{
     nullable_string, object, risk_schema, slot_values_schema, slots_schema, JsonRequest, Llm, Reasoning, SlotDraft,
-    SlotValue, AGENT_MODEL,
+    SlotValue,
 };
 use crate::types::{Risk, Skill, Slot};
 
@@ -136,7 +136,7 @@ pub fn propose(llm: &Llm, input: &ProposeInput) -> Result<(Proposal, u64)> {
         })
         .collect();
     llm.complete_json(&JsonRequest {
-        model: &AGENT_MODEL,
+        model: &llm.agent_model(),
         system: INSTRUCTIONS,
         name: "proposal",
         schema: proposal_schema(),
@@ -204,7 +204,7 @@ pub fn extract(
     slots: &[&Slot],
 ) -> Result<(HashMap<String, String>, u64)> {
     let (data, ms) = llm.complete_json::<Extracted>(&JsonRequest {
-        model: &AGENT_MODEL,
+        model: &llm.agent_model(),
         system: "Fill in the placeholder values for a command from the user's request. Return each value unquoted. \
                  Write a sensible value when the request implies one. Return null only when it cannot be determined.",
         name: "slot_values",
@@ -256,7 +256,7 @@ pub fn name_arguments(
     arguments: &[(String, String)],
 ) -> Result<(Vec<(String, String)>, u64)> {
     let (data, ms) = llm.complete_json::<Named>(&JsonRequest {
-        model: &AGENT_MODEL,
+        model: &llm.agent_model(),
         system: "A user gave name=value arguments to a command under names the command does not declare. \
                  For each argument, say which placeholder it is another name for: an abbreviation, a synonym or a \
                  misspelling of the placeholder's name, or a name that plainly describes the same value. \
@@ -374,7 +374,7 @@ pub fn rewrite_row(llm: &Llm, input: &RewriteInput) -> Result<(Rewrite, u64)> {
         })
     };
     llm.complete_json(&JsonRequest {
-        model: &AGENT_MODEL,
+        model: &llm.agent_model(),
         system: REWRITE_INSTRUCTIONS,
         name: "matrix_rewrite",
         schema: rewrite_schema(),
@@ -491,7 +491,7 @@ pub fn generalize(llm: &Llm, input: &GeneralizeInput) -> Result<(Generalization,
     };
     let skill = input.skill;
     llm.complete_json(&JsonRequest {
-        model: &AGENT_MODEL,
+        model: &llm.agent_model(),
         system: GENERALIZE_INSTRUCTIONS,
         name: "generalization",
         schema: generalization_schema(),

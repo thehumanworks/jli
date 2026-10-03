@@ -51,3 +51,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["rt"] }
 typesafe-jev = "0.2"
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
+
+[dev-dependencies]
+# The offline tests sign in to a fake ChatGPT.
+chatgpt-sdk = { path = "crates/chatgpt-sdk", version = "0.1", features = ["testing"] }

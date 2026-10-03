@@ -5,7 +5,7 @@ use anyhow::Result;
 
 use crate::context::{read_context, Context};
 use crate::eval::{closest, verify_row};
-use crate::llm::{SlotDraft, AGENT_MODEL, TRANSLATOR_MODEL};
+use crate::llm::SlotDraft;
 use crate::slots::{checked_slots, is_flag, is_literal, match_proposal, match_skill, render, undeclared};
 use crate::store::{slug, Brain, NewSkill, MAX_EXAMPLES};
 use crate::system2::{rewrite_row, RewriteInput, WeakPhrasing};
@@ -191,7 +191,12 @@ pub fn learn_phrase(brain: &Brain, models: &Models, input: &LearnInput, ui: &Ui)
         );
         let draft = match translated {
             Ok((draft, ms)) => {
-                ui.note(format!("{} generalised it in {}: {}", *TRANSLATOR_MODEL, duration(ms), c::dim(&draft.scenario)));
+                ui.note(format!(
+                    "{} generalised it in {}: {}",
+                    models.llm.translator_label(),
+                    duration(ms),
+                    c::dim(&draft.scenario)
+                ));
                 draft
             }
             Err(error) => {
@@ -348,7 +353,7 @@ pub fn settle_proposed(
             return (row.scenario.clone(), Settled::Unchecked);
         }
     };
-    ui.note(format!("Rejected by System 1: {problem}. Asking {} for another scenario.", *AGENT_MODEL));
+    ui.note(format!("Rejected by System 1: {problem}. Asking {} for another scenario.", models.llm.agent_label()));
     let competitors: Vec<&Skill> = closest(skills, row, phrase, &[]).into_iter().take(4).collect();
     let weak = [WeakPhrasing { phrase: phrase.to_string(), routed_to: None, confidence: 0.0 }];
     let input = RewriteInput { skill: row, threshold, weak: &weak, competitors: &competitors, feedback: Some(&problem) };

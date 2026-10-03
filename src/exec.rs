@@ -100,6 +100,19 @@ pub fn process_table() -> Option<String> {
     done.status.success().then(|| String::from_utf8_lossy(&done.stdout).into_owned())
 }
 
+/// Open `url` in the system browser, for `jli login` (ADR 25): `open` on macOS, `xdg-open`
+/// elsewhere. False when there is none, or no display to open it on.
+pub fn open_in_browser(url: &str) -> bool {
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    Command::new(opener)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 /// Run shell steps in order with `bash -c`, stopping at the first failure.
 pub fn run(commands: &[String], cwd: &Path, options: RunOptions) -> Result<RunResult> {
     let mut output = String::new();
