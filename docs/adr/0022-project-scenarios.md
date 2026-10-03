@@ -69,8 +69,11 @@ CREATE TABLE IF NOT EXISTS project_scenarios (
   PRIMARY KEY (user_id, project_id, label, created_at));
 ```
 
-- No column is added and no existing row is written. An older jli never reads the table. It ignores
-  `.jlirc` anyway, so inside a project it sees the global scenario, as before.
+- No column is added and no existing row is written. An older jli never reads the table. One from
+  before [ADR 17](0017-project-scope.md) ignores `.jlirc`. One with ADR 17 but not this record reads
+  `.jlirc` and shows the project's lessons, but inside the project it sees the global scenario, as
+  the live run below shows. Its `eval undo` there refuses a change kept as a project's scenario,
+  because the scenario it reads is not the one the record wrote.
 - Like a lesson, the scenario names the global row's `created_at`. A global skill that is forgotten
   and taught again starts clean in every project.
 - It holds one value, written with an upsert (`ON CONFLICT … DO UPDATE SET scenario`) as a setting
@@ -231,6 +234,9 @@ The acceptance checks of [ADR 9](0009-port-to-rust.md), on a fresh brain in a sc
   that competitor's examples, as a lesson does. If the project's lesson already lists the phrasing as
   one of the competitor's examples, the written view shows it in both lists, which the gate did not
   measure.
+- **Known gap:** a jli with ADR 17 but not this record still writes the global row when its
+  `jli eval --optimise` keeps a rewrite of a global skill inside a project: issue #21 holds for
+  that version until every host sharing the brain is upgraded.
 - **Known gap:** live, a rewrite was kept in a project twice, on one skill of one scratch brain. The
   drop that a project cannot make and `undo` over a project's earlier scenario were verified
   offline only.
