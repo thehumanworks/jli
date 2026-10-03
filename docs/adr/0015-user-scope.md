@@ -158,7 +158,7 @@ winning a label both hold. Which of the two it should be is that change's decisi
 | `JLI_USER_ID=agent jli -y what is in this folder` | in the agent's `history` only; the default user's `history`, and the `dev` binary's, show only `where am I` |
 | `-n fix` as the default user | `would unlearn that "where am I" means print-working-directory`, its own last run |
 | `--user-id=agent config mode manual` | the agent's `config` shows manual; the default user's shows semi |
-| the `dev` binary afterwards: `skills`, `-n where am I`, `history` | works; sees the default user's 11 skills (its own, the seeds and the one shared to it), none of the agent's |
+| the `dev` binary afterwards: `skills`, `-n where am I`, `history` (reads and a dry run, no write) | each worked; it saw the default user's 11 skills (its own, the seeds and the one shared to it) and none of the agent's, and its `skills` output differed from before only by the shared skill |
 | `--user-id=Agent skills`, `--user-id agent skills` | both refused, exit 1 |
 
 The acceptance checks 1 to 8 of [ADR 9](0009-port-to-rust.md) were re-run and held, once as the
