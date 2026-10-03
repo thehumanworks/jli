@@ -95,7 +95,8 @@ person accepted its routes, times how far its phrasings fall short of coming hom
 rewrites the top rows. A rewrite is kept only if the measured score of the skill and its
 competitors rises and no other skill loses a phrasing. Nobody is asked: the measurement is the
 approval. Each kept change is recorded, and `jli eval undo` puts it back. With `-n` nothing at all
-is written. On a scratch brain of 16 skills on 2026-10-03, a measurement took 22 System 1 calls
+is written. Inside a project the rewrite of a global skill's scenario is kept for that project only
+([ADR 22](docs/adr/0022-project-scenarios.md)). On a scratch brain of 16 skills on 2026-10-03, a measurement took 22 System 1 calls
 ($0.0014). An optimisation run took 80 System 1 and 6 System 2 calls, kept one rewrite of six, and
 cut the steal rate from 9% to 5%: the phrasing it freed
 now escalates to the agent instead, so the share that came home stayed at 91%. See [ADR 16](docs/adr/0016-measuring-the-matrix.md).
@@ -148,9 +149,9 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | `jli skills` | every skill, with learned phrasings and counter-examples |
 | `jli stats` | routing mix, latency, the learning curve, how often routes were right first time, and the `jli eval` trend |
 | `jli eval [<label>] [--limit N]` | route every stored example with itself held out, and replay accepted requests; priced before it spends |
-| `jli eval --optimise` | the agent rewrites the weakest rows; a rewrite is kept only if the measurement improves |
+| `jli eval --optimise` | the agent rewrites the weakest rows; a rewrite is kept only if the measurement improves, and inside a project only for that project |
 | `jli eval -n [--optimise]` | measure, and show the rewrites and their effect, but write nothing |
-| `jli eval undo [<label>]` | put back what the last optimisation changed |
+| `jli eval undo [<label>]` | put back what the last optimisation changed (inside a project, the last one made there) |
 | `jli history` | recent requests and how each was routed |
 | `jli teach "<phrase>" -- <command>` | link a phrase to a command; repeat to add more phrasings |
 | `jli teach --global "<phrase>" -- <command>` | the same, from inside a project, for every project |
@@ -296,11 +297,14 @@ A project is named by the id in the nearest `.jlirc` at or above the working dir
 project's skills and your global ones together, and a project skill wins a label both hold. A new
 skill is the project's; a phrasing or a counter-example for a global skill is kept as the project's
 own lesson about it, so correcting `cargo test` to `npm test` in one project never reaches another.
+A scenario `jli eval --optimise` rewrites there for a global skill is kept as the project's own too,
+and `jli skills` tags it `scenario rewritten here`.
 `teach --global` and `forget --global` reach the global skills from inside a project. Settings stay
 yours; history, stats, and the event and plan ids that `jli fix` and `jli run` take are the
 project's. `jli generalize` checks each proposal with System 1 in
 the project, among the global skills and against your other projects, and writes it only when you
-say yes. Without a `.jlirc` nothing changes. See [ADR 17](docs/adr/0017-project-scope.md).
+say yes. Without a `.jlirc` nothing changes. See [ADR 17](docs/adr/0017-project-scope.md) and
+[ADR 22](docs/adr/0022-project-scenarios.md).
 
 ## Layout
 

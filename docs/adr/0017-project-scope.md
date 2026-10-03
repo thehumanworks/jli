@@ -1,6 +1,8 @@
 # 17. What is learned inside a project stays with it, global skills are still used there, and a project skill becomes global only with approval
 
-- Status: accepted
+- Status: accepted; superseded in part by [ADR 22](0022-project-scenarios.md), which keeps a
+  scenario that `jli eval --optimise` rewrites inside a project for that project, instead of writing
+  the global row
 - Date: 2026-10-03
 - Origin: the Rust version
 - Supersedes in part: [ADR 15](0015-user-scope.md), on `project_id` (now set, from a `.jlirc`), on

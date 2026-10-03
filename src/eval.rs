@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::args;
 use crate::context::{platform, read_context, Context};
-use crate::store::{now_iso, Brain, NewSkill};
+use crate::store::{now_iso, Brain};
 use crate::system1::{Candidate, Decision, NONE};
 use crate::system2::{rewrite_row, CounterExample, RewriteInput, WeakPhrasing};
 use crate::types::{BrainEvent, Path, Skill};
@@ -655,6 +655,14 @@ pub struct Change {
     pub explanation: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undone_at: Option<String>,
+    /// The project a rewrite of a global skill was measured in. Its scenario is kept as that project's
+    /// own and the global row is not written, so no other project sees it (ADR 22).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// With `project`: whether the project already kept a scenario of its own, which `undo` puts back.
+    /// Without one, `undo` lets the project see the global scenario again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub project_had_scenario: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -865,7 +873,17 @@ pub fn run(brain: &Brain, models: &Models, options: &EvalOptions, ui: &Ui) -> Re
                 deficit: skill.deficit,
             })
             .collect();
-        let state = Optimiser { brain, models, options, bounds, probes: &probes, importance: &importance, ui };
+        // Inside a project a global skill's rewrite is kept as the project's (ADR 22), and the global
+        // row's own phrasings are not the project's to drop.
+        let mut global: HashMap<String, Vec<String>> = HashMap::new();
+        if brain.project().is_some() {
+            let own: Vec<String> = brain.project_skills()?.into_iter().map(|skill| skill.label).collect();
+            for skill in brain.global_skills()?.into_iter().filter(|skill| !own.contains(&skill.label)) {
+                global.insert(skill.label, skill.examples);
+            }
+        }
+        let state =
+            Optimiser { brain, models, options, bounds, probes: &probes, importance: &importance, global: &global, ui };
         report.optimisation = Some(state.run(skills, routes, ranking)?);
     }
     if let Some((calls, _, cost)) = models.system1.usage() {
@@ -974,12 +992,19 @@ struct Applied {
 /// The matrix with a rewrite applied, in memory. Only what the agent may change is taken: the
 /// skill's scenario, up to three of its own examples to drop, and up to three counter-examples for
 /// skills it competes with.
+///
+/// It is applied as it would be written. `global_here` holds, inside a project, the global skills it
+/// sees with the global row's own examples (ADR 22): those are not the project's to drop, and a
+/// counter-example for one of those skills is the project's lesson, which also hides the phrasing
+/// among that skill's examples (ADR 17). Outside a project it is empty.
 fn apply(
     skills: &[Skill],
     label: &str,
     rewrite: &crate::system2::Rewrite,
     rivals: &[String],
+    global_here: &HashMap<String, Vec<String>>,
 ) -> std::result::Result<Applied, String> {
+    let undroppable: &[String] = global_here.get(label).map(Vec::as_slice).unwrap_or_default();
     let Some(skill) = skills.iter().find(|skill| skill.label == label) else {
         return Err(format!("{label} is not in the matrix"));
     };
@@ -987,13 +1012,12 @@ fn apply(
     if scenario.is_empty() {
         return Err("the rewrite had no scenario".into());
     }
-    let dropped: Vec<String> = skill
+    let (kept, droppable): (Vec<&String>, Vec<&String>) = skill
         .examples
         .iter()
         .filter(|example| rewrite.drop_examples.iter().any(|drop| same(drop, example)))
-        .take(3)
-        .cloned()
-        .collect();
+        .partition(|example| undroppable.iter().any(|phrase| same(phrase, example)));
+    let dropped: Vec<String> = droppable.into_iter().take(3).cloned().collect();
     let mut counter_examples: Vec<CounterExample> = Vec::new();
     for proposed in &rewrite.counter_examples {
         let phrase = proposed.phrase.trim();
@@ -1003,7 +1027,12 @@ fn apply(
         }
     }
     if scenario == skill.scenario && dropped.is_empty() && counter_examples.is_empty() {
-        return Err("the rewrite changed nothing".into());
+        return Err(match kept.first() {
+            Some(phrase) => format!(
+                "the rewrite changed nothing that can be kept here: \"{phrase}\" is a phrasing of the global {label}, which a project cannot drop"
+            ),
+            None => "the rewrite changed nothing".into(),
+        });
     }
     let skills = skills
         .iter()
@@ -1017,6 +1046,9 @@ fn apply(
                 if !other.counter_examples.iter().any(|known| same(known, &ce.phrase)) {
                     other.counter_examples.push(ce.phrase.clone());
                 }
+                if global_here.contains_key(&other.label) {
+                    other.examples.retain(|example| !same(example, &ce.phrase));
+                }
             }
             other
         })
@@ -1024,20 +1056,16 @@ fn apply(
     Ok(Applied { skills, scenario, dropped, counter_examples })
 }
 
-/// Write a kept change: the record that undoes it first, then the row through its upsert, then the
-/// examples and counter-examples. Rows are updated in place, never deleted.
+/// Write a kept change: the record that undoes it first, then the scenario, then the examples and
+/// counter-examples. Rows are updated in place, never deleted. Inside a project each goes where the
+/// project keeps it (ADR 17, ADR 22): a global skill's scenario becomes the project's own, and a
+/// counter-example for a global skill the project's lesson, so the global row is never written.
 fn write(brain: &Brain, change: &Change) -> Result<()> {
-    let Some(row) = brain.skill(&change.label)? else { bail!("{} is no longer in the brain", change.label) };
+    if brain.skill(&change.label)?.is_none() {
+        bail!("{} is no longer in the brain", change.label);
+    }
     brain.put_meta(&format!("optimised:{}:{}", change.ts, change.label), &serde_json::to_string(change)?)?;
-    brain.add_skill(&NewSkill {
-        label: row.label,
-        steps: row.steps,
-        scenario: change.scenario_after.clone(),
-        risk: row.risk,
-        origin: row.origin,
-        examples: vec![],
-        slots: row.slots,
-    })?;
+    brain.set_scenario(&change.label, &change.scenario_after)?;
     for example in &change.dropped {
         brain.remove_example(&change.label, example)?;
     }
@@ -1054,6 +1082,8 @@ struct Optimiser<'a> {
     bounds: &'a Bounds,
     probes: &'a [Probe],
     importance: &'a HashMap<String, f64>,
+    /// Inside a project, the global skills it sees, with the global row's own examples. Empty outside one.
+    global: &'a HashMap<String, Vec<String>>,
     ui: &'a Ui,
 }
 
@@ -1118,6 +1148,8 @@ impl Optimiser<'_> {
             let scope: Vec<usize> = scope.into_iter().filter(|&index| known[index].is_some()).collect();
             let scoped: Vec<&Probe> = scope.iter().map(|&index| &probes[index]).collect();
             let wanted: Vec<Probe> = scoped.iter().map(|probe| (*probe).clone()).collect();
+            let project = self.brain.project().filter(|_| self.global.contains_key(label)).map(String::from);
+            let project_had_scenario = project.is_some() && self.brain.project_scenario(label)?.is_some();
 
             let mut feedback: Option<String> = None;
             for attempt in 1..=2 {
@@ -1188,8 +1220,10 @@ impl Optimiser<'_> {
                     problem: None,
                     explanation: rewrite.explanation.clone(),
                     undone_at: None,
+                    project: project.clone(),
+                    project_had_scenario,
                 };
-                let applied = match apply(&current, label, &rewrite, &rivals) {
+                let applied = match apply(&current, label, &rewrite, &rivals, self.global) {
                     Ok(applied) => applied,
                     Err(problem) => {
                         ui.note(format!("{label}: discarded, {problem}."));
@@ -1213,12 +1247,13 @@ impl Optimiser<'_> {
                     None => {
                         change.kept = true;
                         ui.learned(format!(
-                            "{label}: score {} → {}, {} → {} of {} phrasings home{}",
+                            "{label}: score {} → {}, {} → {} of {} phrasings home{}{}",
                             fixed(was, 3),
                             fixed(now, 3),
                             change.home_before,
                             change.home_after,
                             change.probes,
+                            project.as_ref().map(|project| format!(" · kept for project {project}")).unwrap_or_default(),
                             if self.options.dry_run { " (dry run: not written)" } else { "" }
                         ));
                         if !self.options.dry_run {
@@ -1268,10 +1303,15 @@ pub struct Undone {
     pub examples: Vec<String>,
     pub counter_examples: Vec<CounterExample>,
     pub dry_run: bool,
+    /// The project the change was kept in, when it was a global skill's: only that project changes back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 /// Put back what the newest optimisation still in force changed, of `label` or of any skill: the
-/// scenario it replaced, the examples it dropped, and without the counter-examples it added.
+/// scenario it replaced, the examples it dropped, and without the counter-examples it added. A change
+/// is on record where it was made, so one made inside a project is undone from inside it; there, a
+/// global skill's scenario goes back to the project's earlier one, or to the global row's (ADR 22).
 pub fn undo(brain: &Brain, label: Option<&str>, dry_run: bool) -> Result<Undone> {
     let entries = brain.meta_with_prefix("optimised:")?;
     let found = entries
@@ -1293,16 +1333,17 @@ pub fn undo(brain: &Brain, label: Option<&str>, dry_run: bool) -> Result<Undone>
             row.scenario
         );
     }
+    // A project that kept no scenario of its own before sees the global one again, whatever it now says.
+    let back_to_global = change.project.is_some() && !change.project_had_scenario;
+    let global =
+        if back_to_global { brain.global_skills()?.into_iter().find(|global| global.label == row.label) } else { None };
+    let scenario = global.map_or_else(|| change.scenario_before.clone(), |global| global.scenario);
     if !dry_run {
-        brain.add_skill(&NewSkill {
-            label: row.label,
-            steps: row.steps,
-            scenario: change.scenario_before.clone(),
-            risk: row.risk,
-            origin: row.origin,
-            examples: vec![],
-            slots: row.slots,
-        })?;
+        if back_to_global {
+            brain.clear_project_scenario(&change.label)?;
+        } else {
+            brain.set_scenario(&change.label, &change.scenario_before)?;
+        }
         for example in &change.dropped {
             brain.add_example(&change.label, example)?;
         }
@@ -1314,10 +1355,11 @@ pub fn undo(brain: &Brain, label: Option<&str>, dry_run: bool) -> Result<Undone>
     }
     Ok(Undone {
         label: change.label,
-        scenario: change.scenario_before,
+        scenario,
         examples: change.dropped,
         counter_examples: change.counter_examples,
         dry_run,
+        project: change.project,
     })
 }
 
@@ -1417,8 +1459,12 @@ pub fn render(report: &Report) -> String {
         }
         for change in &optimisation.changes {
             let verdict = if change.kept { c::green("kept     ") } else { c::dim("discarded") };
+            let only_here = match &change.project {
+                Some(project) if change.kept => c::dim(format!(" · for project {project} only")),
+                _ => String::new(),
+            };
             out.push(format!(
-                "  {verdict} {} #{}: score {} → {}, {} → {} of {} phrasings home",
+                "  {verdict} {} #{}: score {} → {}, {} → {} of {} phrasings home{only_here}",
                 c::bold(&change.label),
                 change.attempt,
                 fixed(change.score_before, 3),
@@ -1585,5 +1631,43 @@ mod tests {
         let labels = |all: Vec<Skill>| all.into_iter().map(|skill| skill.label).collect::<Vec<_>>();
         assert_eq!(labels(with_row(&skills, &make("middle", 0))), ["busy", "alpha", "middle", "omega"]);
         assert_eq!(labels(with_row(&skills, &make("alpha", 9))), ["alpha", "busy", "omega"], "a label is listed once");
+    }
+
+    #[test]
+    fn a_rewrite_is_measured_as_a_project_would_keep_it() {
+        let with_examples = |label: &str, examples: &[&str]| Skill {
+            examples: examples.iter().map(|example| example.to_string()).collect(),
+            ..skill(label, "true")
+        };
+        let skills = [with_examples("disk", &["size here", "taught here"]), with_examples("files", &["size here"])];
+        let rewrite = crate::system2::Rewrite {
+            scenario: "the user wants the total size".into(),
+            drop_examples: vec!["size here".into(), "taught here".into()],
+            counter_examples: vec![CounterExample { label: "files".into(), phrase: "size here".into() }],
+            explanation: String::new(),
+        };
+        let rivals = ["files".to_string()];
+
+        // Outside a project the rows themselves change.
+        let applied = apply(&skills, "disk", &rewrite, &rivals, &HashMap::new()).unwrap();
+        assert_eq!(applied.dropped, ["size here", "taught here"]);
+        assert_eq!((applied.skills[1].examples.len(), applied.skills[1].counter_examples.len()), (1, 1));
+
+        // Inside one, both skills global: only the phrasing the project learned can go, and the
+        // counter-example is a lesson, which hides the phrasing among the competitor's examples.
+        let global = HashMap::from([("disk".to_string(), vec!["size here".to_string()]), ("files".into(), vec![])]);
+        let applied = apply(&skills, "disk", &rewrite, &rivals, &global).unwrap();
+        assert_eq!(applied.dropped, ["taught here"]);
+        assert_eq!(applied.skills[0].examples, ["size here"]);
+        assert!(applied.skills[1].examples.is_empty() && applied.skills[1].counter_examples == ["size here"]);
+
+        let drop_only = crate::system2::Rewrite {
+            scenario: skills[0].scenario.clone(),
+            drop_examples: vec!["size here".into()],
+            counter_examples: vec![],
+            explanation: String::new(),
+        };
+        let problem = apply(&skills, "disk", &drop_only, &rivals, &global).err().unwrap_or_default();
+        assert!(problem.contains("\"size here\" is a phrasing of the global disk"), "{problem}");
     }
 }

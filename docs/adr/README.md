@@ -29,6 +29,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [16](0016-measuring-the-matrix.md) | The matrix is measured against the brain's own evidence, optimised only where the measurement improves, and every new row is checked against its closest skills |
 | [17](0017-project-scope.md) | What is learned inside a project stays with it, global skills are still used there, and a project skill becomes global only with approval |
 | [18](0018-agent-contract.md) | A contract for agent callers: pinned plans, run in order, and corrections without a terminal |
+| [22](0022-project-scenarios.md) | A scenario rewritten inside a project is kept for that project, and the global row is left as it was |
 
 ## Known gaps, by record
 
@@ -59,10 +60,14 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 - [17](0017-project-scope.md): an older jli ignores `.jlirc` and teaches the global skills inside a
   project; a lesson about a global skill blocks only the phrasing it was learned from, and has no
   path to global but `teach --global`; a stop between `generalize`'s two writes leaves both rows; a
-  project id cannot be renamed; there are no per-project settings; `eval --optimise` in a project
-  rewrites a global row in place; and the `generalization` prompt was measured on six live requests.
+  project id cannot be renamed; there are no per-project settings; and the `generalization` prompt
+  was measured on six live requests.
 - [18](0018-agent-contract.md): a dry run needs a writable brain; plan rows are never deleted; a plan
   does not notice that its skill changed after it was made; a proposal learned through `jli run`
   skips the System 1 check; `jli run` refuses a plan with a `cd` even under the shell function; a plan
   blocked on an unknown argument runs without it once its slots are filled; `corrections` is shown
   nowhere; and the claim, like the rest of the cloud setup, has run only against local files.
+- [22](0022-project-scenarios.md): a project's scenario has no path to the global row; a project
+  with one does not see later global rewrites, and only `eval undo` or `forget --global` drops it; a
+  rewrite in a project cannot drop a global row's phrasing; a counter-example already listed as an
+  example in the project's lesson is not measured as it is written; and none of it has run live.

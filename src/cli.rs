@@ -357,6 +357,7 @@ impl App {
         // Inside a project each skill says whose it is (ADR 17); outside one the listing is as it was.
         let own: Vec<String> = self.brain.project_skills()?.into_iter().map(|skill| skill.label).collect();
         let lessons = self.brain.project_lessons()?;
+        let rewritten = self.brain.project_scenarios()?;
         say(format!(
             "{} {}\n",
             c::bold(format!("{} skills", skills.len())),
@@ -374,7 +375,8 @@ impl App {
                 Some(_) => {
                     let learned = lessons.iter().find(|(label, _, _)| *label == skill.label);
                     let learned = learned.map(|(_, added, removed)| format!(", +{added} −{removed} learned here"));
-                    format!("  {}", c::dim(format!("global{}", learned.unwrap_or_default())))
+                    let own = if rewritten.contains(&skill.label) { ", scenario rewritten here" } else { "" };
+                    format!("  {}", c::dim(format!("global{}{own}", learned.unwrap_or_default())))
                 }
                 None => String::new(),
             };
@@ -626,6 +628,13 @@ impl App {
             if own == 1 { "" } else { "s" },
             if lessons == 1 { "" } else { "s" }
         ));
+        let rewritten = self.brain.project_scenarios()?.len();
+        if rewritten > 0 {
+            say(format!(
+                "  its own scenario for {rewritten} global skill{}, from jli eval --optimise",
+                if rewritten == 1 { "" } else { "s" }
+            ));
+        }
         say(c::dim("  What is learned here stays with this project; your global skills are used here too. See jli skills."));
         Ok(0)
     }
@@ -912,7 +921,8 @@ impl App {
                 return Ok(Some(0));
             }
             let verb = if undone.dry_run { "Would put back" } else { "Put back" };
-            say(format!("{verb} the scenario of {}: {}", c::bold(&undone.label), undone.scenario));
+            let here = undone.project.as_ref().map(|project| format!(" in project {project}")).unwrap_or_default();
+            say(format!("{verb} the scenario of {}{here}: {}", c::bold(&undone.label), undone.scenario));
             for example in &undone.examples {
                 say(format!("  {} \"{example}\" {}", c::green("+"), c::dim("as an example again")));
             }
