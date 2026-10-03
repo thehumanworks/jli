@@ -9,12 +9,12 @@
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use crate::types::SlotKind;
+use crate::types::{coded, SlotKind, CONFIGURATION, MODEL};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
@@ -39,7 +39,7 @@ pub fn endpoint_from(get: impl Fn(&str) -> Option<String>) -> Result<Endpoint> {
     if let Some(api_key) = var("AI_GATEWAY_API_KEY") {
         return Ok(Endpoint { base_url: "https://ai-gateway.vercel.sh/v1".into(), api_key });
     }
-    bail!("No language model key found. Set OPENROUTER_API_KEY or AI_GATEWAY_API_KEY.")
+    Err(coded(CONFIGURATION, "No language model key found. Set OPENROUTER_API_KEY or AI_GATEWAY_API_KEY."))
 }
 
 pub fn endpoint() -> Result<Endpoint> {
@@ -203,7 +203,7 @@ impl Llm {
                 Err(error) => last_error = format!("{} returned an unreadable reply: {error}", request.model),
             }
         }
-        Err(anyhow!(last_error))
+        Err(coded(MODEL, last_error))
     }
 }
 

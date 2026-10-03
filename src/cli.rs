@@ -7,10 +7,14 @@ use anyhow::{anyhow, Result};
 use crate::args;
 use crate::demo::run_demo;
 use crate::learn::{learn_phrase, LearnInput};
-use crate::router::{route, split_steps, Outcome, RouteOptions, DEFAULT_THRESHOLD};
+use crate::plan::{self, PlanRecord, RunFlags};
+use crate::router::{
+    is_another_command, route, split_steps, teach_instead, unlearn_phrase, Outcome, RouteOptions, DEFAULT_THRESHOLD,
+    DRY_RUN, DRY_RUN_CODE,
+};
 use crate::slots::learned_phrase;
-use crate::store::{user_id, Brain, BrainConfig, Shared, DEFAULT_USER};
-use crate::types::{BrainEvent, Mode, Path, Risk, DEFAULT_MODE};
+use crate::store::{user_id, Brain, BrainConfig, Correction, Shared, DEFAULT_USER};
+use crate::types::{coded, error_code, BrainEvent, Mode, Path, Risk, CONFIGURATION, DEFAULT_MODE, USAGE};
 use crate::ui::{bar, c, duration, risk_tag, sparkline, Prompt, Terminal, Ui};
 use crate::Models;
 
@@ -72,7 +76,7 @@ fn help() -> String {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
-struct Flags {
+pub(crate) struct Flags {
     dry_run: bool,
     yes: bool,
     yolo: bool,
@@ -86,6 +90,14 @@ struct Flags {
     mode: Option<Mode>,
     /// From --user-id; resolved against JLI_USER_ID and the default user.
     user_id: Option<String>,
+}
+
+impl Flags {
+    /// No flags but `--quiet`, for tests that drive a subcommand.
+    #[cfg(test)]
+    pub(crate) fn quiet() -> Flags {
+        Flags { quiet: true, ..Flags::default() }
+    }
 }
 
 fn parse_threshold(text: &str) -> Result<f64> {
@@ -196,20 +208,105 @@ fn say(text: impl std::fmt::Display) {
     let _ = writeln!(stdout, "{text}");
 }
 
+/// Say why nothing was done, as a sentence or, with `--json`, as an error object. Exit code 1.
+fn refuse(flags: &Flags, code: &str, message: &str) -> i32 {
+    if flags.json {
+        let value = serde_json::json!({ "error": code, "errorMessage": message });
+        say(serde_json::to_string_pretty(&value).unwrap_or_default());
+    } else {
+        say(message);
+    }
+    1
+}
+
+/// What `jli fix` was asked to do with the route it corrects.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum FixHow {
+    /// Unlearn it and ask the agent again.
+    Unlearn,
+    /// Unlearn it and ask the agent again, with these words about what was expected.
+    Expected(String),
+    /// It should have run this.
+    Command(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Fix {
+    /// The event to correct; none for the last route run here.
+    pub(crate) event: Option<i64>,
+    pub(crate) how: FixHow,
+    /// Run the correction instead of returning a plan of it.
+    pub(crate) run: bool,
+}
+
+fn event_id(word: &str) -> Option<i64> {
+    word.bytes().all(|byte| byte.is_ascii_digit()).then(|| word.parse().ok()).flatten()
+}
+
+/// `fix <eventId> [--run] [--expected <words>] [-- <command>]`, or None when the words are not that shape.
+fn fix_shape(others: &[String], rest: &[String]) -> Option<Fix> {
+    let (first, after) = others.split_first()?;
+    let event = Some(event_id(first)?);
+    let run = after.iter().any(|word| word == "--run");
+    let words: Vec<&String> = after.iter().filter(|word| *word != "--run").collect();
+    let expected = match words.as_slice() {
+        [] => None,
+        [flag, said @ ..] if *flag == "--expected" && !said.is_empty() => {
+            Some(said.iter().map(|word| word.as_str()).collect::<Vec<_>>().join(" "))
+        }
+        [one] => Some(one.strip_prefix("--expected=").filter(|said| !said.is_empty())?.to_string()),
+        _ => return None,
+    };
+    let how = match (expected, rest.is_empty()) {
+        (None, true) => FixHow::Unlearn,
+        (Some(words), true) => FixHow::Expected(words),
+        (None, false) => FixHow::Command(split_steps(&rest.join(" "))),
+        (Some(_), false) => return None,
+    };
+    Some(Fix { event, how, run })
+}
+
+/// The plans `jli run` was given, and the values for their missing slots.
+struct RunArgs {
+    ids: Vec<i64>,
+    values: Vec<(String, String)>,
+}
+
+/// `run <planId> [<planId> …] [name=value …]`, or None when the words are not that shape.
+fn run_shape(others: &[String]) -> Option<RunArgs> {
+    let ids: Vec<i64> = others.iter().map_while(|word| event_id(word)).collect();
+    let values: Option<Vec<(String, String)>> = others[ids.len()..].iter().map(|word| plan::supplied(word)).collect();
+    (!ids.is_empty()).then_some(())?;
+    Some(RunArgs { ids, values: values? })
+}
+
 fn cwd() -> Result<PathBuf> {
     std::env::current_dir().map_err(|error| anyhow!("cannot read the working directory: {error}"))
 }
 
 /// Everything a subcommand needs: the brain, the models, and the one stdin reader.
-struct App {
-    brain: Brain,
-    models: Models,
-    terminal: Terminal,
+pub(crate) struct App {
+    pub(crate) brain: Brain,
+    pub(crate) models: Models,
+    pub(crate) terminal: Terminal,
 }
 
 impl App {
     fn ask(&mut self, query: &str, flags: &Flags, rejected: Vec<String>) -> Result<Outcome> {
+        self.ask_in(query, flags, rejected, None, cwd()?)
+    }
+
+    /// Route a request from `cwd`, with what the person said they expected, if they said anything.
+    fn ask_in(
+        &mut self,
+        query: &str,
+        flags: &Flags,
+        rejected: Vec<String>,
+        clarification: Option<String>,
+        cwd: PathBuf,
+    ) -> Result<Outcome> {
         let ui = Ui::new(!flags.quiet && !flags.json);
+        let threshold = resolve_threshold(&self.brain, flags).map_err(configuration)?;
         let options = RouteOptions {
             yes: flags.yes,
             yolo: flags.yolo,
@@ -217,7 +314,8 @@ impl App {
             capture: flags.json,
             agent_only: flags.agent,
             rejected,
-            ..RouteOptions::new(cwd()?, resolve_threshold(&self.brain, flags)?, resolve_mode(&self.brain, flags)?)
+            clarification,
+            ..RouteOptions::new(cwd, threshold, resolve_mode(&self.brain, flags).map_err(configuration)?)
         };
         let outcome = route(&self.brain, &self.models, query, &ui, &mut self.terminal, &options)?;
         if flags.json {
@@ -414,13 +512,36 @@ impl App {
         Ok(code)
     }
 
-    fn fix(&mut self, flags: &Flags) -> Result<i32> {
-        // The same text the router logs, so this directory's own events are the ones found.
-        let last = self.brain.last_executed(&cwd()?.to_string_lossy())?;
-        let Some((last, label)) = last.and_then(|event| event.label.clone().map(|label| (event, label))) else {
-            say("Nothing to fix: no command has been run in this directory on this host yet.");
-            return Ok(1);
+    /// `jli fix`: bare, the last route run here; with an event id, that event, from anywhere.
+    pub(crate) fn fix(&mut self, flags: &Flags, fix: Fix) -> Result<i32> {
+        let here = cwd()?;
+        let found = match fix.event {
+            // The same text the router logs, so this directory's own events are the ones found.
+            None => self.brain.last_executed(&here.to_string_lossy())?,
+            Some(id) => self.brain.event(id)?,
         };
+        let ran = found.as_ref().filter(|event| event.accepted);
+        let Some((last, label)) = ran.and_then(|event| event.label.clone().map(|label| (event.clone(), label))) else {
+            return Ok(match (fix.event, found) {
+                (None, _) => refuse(
+                    flags,
+                    "nothing_to_fix",
+                    "Nothing to fix: no command has been run in this directory on this host yet.",
+                ),
+                (Some(id), None) => refuse(flags, "event_not_found", &format!("Nothing to fix: you have no event {id}.")),
+                (Some(id), Some(_)) => refuse(
+                    flags,
+                    "event_not_run",
+                    &format!("Nothing to fix: event {id} ran no command, or was corrected already."),
+                ),
+            });
+        };
+        // Route again where it ran, if that directory is still there.
+        let at = Some(PathBuf::from(&last.cwd)).filter(|dir| dir.is_dir()).unwrap_or(here);
+        if let FixHow::Command(steps) = &fix.how {
+            return self.fix_with_command(flags, &last, &label, steps, fix.run, at);
+        }
+
         if flags.dry_run {
             eprintln!("{}\n", c::dim(format!("  Dry run: would unlearn that \"{}\" means {label}.", last.query)));
         } else {
@@ -436,8 +557,137 @@ impl App {
             self.brain.mark_rejected(last.id)?;
             eprintln!("{} \"{}\" does {} mean {label}. Trying again.\n", c::green("✚ learned"), last.query, c::bold("not"));
         }
-        let again = Flags { agent: true, ..flags.clone() };
-        Ok(self.ask(&last.query, &again, vec![label])?.exit_code())
+        let (outcome, how, detail) = match fix.how {
+            FixHow::Expected(words) => {
+                // What they expected goes to the agent, and the answer is a plan unless they asked to run it.
+                let again =
+                    Flags { agent: true, dry_run: flags.dry_run || !fix.run, yes: flags.yes || fix.run, ..flags.clone() };
+                (self.ask_in(&last.query, &again, vec![label], Some(words.clone()), at)?, "expected", Some(words))
+            }
+            _ => {
+                let again = Flags { agent: true, ..flags.clone() };
+                (self.ask_in(&last.query, &again, vec![label], None, at)?, "unlearn", None)
+            }
+        };
+        if !flags.dry_run {
+            self.log_correction(&last, how, detail, outcome.event_id)?;
+        }
+        Ok(outcome.exit_code())
+    }
+
+    /// `jli fix <eventId> -- <command>`: that was wrong, this is right. It teaches what a "no" followed
+    /// by the command at the prompt teaches, then returns a plan of the command, or runs it with `--run`.
+    fn fix_with_command(
+        &mut self,
+        flags: &Flags,
+        last: &BrainEvent,
+        label: &str,
+        steps: &[String],
+        run: bool,
+        at: PathBuf,
+    ) -> Result<i32> {
+        let command = steps.join(" && ");
+        if flags.dry_run {
+            eprintln!("{}\n", c::dim(format!("  Dry run: would learn that \"{}\" means {command}.", last.query)));
+            return Ok(0);
+        }
+        let ui = Ui::new(!flags.quiet && !flags.json);
+        let options = RouteOptions::new(
+            at.clone(),
+            resolve_threshold(&self.brain, flags).map_err(configuration)?,
+            resolve_mode(&self.brain, flags).map_err(configuration)?,
+        );
+        let wrong = self.brain.skill(label)?;
+        let (wrong_steps, slots) =
+            wrong.as_ref().map(|skill| (skill.steps.clone(), skill.slots.clone())).unwrap_or_default();
+        let phrase = learned_phrase(&last.query, &wrong_steps, &slots, last.command.as_deref());
+        if let Some(wrong) = wrong.as_ref().filter(|wrong| is_another_command(&wrong.steps, steps)) {
+            unlearn_phrase(&self.brain, &ui, wrong, &phrase)?;
+        }
+        let taught = teach_instead(&self.brain, &self.models, &ui, &phrase, steps, &options)?;
+        self.brain.mark_rejected(last.id)?;
+
+        let skill = self.brain.skill(&taught.label)?;
+        let record = PlanRecord {
+            query: last.query.clone(),
+            phrase,
+            path: Path::Taught,
+            confidence: None,
+            label: taught.label.clone(),
+            is_new: false,
+            steps: skill.as_ref().map_or_else(|| steps.to_vec(), |skill| skill.steps.clone()),
+            scenario: skill.as_ref().map(|skill| skill.scenario.clone()).unwrap_or_default(),
+            skill_risk: skill.as_ref().map_or(Risk::Modifies, |skill| skill.risk),
+            slots: skill.as_ref().map(|skill| skill.slots.clone()).unwrap_or_default(),
+            risk: skill.as_ref().map_or(Risk::Modifies, |skill| skill.risk),
+            commands: steps.to_vec(),
+            values: vec![],
+            missing: vec![],
+            unknown_arguments: vec![],
+            aliases: vec![],
+            ms_system1: 0,
+            ms_system2: 0,
+        };
+        let id = plan::save(&self.brain, &at, &record)?;
+        let outcome = if run {
+            let ran = plan::run_plans(
+                &self.brain,
+                &self.models,
+                &[id],
+                &[],
+                &ui,
+                &mut self.terminal,
+                RunFlags { yolo: flags.yolo, capture: flags.json },
+            )?;
+            ran.into_iter().next().unwrap_or_else(|| Outcome::new(&last.query))
+        } else {
+            ui.note(format!("Not run. Stored as plan {id}: jli run {id} runs it, with no model call."));
+            let mut outcome = plan::outcome_of(id, &record);
+            outcome.blocked = Some(DRY_RUN.into());
+            outcome.blocked_code = Some(DRY_RUN_CODE.into());
+            outcome
+        };
+        let mut outcome = outcome;
+        outcome.learned.insert(0, format!("\"{}\" means {}", record.phrase, taught.label));
+        self.log_correction(last, "command", Some(command), outcome.event_id)?;
+        if flags.json {
+            say(serde_json::to_string_pretty(&outcome)?);
+        }
+        Ok(outcome.exit_code())
+    }
+
+    /// Keep who corrected `event`: a correction made with no terminal is an agent's or a script's.
+    fn log_correction(&self, event: &BrainEvent, how: &str, detail: Option<String>, result: Option<i64>) -> Result<()> {
+        self.brain.log_correction(&Correction {
+            event_id: event.id,
+            terminal: self.terminal.interactive(),
+            how: how.to_string(),
+            detail,
+            result_event_id: result,
+        })
+    }
+
+    /// `jli run <planId> …`: each plan as stored, in order, until one fails or is refused.
+    fn run_plans(&mut self, ids: &[i64], values: &[(String, String)], flags: &Flags) -> Result<i32> {
+        let ui = Ui::new(!flags.quiet && !flags.json);
+        let outcomes = plan::run_plans(
+            &self.brain,
+            &self.models,
+            ids,
+            values,
+            &ui,
+            &mut self.terminal,
+            RunFlags { yolo: flags.yolo, capture: flags.json },
+        )?;
+        if flags.json {
+            say(serde_json::to_string_pretty(&outcomes)?);
+        }
+        let stop = outcomes.iter().find(|outcome| !(outcome.ran && outcome.exit_code == Some(0) && outcome.error.is_none()));
+        Ok(match stop {
+            None => 0,
+            Some(outcome) if outcome.error.is_some() => 1,
+            Some(outcome) => outcome.exit_code(),
+        })
     }
 
     fn repl(&mut self, flags: &Flags) -> Result<()> {
@@ -513,7 +763,7 @@ impl App {
                 "skills" => return self.show_skills().map(|_| 0),
                 "stats" => return self.show_stats().map(|_| 0),
                 "history" => return self.show_history().map(|_| 0),
-                "fix" => return self.fix(flags),
+                "fix" => return self.fix(flags, Fix { event: None, how: FixHow::Unlearn, run: false }),
                 "sync" => {
                     if self.brain.sync()? {
                         say(format!("Synced with {}", self.brain.config.sync_url.as_deref().unwrap_or_default()));
@@ -541,6 +791,16 @@ impl App {
                 return Ok(1);
             };
             return self.share(label, &to);
+        }
+        if first == "run" && rest.is_empty() {
+            if let Some(given) = run_shape(others) {
+                return self.run_plans(&given.ids, &given.values, flags);
+            }
+        }
+        if first == "fix" {
+            if let Some(fix) = fix_shape(others, rest) {
+                return self.fix(flags, fix);
+            }
         }
         if first == "forget" && others.len() == 1 {
             let label = &others[0];
@@ -571,7 +831,7 @@ fn path_tag(path: Path) -> String {
 }
 
 fn run(argv: &[String]) -> Result<i32> {
-    let Parsed { mut flags, words, rest } = parse(argv)?;
+    let Parsed { mut flags, words, rest } = parse(argv).map_err(|error| coded(USAGE, format!("{error:#}")))?;
     flags.yes |= switched_on(env, "JLI_YES");
     flags.yolo |= switched_on(env, "JLI_YOLO");
     let first = words.first().map(String::as_str);
@@ -579,7 +839,7 @@ fn run(argv: &[String]) -> Result<i32> {
         say(help());
         return Ok(0);
     }
-    let user = resolve_user(&flags, env)?;
+    let user = resolve_user(&flags, env).map_err(configuration)?;
     if first == Some("demo") && words.len() == 1 {
         return run_demo(&user);
     }
@@ -594,12 +854,27 @@ fn run(argv: &[String]) -> Result<i32> {
     code
 }
 
+/// An error as `--json` prints it: one object, a stable code and the message.
+fn error_json(error: &anyhow::Error) -> String {
+    let value = serde_json::json!({ "error": error_code(error), "errorMessage": format!("{error:#}") });
+    serde_json::to_string_pretty(&value).unwrap_or_default()
+}
+
+fn configuration(error: anyhow::Error) -> anyhow::Error {
+    coded(CONFIGURATION, format!("{error:#}"))
+}
+
 /// The `jli` binary: runs and returns the process exit code.
 pub fn main() -> i32 {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    // Read before anything can fail, so that a caller who asked for JSON gets JSON even for a bad flag.
+    let json = argv.iter().take_while(|arg| *arg != "--").any(|arg| arg == "--json");
     match run(&argv) {
         Ok(code) => code,
         Err(error) => {
+            if json {
+                say(error_json(&error));
+            }
             eprintln!("{} {error:#}", c::red("jli:"));
             1
         }
@@ -669,6 +944,42 @@ mod tests {
         assert_eq!(resolve_user(&Flags::default(), from_env).unwrap(), "ci");
         assert_eq!(resolve_user(&Flags::default(), nothing).unwrap(), DEFAULT_USER);
         assert!(resolve_user(&Flags::default(), |_| Some("two words".into())).is_err());
+    }
+
+    #[test]
+    fn run_and_fix_are_subcommands_only_in_their_own_shape() {
+        let run = |words: &[&str]| run_shape(&args(words)).map(|given| (given.ids, given.values));
+        assert_eq!(run(&["12", "13"]), Some((vec![12, 13], vec![])));
+        assert_eq!(
+            run(&["12", "message=fix it", "n=3"]).unwrap().1,
+            [("message".into(), "fix it".into()), ("n".into(), "3".into())]
+        );
+        assert_eq!(run(&["the", "tests"]), None, "jli run the tests is a request");
+        assert_eq!(run(&["12", "the", "tests"]), None);
+        assert_eq!(run(&["message=x"]), None);
+
+        let fix = |words: &[&str], rest: &[&str]| fix_shape(&args(words), &args(rest));
+        let by = |how: FixHow, run: bool| Some(Fix { event: Some(7), how, run });
+        assert_eq!(fix(&["7"], &[]), by(FixHow::Unlearn, false));
+        assert_eq!(fix(&["7"], &["ls", "-ltr", "&&", "wc", "-l"]), by(FixHow::Command(args(&["ls -ltr", "wc -l"])), false));
+        assert_eq!(fix(&["7", "--run"], &["ls"]), by(FixHow::Command(args(&["ls"])), true));
+        assert_eq!(fix(&["7", "--expected", "newest", "first"], &[]), by(FixHow::Expected("newest first".into()), false));
+        assert_eq!(fix(&["7", "--expected=newest first"], &[]), by(FixHow::Expected("newest first".into()), false));
+        assert_eq!(fix(&["7", "--expected", "x"], &["ls"]), None, "one correction at a time");
+        assert_eq!(fix(&["the", "parser"], &[]), None, "jli fix the parser is a request");
+        assert_eq!(fix(&["7", "please"], &[]), None);
+    }
+
+    #[test]
+    fn an_error_under_json_is_one_object_with_a_kind() {
+        let error = coded(USAGE, "mode must be one of manual, semi, auto, got \"wild\"");
+        let value: serde_json::Value = serde_json::from_str(&error_json(&error)).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({ "error": "usage", "errorMessage": "mode must be one of manual, semi, auto, got \"wild\"" })
+        );
+        let parsed = parse(&args(&["--mode=wild"])).map_err(|error| coded(USAGE, format!("{error:#}"))).err().unwrap();
+        assert_eq!(error_code(&parsed), "usage");
     }
 
     #[test]

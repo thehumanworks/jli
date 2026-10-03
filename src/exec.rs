@@ -12,6 +12,9 @@ pub struct RunResult {
     pub output: Option<String>,
     /// The end of stderr, when it was watched or captured.
     pub stderr: String,
+    /// stdout alone, and all of stderr, only when output was captured: `output` holds both, one after the other.
+    pub captured_stdout: Option<String>,
+    pub captured_stderr: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -60,6 +63,7 @@ fn code(status: ExitStatus) -> i32 {
 pub fn run(commands: &[String], cwd: &Path, options: RunOptions) -> Result<RunResult> {
     let mut output = String::new();
     let mut stderr = String::new();
+    let (mut all_stdout, mut all_stderr) = (String::new(), String::new());
     for command in commands {
         let mut shell = Command::new("bash");
         shell.arg("-c").arg(command).current_dir(cwd);
@@ -73,6 +77,8 @@ pub fn run(commands: &[String], cwd: &Path, options: RunOptions) -> Result<RunRe
             let err = String::from_utf8_lossy(&done.stderr);
             output.push_str(&String::from_utf8_lossy(&done.stdout));
             output.push_str(&err);
+            all_stdout.push_str(&String::from_utf8_lossy(&done.stdout));
+            all_stderr.push_str(&err);
             stderr = last_chars(&(stderr + &err), STDERR_KEPT);
             done.status
         } else if options.watch_stderr {
@@ -86,10 +92,22 @@ pub fn run(commands: &[String], cwd: &Path, options: RunOptions) -> Result<RunRe
         };
         let exit_code = code(status);
         if exit_code != 0 {
-            return Ok(RunResult { exit_code, output: options.capture.then_some(output), stderr });
+            return Ok(RunResult {
+                exit_code,
+                output: options.capture.then_some(output),
+                stderr,
+                captured_stdout: options.capture.then_some(all_stdout),
+                captured_stderr: options.capture.then_some(all_stderr),
+            });
         }
     }
-    Ok(RunResult { exit_code: 0, output: options.capture.then_some(output), stderr })
+    Ok(RunResult {
+        exit_code: 0,
+        output: options.capture.then_some(output),
+        stderr,
+        captured_stdout: options.capture.then_some(all_stdout),
+        captured_stderr: options.capture.then_some(all_stderr),
+    })
 }
 
 #[cfg(test)]
@@ -111,6 +129,7 @@ mod tests {
         assert_eq!(result.exit_code, 7);
         assert_eq!(result.output.as_deref(), Some("one\ntwo\n"));
         assert_eq!(result.stderr, "two\n");
+        assert_eq!((result.captured_stdout.as_deref(), result.captured_stderr.as_deref()), (Some("one\n"), Some("two\n")));
     }
 
     #[test]
