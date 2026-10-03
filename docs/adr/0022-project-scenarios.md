@@ -25,8 +25,9 @@ The scenario alone was never considered as something a project could keep.
 Reproduced offline on `dev` at `ad24a7c`: in `a_rewrite_measured_in_a_project_stays_in_that_project`,
 two global skills are optimised from project `a` with a fake System 1 and a fake agent. The rewrite is
 kept, and then, outside every project and in project `b`, `disk-usage` read "the user wants the total
-size of the current directory" instead of "the user wants disk use". The test fails on `dev` at that
-assertion.
+size of the current directory" instead of "the user wants disk use". The first version of that test,
+written against `dev`'s API alone, failed there at that assertion; the committed test also checks the
+fields this record adds, so it does not compile on `dev`.
 
 A second defect came to light in the same path. Inside a project, `remove_example` on a global skill
 does not touch the global row. It removes the phrasing from the project's lesson, and only if the
@@ -159,7 +160,7 @@ Offline, with the fakes in `src/tests.rs`:
   kept in project `a` is what System 1 is shown there, and the global row is untouched. Outside every
   project and in project `b`, System 1 is shown the old scenario and the counter-example is absent.
   `undo` from outside and from `b` finds nothing, and `undo` in `a` brings back the global scenario
-  there. On `dev` the test fails because the global row was rewritten.
+  there. On `dev` its scenario assertions fail, because the global row was rewritten.
 - `a_project_cannot_drop_a_global_phrasing_and_undo_puts_back_its_own_scenario`: a rewrite that only
   drops a global phrasing is discarded with the problem above, which reaches the agent's retry. The
   retry is kept over the project's earlier scenario, and `undo` puts that scenario back, not the
