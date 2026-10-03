@@ -49,7 +49,9 @@ removed, begins with `-` (`slots::is_flag`, which the translator's check and `ge
 
 What follows, by caller:
 
-- `learn_phrase`: `cd -` taught beside `cd {directory}` makes its own skill.
+- `learn_phrase`: `cd -` taught beside `cd {directory}` makes its own skill. The translator's
+  `existingLabel` is not believed when a value it gives is a flag either, so a translator that calls
+  `cd -` the known `cd {directory}` with `-` does not bring the match back by another road.
 - `match_proposal`, in the router and in `jli run` ([ADR 18](0018-agent-contract.md)): a proposal with
   a flag where a known skill has a slot is another command.
 - The learned phrase and `jli fix` (ADR 13): a value that begins with `-` is not read back out of the
@@ -80,7 +82,8 @@ Then, by the translator's draft:
 - the translator cannot be reached: the phrase joins the literal skill.
 
 The translator's `existingLabel` is no longer believed when it names a literal skill and the draft is a
-template. It is believed as before when the skill it names is a template, or the draft is not.
+template, or when a value it gives is a flag (part 1). It is believed as before when the skill it names
+is a template, or the draft is not.
 
 **Made general in place.** The literal row keeps its label, examples, counter-examples, uses, origin
 and `created_at`. Its steps, slots, scenario and risk become the template's: the translator's

@@ -219,10 +219,12 @@ pub fn learn_phrase(brain: &Brain, models: &Models, input: &LearnInput, ui: &Ui)
         // A template that gives back the command: more general than a literal skill that runs it.
         let general = faithful && !is_literal(&draft.steps);
 
-        // "This is a known skill with other values": trust it only if the arithmetic checks out, and
-        // never let a literal skill stand in for the template just written.
+        // "This is a known skill with other values": trust it only if the arithmetic checks out, never
+        // with a flag for a value (`cd -` is not `cd {directory}`), and never let a literal skill stand
+        // in for the template just written.
         let existing = draft.existing_label.as_ref().and_then(|label| skills.iter().find(|skill| &skill.label == label));
-        if let Some(existing) = existing.filter(|existing| !(general && is_literal(&existing.steps))) {
+        let believed = |existing: &&Skill| !slots_a_flag && !(general && is_literal(&existing.steps));
+        if let Some(existing) = existing.filter(believed) {
             if comparable(&render(&existing.steps, &values).join(" && ")) == comparable(&command) {
                 brain.link_phrase(&existing.label, &input.phrase)?;
                 return Ok(Learned { label: existing.label.clone(), created: false, translated: true, upgraded: false });

@@ -2098,6 +2098,24 @@ fn teaching_cd_minus_beside_cd_directory_makes_its_own_skill() {
 }
 
 #[test]
+fn a_translator_that_names_a_template_with_a_flag_for_its_value_is_not_believed() {
+    let scratch = Scratch::new("teach-cd-minus-translated");
+    directory_skill(&scratch, "go-to-directory", &["cd {directory}"]);
+    // The translator calls `cd -` the known skill with `-` for the directory, the same mistake #17 was.
+    let row = json!({
+        "existingLabel": "go-to-directory", "label": "go-back", "steps": ["cd {directory}"],
+        "scenario": "the user wants to go back to the previous directory",
+        "slots": [{ "name": "directory", "kind": "file", "description": "the directory", "default": null }],
+        "slotValues": [{ "name": "directory", "value": "-" }], "risk": "safe",
+    });
+    let (models, _) = models(routes_phrase_to("go back", "go-back"), vec![("matrix_row", row)]);
+    let learned = learn_phrase(&scratch.brain, &models, &teach("go back", "cd -", Mode::Semi, &scratch), &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created), ("go-back", true), "- is a flag, not a directory");
+    assert_eq!(scratch.brain.skill("go-back").unwrap().unwrap().steps, ["cd -"]);
+    assert!(scratch.brain.skill("go-to-directory").unwrap().unwrap().examples.is_empty());
+}
+
+#[test]
 fn teaching_a_literal_skills_command_makes_it_general_in_place() {
     let scratch = Scratch::new("teach-upgrade");
     literal_skill(&scratch.brain, "recent-three", "git log --oneline -n 3", &["show the last 3 commits"]);
