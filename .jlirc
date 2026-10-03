@@ -1,0 +1,3 @@
+# jli project: what jli learns in this directory and below it is kept for this project.
+# The id is not a path, so every checkout of the project is the same project. Safe to commit.
+project = jli-qbd1c1
