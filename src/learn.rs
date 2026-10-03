@@ -102,8 +102,9 @@ struct Kept {
     risk: Risk,
 }
 
-fn store(brain: &Brain, kept: &Kept, scenario: String, phrase: &str) -> Result<()> {
-    brain.add_skill(&NewSkill {
+/// Returns the label the row was stored under: another writer may have taken the one it was given.
+fn store(brain: &Brain, kept: &Kept, scenario: String, phrase: &str) -> Result<String> {
+    brain.add_new_skill(&NewSkill {
         label: kept.label.clone(),
         steps: kept.steps.clone(),
         scenario,
@@ -181,17 +182,14 @@ pub fn learn_phrase(brain: &Brain, models: &Models, input: &LearnInput, ui: &Ui)
             ui.note("Its slots did not reproduce your command, so the command is stored literally.");
         }
 
-        let mut label = slug(&draft.label);
-        while skills.iter().any(|skill| skill.label == label) {
-            label.push_str("-x");
-        }
-        let row = Kept {
-            label: label.clone(),
+        let mut row = Kept {
+            label: slug(&draft.label),
             steps: if faithful { draft.steps.clone() } else { input.steps.clone() },
             slots: if faithful { slots } else { vec![] },
             risk: input.risk.unwrap_or(draft.risk),
         };
-        store(brain, &row, draft.scenario.clone(), &input.phrase)?;
+        row.label = store(brain, &row, draft.scenario.clone(), &input.phrase)?;
+        let label = row.label.clone();
         kept = Some(row);
 
         match verify(brain, models, &label, input)? {
@@ -209,9 +207,9 @@ pub fn learn_phrase(brain: &Brain, models: &Models, input: &LearnInput, ui: &Ui)
 
     // The model's row did not hold up. Keep what the human said, exactly as they said it.
     if let Some(kept) = kept {
-        store(brain, &kept, format!("the user wants: {}", input.phrase), &input.phrase)?;
+        let label = store(brain, &kept, format!("the user wants: {}", input.phrase), &input.phrase)?;
         ui.note("Stored with your phrase as the scenario instead.");
-        return Ok(Learned { label: kept.label, created: true, translated: false });
+        return Ok(Learned { label, created: true, translated: false });
     }
     let (label, created) = brain.learn_command(&input.phrase, &input.steps, input.risk.unwrap_or(Risk::Modifies))?;
     Ok(Learned { label, created, translated: false })

@@ -122,6 +122,8 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | `jli teach "<phrase>" -- <command>` | link a phrase to a command; repeat to add more phrasings |
 | `jli fix` | the last command run here was wrong: unlearn it and ask the agent |
 | `jli forget <label>` | delete a skill |
+| `jli --user-id=<id> …` | any command, as another user with their own skills, history and settings (also `JLI_USER_ID`) |
+| `jli share <label> --to <user>` | give another user a copy of one of your skills |
 
 The decision trace goes to stderr and the command's output to stdout, so `jli` composes in pipes.
 
@@ -173,6 +175,24 @@ export JLI_SYNC_URL=libsql://your-db.turso.io
 What one host learns, every host knows. Each skill and event records the host it came from.
 The cloud modes are wired but have not been run against a live Turso database yet.
 
+## Users
+
+One brain can hold several users, so an agent can learn its own way of using jli without changing
+yours. This is isolation, not authentication.
+
+```sh
+jli --user-id=agent teach "count the todo items" -- grep -c '^- ' todo.md   # or JLI_USER_ID=agent
+jli share count-lines-matching-pattern --to default   # as agent: give the default user a copy
+```
+
+Without `--user-id` or `JLI_USER_ID` the user is `default`, which is everything a brain held before
+users existed. A user sees, routes against, teaches, fixes and forgets only their own skills; their
+history, stats and settings are their own; a new user starts from the seed skills with the built-in
+settings. `jli share` copies one skill as it is now, with its phrasings and slot names but not its
+counter-examples, and refuses if the other user already has that label or that command. Several
+jli processes can write one brain at once without losing a lesson. An older jli on the same brain
+sees only the default user. See [ADR 15](docs/adr/0015-user-scope.md).
+
 ## Layout
 
 | File | Role |
@@ -184,7 +204,7 @@ The cloud modes are wired but have not been run against a live Turso database ye
 | `src/suggest.rs` | auto mode: diagnoses a failure and offers alternatives |
 | `src/llm.rs` | the one HTTP call every language model request goes through |
 | `src/router.rs` | the loop: decide, escalate, confirm, run, write back |
-| `src/store.rs` | the brain: skills and events in libSQL, behind a runtime that never leaves the module |
+| `src/store.rs` | the brain: skills, events and settings per user in libSQL, behind a runtime that never leaves the module |
 | `src/args.rs` | reads the arguments a request states: `name=value`, labels and quoted text |
 | `src/slots.rs` | fills and shell-quotes `{slot}` values |
 | `src/seed.rs` | the original hard-coded matrix, now only the seed for an empty brain |
