@@ -34,16 +34,43 @@ impl fmt::Display for Risk {
 }
 
 /// How a `{slot}` in a command template gets its value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SlotKind {
     File,
     Branch,
     Number,
+    #[default]
     Text,
 }
 
+impl SlotKind {
+    pub const ALL: [SlotKind; 4] = [SlotKind::File, SlotKind::Branch, SlotKind::Number, SlotKind::Text];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SlotKind::File => "file",
+            SlotKind::Branch => "branch",
+            SlotKind::Number => "number",
+            SlotKind::Text => "text",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<SlotKind> {
+        SlotKind::ALL.into_iter().find(|kind| kind.as_str() == text)
+    }
+}
+
+/// One value a slot with choices takes, and what it puts in the command (ADR 24).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Choice {
+    /// The value as a person says it: `release`.
+    pub value: String,
+    /// What it puts in the command, as written and never quoted: `--release`, or nothing at all.
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Slot {
     pub name: String,
     pub kind: SlotKind,
@@ -54,6 +81,18 @@ pub struct Slot {
     /// Other names the request may use for this slot: `dir=` for `{directory}`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
+    /// May be left out: with no value and no default, the placeholder and its flag are dropped from
+    /// the command instead of blocking the run (ADR 24).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub optional: bool,
+    /// The flag written just before the placeholder that goes with the value, dropped with it:
+    /// `-n` in `-n {count}`, `--profile=` in `--profile={profile}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flag: Option<String>,
+    /// The only values the slot takes, each with what it puts in the command. Written by a person
+    /// (`jli slot`), never by a model, so what reaches the shell unquoted is what they wrote.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<Choice>,
 }
 
 /// How many other names one slot may collect.
@@ -70,6 +109,55 @@ impl Slot {
         let key = normal_name(key);
         normal_name(&self.name) == key || self.aliases.iter().any(|alias| normal_name(alias) == key)
     }
+
+    /// The choice a value names, compared without case. None for a slot without choices too.
+    pub fn choice(&self, said: &str) -> Option<&Choice> {
+        let said = said.trim();
+        self.choices.iter().find(|choice| choice.value.eq_ignore_ascii_case(said))
+    }
+
+    /// What was set on it, for `jli skills`, `jli slot` and `jli generalize`: "optional, left out with
+    /// -n; release → --release, debug → nothing; default release". Empty for a slot with none of it.
+    pub fn settings(&self) -> String {
+        let mut said: Vec<String> = Vec::new();
+        if self.optional {
+            said.push(match &self.flag {
+                Some(flag) => format!("optional, left out with {flag}"),
+                None => "optional".to_string(),
+            });
+        }
+        if !self.choices.is_empty() {
+            let each: Vec<String> = self
+                .choices
+                .iter()
+                .map(|choice| match choice.text.trim() {
+                    "" => format!("{} → nothing", choice.value),
+                    text => format!("{} → {text}", choice.value),
+                })
+                .collect();
+            said.push(each.join(", "));
+        }
+        if let Some(default) = &self.default {
+            said.push(format!("default {default}"));
+        }
+        said.join("; ")
+    }
+
+    /// The values of its choices, for a message: `release or debug`.
+    pub fn choice_list(&self) -> String {
+        let values: Vec<&str> = self.choices.iter().map(|choice| choice.value.as_str()).collect();
+        match values.split_last() {
+            Some((last, [])) => last.to_string(),
+            Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
+            None => String::new(),
+        }
+    }
+}
+
+/// Whether `value` can be one of a slot's choices: one word, typed as a person would say it, and
+/// never a flag (ADR 19).
+pub fn is_choice_value(value: &str) -> bool {
+    !value.is_empty() && !value.starts_with('-') && !value.contains(char::is_whitespace)
 }
 
 /// Whether a name could be typed as the key of `name=value`: a letter or `_`, then letters, digits,

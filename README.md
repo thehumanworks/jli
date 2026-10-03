@@ -34,6 +34,7 @@ Learning is writing to that database:
 | You ran `jli teach` or `jli fix` | a phrasing, or a counter-example; if the agent then proposes the rejected command again, it is refused (`already_rejected`) and nothing is stored | same as above, by hand |
 | You wrote `dir=src` for a slot called `directory` | `dir` as another name for that slot | `dir=` is read with no model next time |
 | You ran `jli alias` or `jli forget-phrase` | a slot name added or removed; a phrasing moved to the counter-examples | the same, by hand, for one name or one phrasing |
+| You ran `jli slot` | a slot's default, whether it may be left out with its flag, and the choices it takes | an unsaid value runs as you said it should, with no model ([ADR 24](docs/adr/0024-optional-slots.md)) |
 
 One command can hold many phrasings. Teaching a phrase for a command that a skill already runs adds
 the phrase to that skill. If that skill runs only the one command, as one taught in manual mode
@@ -167,6 +168,7 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | `jli forget <label>` | delete a skill; inside a project only the project's own, `--global` for a global one |
 | `jli forget-phrase <label> "<phrase>"` | take one phrasing back from a skill and keep it as a counter-example, so it is not learned straight back; inside a project, for a global skill, in that project only (`--global` for every project) |
 | `jli alias <label> <slot> <name>` | give a slot another name for `name=value`; `--remove` takes one away. Inside a project an alias of a global skill holds in every project; `--global` reaches a global skill that a project skill of the same label hides |
+| `jli slot <label> <slot> --default=<value>` | the value a slot takes when the request names none; also `--optional` or `--required`, `--flag=<flag>`, `--choice=<value>=<text>` (repeat; `--no-choices`) and `--kind=`. Written where `jli alias` writes |
 | `jli project` | the project this directory is in, from the nearest `.jlirc`, and how many skills are its own |
 | `jli project init [<id>]` | make this directory a project: what jli learns here stays with it |
 | `jli generalize [<label>]` | the agent proposes how to make project skills global; each is written only once you approve (`--all-projects`, `--approve-all`, `-n`) |
@@ -259,6 +261,45 @@ Anything not stated is filled by the cheapest method that works: a number in the
 `choice` among the real files or branches, the agent, and last the slot's default. See
 [ADR 11](docs/adr/0011-stated-arguments.md).
 
+### Optional slots, defaults and choices
+
+A value given with a flag is often not part of the job: `git log` lists commits without `-n 3`. Such a
+slot is optional. When the request names no value, the placeholder and its flag are left out, with no
+model call:
+
+```
+$ jli show the recent commits
+→ git log --oneline  risk: safe
+  {count} is left out with -n: it is optional, and nothing gave it a value.
+$ jli show the last 5 commits
+→ git log --oneline -n 5  risk: safe
+```
+
+The translator and the agent mark such a slot optional, with its flag, when the command does the same
+job without it. A model never leaves out a value that has no flag before it, never gives an optional
+slot a default, and never writes choices: those are yours.
+
+`jli slot` sets them. A default is what an unsaid value means, and it wins over leaving the slot out.
+Choices are the only values a slot takes, each with the text it puts in the command, written as you
+wrote it and never quoted. An empty text puts nothing there. For Cargo's profiles, teach the command
+with a placeholder and give it choices:
+
+```sh
+jli --mode=manual teach "build the app" -- 'cargo build {profile}'
+jli slot cargo-build-profile profile --choice=release=--release --choice=debug= --default=release
+jli build the app                    # cargo build --release
+jli build the app in debug mode      # cargo build
+jli build the app profile=fast       # stops: {profile} takes release or debug, not fast
+jli slot git-log count --optional --flag=-n   # leave the count out, and -n with it
+jli slot list-largest-files count --default=5
+```
+
+A choice is found by name (`profile=debug`), as a label, or as a word of its own in the request ("a
+debug build"). Each setting is written with `=`, so `--flag=-n` stays one word. `jli skills` shows
+what each slot has: `{profile}: release → --release, debug → nothing; default release`. An older jli
+reads a slot with choices as a plain one, and writes `cargo build release`. See
+[ADR 24](docs/adr/0024-optional-slots.md).
+
 A file value has a leading `~` and any `$NAME` or `${NAME}` expanded by jli before it is quoted, so
 `jli list dir=~/notes` runs `ls /Users/you/notes`, and the trace says
 `(from request, ~/notes expanded)`. Nothing is ever run to expand a value, an unset variable is left
@@ -348,9 +389,9 @@ say yes. Without a `.jlirc` nothing changes. See [ADR 17](docs/adr/0017-project-
 | `src/store.rs` | the brain: skills, events, settings, plans and corrections per user and project in libSQL, behind a runtime that never leaves the module |
 | `src/project.rs` | finds, reads and writes the `.jlirc` that names a project |
 | `src/generalize.rs` | `jli generalize`: checks the agent's proposal for a project skill and writes it once approved |
-| `src/hand.rs` | `jli alias` and `jli forget-phrase`: one slot name or one phrasing changed by hand, where the router would write it |
+| `src/hand.rs` | `jli alias`, `jli forget-phrase` and `jli slot`: one slot name, one phrasing or one slot's settings changed by hand, where the router would write it |
 | `src/args.rs` | reads the arguments a request states: `name=value`, labels and quoted text |
-| `src/slots.rs` | fills, expands and shell-quotes `{slot}` values, and matches a command back to its template |
+| `src/slots.rs` | fills, expands and shell-quotes `{slot}` values, leaves out an optional slot with its flag, writes a choice's text, holds a model's slots to what it may say, and matches a command back to its template |
 | `src/shell.rs` | the shell function, which steps it must run in your shell, and which shell jli is running under |
 | `src/seed.rs` | the original hard-coded matrix, now only the seed for an empty brain |
 | `src/exec.rs` | runs the steps with `bash -c`, watching stderr in auto mode and for a new proposal, tries builtins before they are handed over, and reads the process table to find the shell jli was started from |

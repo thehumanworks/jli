@@ -1,8 +1,9 @@
 # 18. A contract for agent callers: pinned plans, run in order, and corrections without a terminal
 
 - Status: accepted; superseded in part by [ADR 20](0020-write-back.md), which adds
-  `already_rejected` to the closed set of `blockedCode`; and by [ADR 21](0021-hand-edits.md), which
-  adds seven error kinds
+  `already_rejected` to the closed set of `blockedCode`; by [ADR 21](0021-hand-edits.md), which
+  adds seven error kinds; and by [ADR 24](0024-optional-slots.md), which adds three more, and
+  `optional`, `flag` and `choices` to each slot in `accepts` and `missing`
 - Date: 2026-10-03
 - Origin: the Rust version
 - Supersedes in part: [ADR 8](0008-corrections.md), on corrections, which no longer need a terminal;

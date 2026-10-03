@@ -66,6 +66,13 @@ steps and slots
   placeholders and put the instance's value in slotValues. Never quote placeholders.
 - Substituting slotValues into steps must reproduce the original command exactly.
 - Flags, subcommands and fixed arguments are part of the skill. Do not turn them into slots.
+- A value given with a flag is optional when the command does the same job without the flag: `git log`
+  still lists commits without `-n 3`, and `cargo build` still builds without `--profile release`. Then
+  set optional to true and flag to the flag as it is written ("-n", "--profile", or "--profile=" for
+  `--profile=release`), keep the flag in steps right before its placeholder, and give no default. A
+  request that does not name the value leaves out both.
+- A value the command cannot do its job without is not optional, and its flag is null: the file of
+  `wc -l notes.txt`, the path of `cargo install --path .`.
 - If nothing is instance-specific, return the command unchanged with no slots.
 - Name each slot with the plain, full word for its value ("directory", not "d"). In aliases, list up to
   four other names a person might type for it as name=value ("dir", "path"). An alias must not be able
