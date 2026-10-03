@@ -804,7 +804,9 @@ fn a_new_proposal_that_a_known_skill_already_runs_is_that_skill() {
     let (models, _) = self::models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", proposal)]);
     let rejected = RouteOptions { rejected: vec!["list-files-by-time".into()], ..dry };
     let outcome = go(&scratch, &models, "files by date", &mut Script::default(), &rejected);
-    assert_eq!(outcome.label.as_deref(), Some("list-by-date"), "a rejected skill is never chosen again");
+    // Its command is refused rather than stored as a second row (ADR 20).
+    assert_eq!((code(&outcome), outcome.label.as_deref()), (Some("already_rejected"), Some("list-files-by-time")));
+    assert!(scratch.brain.skill("list-by-date").unwrap().is_none());
 }
 
 #[test]
@@ -1521,7 +1523,8 @@ fn every_way_of_not_running_has_its_code() {
     let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
     let outcome = go(&scratch, &models, "commit message=wip msg=other", &mut Script::default(), &options);
     assert_eq!(code(&outcome), Some("unknown_argument"));
-    // missing_value, dry_run, destructive and the plan codes have their own tests above.
+    // missing_value, dry_run, destructive and the plan codes have their own tests above, and
+    // already_rejected has the_agent_cannot_bring_back_a_rejected_command_as_a_second_skill.
 }
 
 #[test]
@@ -2041,4 +2044,154 @@ fn a_generalization_that_fails_a_check_is_never_offered() {
     let (models, _) = self::models(takes_node(false), vec![("generalization", parameterized())]);
     let approve = GeneralizeOptions { approve_all: true, ..options_for(&scratch) };
     assert_eq!(generalize(&rust, &models, &approve, &quiet(), &mut Script::default()).unwrap().written.len(), 1);
+}
+
+// ── What an accepted route writes back (ADR 20) ──────────────────────────────
+
+fn existing_proposal(label: &str) -> Value {
+    json!({
+        "kind": "existing", "existingLabel": label, "label": null, "steps": [],
+        "scenario": "", "slots": [], "slotValues": [], "risk": "safe", "explanation": "Known.", "answer": null,
+    })
+}
+
+fn file_slot(name: &str) -> Value {
+    json!([{ "name": name, "kind": "file", "description": "the file", "default": null }])
+}
+
+#[test]
+fn an_agent_route_to_a_known_skill_links_its_phrasing_and_drops_the_counter_example() {
+    let scratch = Scratch::new("link-agent");
+    scratch.brain.add_counter_example("list-files-by-time", "files by date").unwrap();
+    let agent =
+        || models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", existing_proposal("list-files-by-time"))]).0;
+    let outcome = go(&scratch, &agent(), "files by date", &mut Script::default(), &yes(&scratch));
+    assert_eq!((outcome.path, outcome.label.as_deref(), outcome.ran), (Path::System2, Some("list-files-by-time"), true));
+    assert_eq!(outcome.learned, ["\"files by date\" means list-files-by-time"]);
+    let (examples, counter) = lists(&scratch, "list-files-by-time");
+    assert!(examples.contains(&"files by date".to_string()));
+    assert!(counter.is_empty(), "never an example and a counter-example of one skill at once");
+
+    // A plan of an agent route, run after its phrasing became a counter-example, links it the same way.
+    let dry = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let planned = go(&scratch, &agent(), "newest stuff", &mut Script::default(), &dry);
+    scratch.brain.add_counter_example("list-files-by-time", "newest stuff").unwrap();
+    let ran = plans(&scratch, &no_model_at_all(), &[planned.plan_id.unwrap()], &[], &mut Script::default());
+    assert!(ran[0].ran);
+    let (examples, counter) = lists(&scratch, "list-files-by-time");
+    assert!(examples.contains(&"newest stuff".to_string()));
+    assert!(counter.is_empty(), "jli run writes back as the route does");
+}
+
+#[test]
+fn the_agent_cannot_bring_back_a_rejected_command_as_a_second_skill() {
+    let scratch = Scratch::new("rejected-again");
+    std::fs::write(scratch.work.join("notes.txt"), "one\ntwo\n").unwrap();
+    let values = json!([{ "name": "file", "value": "notes.txt" }]);
+    let count = new_proposal("count-lines-in-file", "wc -l {file}", file_slot("file"), values);
+    let (models, _) = models(once_known("count-lines-in-file", decision(NONE, 0.4, 0.95, SAFE)), vec![("proposal", count)]);
+    let ran = go(&scratch, &models, "how many lines are in notes.txt", &mut Script::default(), &yes(&scratch));
+    assert_eq!(ran.learned, ["new skill count-lines-in-file"]);
+    let before = scratch.brain.skills().unwrap().len();
+
+    // `jli fix`: told the skill was wrong, the agent proposes its command again under another slot name.
+    let again = new_proposal(
+        "count-lines-in-file",
+        "wc -l {path}",
+        file_slot("path"),
+        json!([{ "name": "path", "value": "notes.txt" }]),
+    );
+    // Were it run, the second row would pass System 1's check as `count-lines-in-file-x`.
+    let check = once_known("count-lines-in-file-x", decision(NONE, 0.4, 0.95, SAFE));
+    let (models, _) = self::models(check, vec![("proposal", again)]);
+    let fix = Fix { event: ran.event_id, how: FixHow::Unlearn, run: false };
+    assert_eq!(app(&scratch, "default", models).fix(&Flags::quiet_yes(), fix).unwrap(), 3, "refused, not run");
+    assert_eq!(scratch.brain.skills().unwrap().len(), before, "no count-lines-in-file-x");
+    let refused = scratch.brain.events(1).unwrap().remove(0);
+    assert!(!refused.accepted && refused.exit_code.is_none(), "nothing ran");
+    assert_eq!(scratch.brain.skill("count-lines-in-file").unwrap().unwrap().counter_examples, ["how many lines are in …"]);
+
+    // At the router: the same command, a more general one than a rejected literal, or the label itself.
+    let rejecting = |label: &str| RouteOptions { rejected: vec![label.into()], ..yes(&scratch) };
+    scratch
+        .brain
+        .add_skill(&NewSkill {
+            label: "count-notes".into(),
+            steps: vec![format!("grep -c TODO {}/notes.txt", std::env::var("HOME").unwrap())],
+            scenario: "the user wants the TODOs in the notes counted".into(),
+            risk: Risk::Safe,
+            origin: Origin::Taught,
+            examples: vec![],
+            slots: vec![],
+        })
+        .unwrap();
+    let before = scratch.brain.skills().unwrap().len();
+    for (rejected, proposal, commands) in [
+        ("list-files-by-time", new_proposal("list-by-date", "ls -ltr", json!([]), json!([])), "ls -ltr"),
+        (
+            "count-notes",
+            new_proposal(
+                "count-todos",
+                "grep -c TODO {file}",
+                file_slot("file"),
+                json!([{ "name": "file", "value": "~/notes.txt" }]),
+            ),
+            &format!("grep -c TODO {}/notes.txt", std::env::var("HOME").unwrap()),
+        ),
+        ("list-files-by-time", existing_proposal("list-files-by-time"), "ls -ltr"),
+    ] {
+        let (models, _) = self::models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", proposal)]);
+        let outcome = go(&scratch, &models, "show them", &mut Script::default(), &rejecting(rejected));
+        assert_eq!((code(&outcome), outcome.ran, outcome.exit_code()), (Some("already_rejected"), false, 3), "{rejected}");
+        assert_eq!(outcome.label.as_deref(), Some(rejected), "the outcome names the skill it ran into");
+        assert_eq!(outcome.commands, [commands], "what would have run, a file value expanded");
+        assert!(outcome.learned.is_empty() && outcome.plan_id.is_none());
+    }
+    assert_eq!(scratch.brain.skills().unwrap().len(), before);
+}
+
+#[test]
+fn a_home_path_is_hidden_as_the_request_wrote_it() {
+    let scratch = Scratch::new("hide-home");
+    let home = std::env::var("HOME").unwrap();
+    let steps = ["wc -l {file}".to_string()];
+    let slots: Vec<Slot> = serde_json::from_value(file_slot("file")).unwrap();
+    // The agent proposes the skill and gives the value already expanded, or as the request wrote it.
+    for (request, value) in [
+        ("how many lines are in ~/notes/n.txt", format!("{home}/notes/n.txt")),
+        ("how many lines are in ~/notes/n.txt.", "~/notes/n.txt".to_string()),
+        ("how many lines are in $HOME/notes/n.txt", format!("{home}/notes/n.txt")),
+        ("how many lines are in ${HOME}/notes/n.txt, please", "${HOME}/notes/n.txt".to_string()),
+    ] {
+        let proposal =
+            new_proposal("count-lines", &steps[0], file_slot("file"), json!([{ "name": "file", "value": value }]));
+        let (models, _) = models(|_| decision(NONE, 0.4, 0.95, SAFE), vec![("proposal", proposal)]);
+        let dry = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+        let outcome = go(&scratch, &models, request, &mut Script::default(), &dry);
+        let phrase = outcome.phrase.clone().unwrap();
+        assert!(!phrase.contains("notes") && phrase.starts_with("how many lines are in …"), "{request}: {phrase}");
+        // `jli fix` works it out again from the request and the command, and arrives at the same text.
+        let again = crate::slots::learned_phrase(request, &steps, &slots, Some(&outcome.commands.join(" && ")));
+        assert_eq!(again, phrase, "{request}");
+    }
+
+    // A System 1 pick of the path the request named, run, learned, and found again from the event log.
+    directory_skill(&scratch, "show-dir", &["ls -d {directory}"]);
+    let (models, _) = models(
+        |request| {
+            let Some(pick) = request["questions"].get("value") else { return decision("show-dir", 0.9, 0.9, SAFE) };
+            assert!(pick.to_string().contains("$HOME"));
+            json!({"model": "m", "answers": {"value": {"type": "choice", "choice": "$HOME", "confidence": 0.9,
+                                                      "probabilities": {"$HOME": 0.9}}}})
+        },
+        no_language_model(),
+    );
+    let outcome = go(&scratch, &models, "is $HOME there", &mut Script::default(), &yes(&scratch));
+    assert!(outcome.ran && outcome.exit_code == Some(0));
+    assert_eq!(outcome.learned, ["\"is … there\" means show-dir"]);
+    let event = scratch.brain.events(1).unwrap().remove(0);
+    let skill = scratch.brain.skill("show-dir").unwrap().unwrap();
+    let again = crate::slots::learned_phrase(&event.query, &skill.steps, &skill.slots, event.command.as_deref());
+    assert_eq!(again, "is … there");
+    assert!(scratch.brain.remove_example("show-dir", &again).unwrap());
 }

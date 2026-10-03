@@ -227,10 +227,29 @@ pub fn fill_slots(
 /// already hides what the request stated, with every value the command was given hidden as well.
 /// The values are read back from the command, so `jli fix` arrives at the same text from the event log.
 fn shape(phrase: &str, steps: &[String], command: &str) -> String {
-    match match_template(steps, command) {
-        Some(values) => args::hide_values(phrase, values.values().map(String::as_str)),
-        None => phrase.to_string(),
+    let Some(values) = match_template(steps, command) else { return phrase.to_string() };
+    let mut hidden: Vec<String> = values.into_values().collect();
+    hidden.extend(written_forms(phrase, &hidden));
+    args::hide_values(phrase, hidden.iter().map(String::as_str))
+}
+
+/// The words of `phrase` that expand to one of `values` the way a file value is expanded (ADR 14):
+/// `~/notes` in the request for `/home/x/notes` in the command. Expanded with the environment as it
+/// is now, so `jli fix` finds the same words as long as the variables have not changed.
+fn written_forms(phrase: &str, values: &[String]) -> Vec<String> {
+    let env = |name: &str| std::env::var(name).ok();
+    let mut words: Vec<String> = Vec::new();
+    for word in path_words(phrase) {
+        // A full stop that ends the sentence is not part of the path.
+        let bare = word.strip_suffix('.').map(str::to_string);
+        for word in std::iter::once(word).chain(bare) {
+            let expanded = expand_words(&word, env).value;
+            if expanded != word && values.contains(&expanded) && !words.contains(&word) {
+                words.push(word);
+            }
+        }
     }
+    words
 }
 
 /// What a logged request was learned as, worked out again from the request and the command it ran.
@@ -369,10 +388,15 @@ fn is_name_char(ch: char) -> bool {
 /// `$1` and `$$` stay as written, as does a variable that is unset or empty, and a value that
 /// names an existing path just as it is written. The result is quoted like any value (ADR 7).
 pub fn expand_path(value: &str, cwd: &std::path::Path, env: impl Fn(&str) -> Option<String>) -> Expanded {
-    let mut expanded = Expanded { value: value.to_string(), not_set: vec![] };
     if !value.contains(['~', '$']) || cwd.join(value).symlink_metadata().is_ok() {
-        return expanded;
+        return Expanded { value: value.to_string(), not_set: vec![] };
     }
+    expand_words(value, env)
+}
+
+/// `expand_path` without the check for a path that exists as written.
+fn expand_words(value: &str, env: impl Fn(&str) -> Option<String>) -> Expanded {
+    let mut expanded = Expanded { value: value.to_string(), not_set: vec![] };
     let lookup = |name: &str| env(name).filter(|found| !found.is_empty());
     let mut out = String::new();
     let mut rest = value;

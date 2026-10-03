@@ -940,10 +940,11 @@ impl Brain {
     }
 
     /// Add a phrasing to a skill, and drop it from that skill's counter-examples if it was one.
-    pub fn link_phrase(&self, label: &str, phrase: &str) -> Result<()> {
-        self.add_example(label, phrase)?;
-        self.edit_list(label, ListColumn::CounterExamples, |list| without(list, phrase))?;
-        Ok(())
+    /// Returns false when it was already an example and not a counter-example: nothing changed.
+    pub fn link_phrase(&self, label: &str, phrase: &str) -> Result<bool> {
+        let added = self.add_example(label, phrase)?;
+        let lifted = self.edit_list(label, ListColumn::CounterExamples, |list| without(list, phrase))?;
+        Ok(added || lifted)
     }
 
     /// This user's own setting. A user without one gets the built-in default, not the default user's.
