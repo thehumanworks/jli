@@ -39,6 +39,17 @@ pub(crate) struct Flags {
     mode: Option<Mode>,
     /// From --user-id; resolved against JLI_USER_ID and the default user.
     user_id: Option<String>,
+    /// From --project; resolved against this directory's `.jlirc` (ADR 26).
+    project: Option<ProjectFlag>,
+}
+
+/// What `--project` said (ADR 26).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ProjectFlag {
+    /// `--project=<id>` or `--project <id>`: that project, wherever jli runs.
+    Named(String),
+    /// `--project` on its own: the project of this directory's `.jlirc`, which must be there.
+    Here,
 }
 
 impl Flags {
@@ -129,13 +140,13 @@ pub(crate) fn switches_from(mut flags: Flags, lookup: impl Fn(&str) -> Option<St
     flags
 }
 
-struct Parsed {
-    flags: Flags,
-    words: Vec<String>,
-    rest: Vec<String>,
+pub(crate) struct Parsed {
+    pub(crate) flags: Flags,
+    pub(crate) words: Vec<String>,
+    pub(crate) rest: Vec<String>,
 }
 
-fn parse(argv: &[String]) -> Result<Parsed> {
+pub(crate) fn parse(argv: &[String]) -> Result<Parsed> {
     let mut flags = Flags::default();
     let mut words = Vec::new();
     let separator = argv.iter().position(|arg| arg == "--");
@@ -143,7 +154,8 @@ fn parse(argv: &[String]) -> Result<Parsed> {
         Some(at) => (&argv[..at], argv[at + 1..].to_vec()),
         None => (argv, vec![]),
     };
-    for arg in head {
+    let mut head = head.iter().peekable();
+    while let Some(arg) = head.next() {
         match arg.as_str() {
             "-n" | "--dry-run" => flags.dry_run = true,
             "-y" | "--yes" => flags.yes = true,
@@ -151,8 +163,19 @@ fn parse(argv: &[String]) -> Result<Parsed> {
             "-q" | "--quiet" => flags.quiet = true,
             "--json" => flags.json = true,
             "--agent" => flags.agent = true,
+            // The next word is the id unless it is another flag; on its own it means this directory's project.
+            "--project" => {
+                flags.project = Some(match head.next_if(|next| !next.starts_with('-')) {
+                    Some(id) => ProjectFlag::Named(project::project_id(id).map_err(|error| {
+                        anyhow!("{error:#}. --project takes the word after it as the id: for this directory's project, put --project last")
+                    })?),
+                    None => ProjectFlag::Here,
+                })
+            }
             _ => {
-                if let Some(value) = arg.strip_prefix("--confidence=") {
+                if let Some(value) = arg.strip_prefix("--project=") {
+                    flags.project = Some(ProjectFlag::Named(project::project_id(value)?));
+                } else if let Some(value) = arg.strip_prefix("--confidence=") {
                     flags.threshold = Some(parse_threshold(value)?);
                 } else if let Some(value) = arg.strip_prefix("--mode=") {
                     flags.mode = Some(parse_mode(value)?);
@@ -185,6 +208,12 @@ fn refuse(flags: &Flags, code: &str, message: &str) -> i32 {
         say(message);
     }
     1
+}
+
+/// The projects this user has skills in, ready to name, or None when there are none.
+fn known_projects(brain: &Brain) -> Result<Option<String>> {
+    let known = brain.projects()?;
+    Ok((!known.is_empty()).then(|| known.join(", ")))
 }
 
 /// What `jli fix` was asked to do with the route it corrects.
@@ -252,16 +281,46 @@ fn cwd() -> Result<PathBuf> {
     std::env::current_dir().map_err(|error| anyhow!("cannot read the working directory: {error}"))
 }
 
+/// The project a run is scoped to (ADR 26): the one `--project` names, else the one this directory's
+/// `.jlirc` names. A bare `--project` asks for the `.jlirc`, so outside a project it is a usage error.
+fn scope_of(flag: Option<&ProjectFlag>, here: Option<&Found>) -> Result<Option<String>> {
+    match (flag, here) {
+        (Some(ProjectFlag::Named(id)), _) => Ok(Some(id.clone())),
+        (Some(ProjectFlag::Here) | None, Some(found)) => Ok(Some(found.id.clone())),
+        (Some(ProjectFlag::Here), None) => {
+            Err(coded(USAGE, "Not inside a project: there is no .jlirc here or above. Name one with --project=<id>."))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
 /// Everything a subcommand needs: the brain, the models, and the one stdin reader.
 pub(crate) struct App {
     pub(crate) brain: Brain,
     pub(crate) models: Models,
     pub(crate) terminal: Terminal,
-    /// The `.jlirc` the brain was opened for, if any.
+    /// The `.jlirc` this directory is in, if any. The brain is opened in its project unless
+    /// `--project` named another (ADR 26).
     pub(crate) project: Option<Found>,
 }
 
 impl App {
+    /// The app for a run from `cwd`, with the brain opened in the project `scope_of` picks: the one
+    /// `--project` names, else the one this directory's `.jlirc` names.
+    pub(crate) fn open(
+        config: BrainConfig,
+        user: &str,
+        flags: &Flags,
+        cwd: &std::path::Path,
+        home: Option<&std::path::Path>,
+        models: Models,
+        terminal: Terminal,
+    ) -> Result<App> {
+        let project = project::find(cwd, home)?;
+        let scope = scope_of(flags.project.as_ref(), project.as_ref())?;
+        Ok(App { brain: Brain::open_in(config, user, scope.as_deref())?, models, terminal, project })
+    }
+
     fn ask(&mut self, query: &str, flags: &Flags, rejected: Vec<String>) -> Result<Outcome> {
         self.ask_in(query, flags, rejected, None, cwd()?)
     }
@@ -295,18 +354,47 @@ impl App {
         Ok(outcome)
     }
 
-    fn show_skills(&self) -> Result<()> {
-        let skills = self.brain.skills()?;
+    fn show_skills(&self, flags: &Flags) -> Result<()> {
+        for line in self.skills_listing(flags)? {
+            say(line);
+        }
+        Ok(())
+    }
+
+    /// What `jli skills` prints: every skill this brain sees, or with `--project` only the project's
+    /// own, without the global ones (ADR 26).
+    pub(crate) fn skills_listing(&self, flags: &Flags) -> Result<Vec<String>> {
+        let only = self.brain.project().filter(|_| flags.project.is_some());
+        let skills = if only.is_some() { self.brain.project_skills()? } else { self.brain.skills()? };
         let shared_from = self.brain.shared_from()?;
         // Inside a project each skill says whose it is (ADR 17); outside one the listing is as it was.
         let own: Vec<String> = self.brain.project_skills()?.into_iter().map(|skill| skill.label).collect();
         let lessons = self.brain.project_lessons()?;
         let rewritten = self.brain.project_scenarios()?;
-        say(format!(
-            "{} {}\n",
-            c::bold(format!("{} skills", skills.len())),
-            c::dim(format!("in {}", self.brain.location()))
-        ));
+        // What the project learned about global skills is not a skill of its own, so it is named, not listed.
+        let mut learned: Vec<&str> =
+            lessons.iter().map(|(label, _, _)| label.as_str()).chain(rewritten.iter().map(String::as_str)).collect();
+        learned.sort_unstable();
+        learned.dedup();
+        let not_listed = only.filter(|_| !learned.is_empty()).map(|project| {
+            c::dim(format!(
+                "Not listed: what project {project} learned about the global {}. Inside the project, jli skills lists them with the global skills.",
+                learned.join(", ")
+            ))
+        });
+        let mut lines = Vec::new();
+        if let Some(project) = only.filter(|_| skills.is_empty()) {
+            lines.push(match known_projects(&self.brain)? {
+                Some(known) => {
+                    format!("Project {project} has no skills of its own. Projects with skills of their own: {known}.")
+                }
+                None => format!("Project {project} has no skills of its own, and no project has any yet."),
+            });
+            lines.extend(not_listed);
+            return Ok(lines);
+        }
+        let count = format!("{} {}skills", skills.len(), if only.is_some() { "project " } else { "" });
+        lines.push(format!("{} {}\n", c::bold(count), c::dim(format!("in {}", self.brain.location()))));
         for skill in skills {
             let origin = match skill.origin {
                 crate::types::Origin::Seed => c::dim("seed"),
@@ -324,7 +412,7 @@ impl App {
                 }
                 None => String::new(),
             };
-            say(format!(
+            lines.push(format!(
                 "{}  {}  {origin}{}{scope}  {}",
                 c::bold(&skill.label),
                 risk_tag(skill.risk),
@@ -332,35 +420,40 @@ impl App {
                 c::dim(format!("used {}×", skill.uses))
             ));
             for step in &skill.steps {
-                say(format!("  {} {step}", c::green("$")));
+                lines.push(format!("  {} {step}", c::green("$")));
             }
             for slot in skill.slots.iter().filter(|slot| !slot.aliases.is_empty()) {
-                say(format!("  {}", c::dim(format!("{{{}}} is also {}", slot.name, slot.aliases.join(", ")))));
+                lines.push(format!("  {}", c::dim(format!("{{{}}} is also {}", slot.name, slot.aliases.join(", ")))));
             }
             for slot in &skill.slots {
                 let settings = slot.settings();
                 if !settings.is_empty() {
-                    say(format!("  {}", c::dim(format!("{{{}}}: {settings}", slot.name))));
+                    lines.push(format!("  {}", c::dim(format!("{{{}}}: {settings}", slot.name))));
                 }
             }
-            say(format!("  {}", c::dim(&skill.scenario)));
+            lines.push(format!("  {}", c::dim(&skill.scenario)));
             for example in &skill.examples {
-                say(format!("  {} \"{example}\"", c::green("+")));
+                lines.push(format!("  {} \"{example}\"", c::green("+")));
             }
             for example in &skill.counter_examples {
-                say(format!("  {} \"{example}\"", c::red("−")));
+                lines.push(format!("  {} \"{example}\"", c::red("−")));
             }
-            say("");
+            lines.push(String::new());
         }
-        if self.brain.project().is_some() {
+        if only.is_some() {
+            lines.extend(not_listed);
+        } else if self.brain.project().is_some() {
             let global = self.brain.global_skills()?;
             let hidden: Vec<&str> =
                 global.iter().map(|skill| skill.label.as_str()).filter(|label| own.iter().any(|own| own == label)).collect();
             if !hidden.is_empty() {
-                say(c::dim(format!("Hidden here by a project skill of the same name: the global {}", hidden.join(", "))));
+                lines.push(c::dim(format!(
+                    "Hidden here by a project skill of the same name: the global {}",
+                    hidden.join(", ")
+                )));
             }
         }
-        Ok(())
+        Ok(lines)
     }
 
     fn show_history(&self) -> Result<()> {
@@ -571,15 +664,29 @@ impl App {
     }
 
     fn show_project(&self) -> Result<i32> {
-        let Some(found) = &self.project else {
+        let Some(id) = self.brain.project() else {
             say("No project here: there is no .jlirc in this directory or any above it. What is learned here is global.");
             say(c::dim("Make this directory a project with: jli project init"));
             return Ok(0);
         };
         let own = self.brain.project_skills()?.len();
         let lessons = self.brain.project_lessons()?.len();
-        say(format!("{} {}", c::bold("Project"), c::bold(&found.id)));
-        say(format!("  from {}", found.path.display()));
+        say(format!("{} {}", c::bold("Project"), c::bold(id)));
+        // Named with --project, the project need not be this directory's (ADR 26).
+        let named = match &self.project {
+            Some(found) if found.id == id => {
+                say(format!("  from {}", found.path.display()));
+                false
+            }
+            Some(found) => {
+                say(format!("  named with --project; this directory is in project {} ({})", found.id, found.path.display()));
+                true
+            }
+            None => {
+                say("  named with --project; this directory is in no project");
+                true
+            }
+        };
         say(format!(
             "  {own} skill{} scoped to it, and lessons about {lessons} global skill{}",
             if own == 1 { "" } else { "s" },
@@ -592,8 +699,26 @@ impl App {
                 if rewritten == 1 { "" } else { "s" }
             ));
         }
-        say(c::dim("  What is learned here stays with this project; your global skills are used here too. See jli skills."));
+        say(c::dim(if named {
+            format!("  What is learned with --project={id} stays with this project; your global skills are used there too. See jli skills --project={id}.")
+        } else {
+            "  What is learned here stays with this project; your global skills are used here too. See jli skills."
+                .to_string()
+        }));
         Ok(0)
+    }
+
+    /// A nudge, not a gate (ADR 26): a project named with `--project` that this user has nothing in
+    /// may be a typo. The project of this directory's `.jlirc` is not one, even when it is new.
+    pub(crate) fn unknown_project(&self, flags: &Flags) -> Result<Option<String>> {
+        let Some(ProjectFlag::Named(id)) = &flags.project else { return Ok(None) };
+        if self.project.as_ref().is_some_and(|here| here.id == *id) || self.brain.knows_project()? {
+            return Ok(None);
+        }
+        Ok(Some(match known_projects(&self.brain)? {
+            Some(known) => format!("jli has nothing for project {id} yet. Projects with skills of their own: {known}."),
+            None => format!("jli has nothing for project {id} yet."),
+        }))
     }
 
     fn init_project(&self, id: Option<&str>) -> Result<i32> {
@@ -1003,6 +1128,16 @@ impl App {
             say(text);
             return Ok(0);
         }
+        // `jli skills --project=<id>` says so in its listing instead, and `jli project init` refuses the flag.
+        let no_note = rest.is_empty()
+            && match words {
+                [only] => only == "skills",
+                [first, init, ..] => first == "project" && init == "init",
+                _ => false,
+            };
+        if let Some(note) = if no_note { None } else { self.unknown_project(flags)? } {
+            Ui::new(!flags.quiet).warn(note);
+        }
         let Some((first, others)) = words.split_first() else {
             if !self.terminal.interactive() {
                 say(help::full());
@@ -1013,7 +1148,7 @@ impl App {
         };
         if others.is_empty() && rest.is_empty() {
             match first.as_str() {
-                "skills" => return self.show_skills().map(|_| 0),
+                "skills" => return self.show_skills(flags).map(|_| 0),
                 "stats" => return self.show_stats().map(|_| 0),
                 "history" => return self.show_history().map(|_| 0),
                 "fix" => return self.fix(flags, Fix { event: None, how: FixHow::Unlearn, run: false }),
@@ -1110,6 +1245,10 @@ impl App {
         if first == "project" && rest.is_empty() && !global {
             match plain.as_slice() {
                 [] => return self.show_project(),
+                [init] | [init, _] if init == "init" && flags.project.is_some() => {
+                    let why = "jli project init makes this directory a project and names it, so it takes no --project. To choose the id: jli project init <id>";
+                    return Ok(refuse(flags, USAGE, why));
+                }
                 [init] if init == "init" => return self.init_project(None),
                 [init, id] if init == "init" => return self.init_project(Some(id)),
                 _ => {}
@@ -1166,13 +1305,8 @@ fn run(argv: &[String]) -> Result<i32> {
     }
 
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let project = project::find(&cwd()?, home.as_deref())?;
-    let mut app = App {
-        brain: Brain::open_in(BrainConfig::from_env(), &user, project.as_ref().map(|found| found.id.as_str()))?,
-        models: Models::from_env(),
-        terminal: Terminal::new(),
-        project,
-    };
+    let config = BrainConfig::from_env();
+    let mut app = App::open(config, &user, &flags, &cwd()?, home.as_deref(), Models::from_env(), Terminal::new())?;
     let code = app.dispatch(&flags, &words, &rest);
     let _ = app.brain.sync();
     code
@@ -1289,6 +1423,54 @@ mod tests {
         assert_eq!(resolve_user(&Flags::default(), from_env).unwrap(), "ci");
         assert_eq!(resolve_user(&Flags::default(), nothing).unwrap(), DEFAULT_USER);
         assert!(resolve_user(&Flags::default(), |_| Some("two words".into())).is_err());
+    }
+
+    #[test]
+    fn the_project_flag_names_a_project_or_asks_for_this_directorys() {
+        let named = |id: &str| Some(ProjectFlag::Named(id.into()));
+        let parsed = parse(&args(&["skills", "--project=shop-api"])).unwrap();
+        assert_eq!((parsed.flags.project, parsed.words), (named("shop-api"), args(&["skills"])));
+        let parsed = parse(&args(&["--project", "shop-api", "run", "the", "tests"])).unwrap();
+        assert_eq!((parsed.flags.project, parsed.words), (named("shop-api"), args(&["run", "the", "tests"])));
+        let parsed = parse(&args(&["skills", "--project"])).unwrap();
+        assert_eq!((parsed.flags.project, parsed.words), (Some(ProjectFlag::Here), args(&["skills"])));
+        let parsed = parse(&args(&["history", "--project", "--json"])).unwrap();
+        assert_eq!(parsed.flags.project, Some(ProjectFlag::Here), "a flag after it is not an id");
+        assert!(parsed.flags.json);
+        let parsed = parse(&args(&["teach", "run the tests", "--project", "--", "cargo", "test"])).unwrap();
+        assert_eq!((parsed.flags.project, parsed.rest), (Some(ProjectFlag::Here), args(&["cargo", "test"])), "-- ends it");
+        let parsed = parse(&args(&["teach", "x", "--", "ls", "--project=other", "--project"])).unwrap();
+        assert_eq!((parsed.flags.project, parsed.rest), (None, args(&["ls", "--project=other", "--project"])));
+
+        // A word that cannot be an id fails loudly, as a usage error, rather than scoping somewhere.
+        for wrong in
+            [&["skills", "--project=Shop"][..], &["--project="], &["teach", "--project", "run the tests", "--", "ls"]]
+        {
+            let error = parse(&args(wrong)).map_err(|error| coded(USAGE, format!("{error:#}"))).err().unwrap();
+            assert!(format!("{error:#}").contains("a project id is 1 to 32"), "{wrong:?}: {error:#}");
+            assert_eq!(error_code(&error), USAGE);
+        }
+        let spaced = parse(&args(&["--project", "Shop", "skills"])).err().unwrap();
+        assert!(format!("{spaced:#}").contains("put --project last"), "{spaced:#}");
+    }
+
+    #[test]
+    fn the_project_comes_from_the_flag_then_the_jlirc() {
+        let here = Found { id: "shop-api".into(), path: PathBuf::from("/work/shop/.jlirc") };
+        let named = ProjectFlag::Named("blog".into());
+        assert_eq!(scope_of(Some(&named), Some(&here)).unwrap().as_deref(), Some("blog"), "the flag wins");
+        assert_eq!(scope_of(Some(&named), None).unwrap().as_deref(), Some("blog"), "outside every project too");
+        assert_eq!(scope_of(Some(&ProjectFlag::Here), Some(&here)).unwrap().as_deref(), Some("shop-api"));
+        assert_eq!(scope_of(None, Some(&here)).unwrap().as_deref(), Some("shop-api"));
+        assert_eq!(scope_of(None, None).unwrap(), None);
+        let outside = scope_of(Some(&ProjectFlag::Here), None).unwrap_err();
+        assert_eq!(error_code(&outside), USAGE);
+        assert_eq!(
+            format!("{outside:#}"),
+            "Not inside a project: there is no .jlirc here or above. Name one with --project=<id>."
+        );
+        let value: serde_json::Value = serde_json::from_str(&error_json(&outside)).unwrap();
+        assert_eq!(value["error"], "usage", "--json gets one error object");
     }
 
     #[test]

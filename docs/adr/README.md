@@ -36,6 +36,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [23](0023-shell-fixes-and-number-words.md) | The install line follows the running shell, the function cleans up after ctrl-c, and a hyphenated number word is not a count |
 | [24](0024-optional-slots.md) | A slot can be left out with its flag, a person can give it a default, and choices say how each value is written |
 | [25](0025-command-help.md) | `--help` before `--` is jli's own help, each command has its own from one table, and a choice is shown by its name |
+| [26](0026-project-flag.md) | `--project` names the project a command acts on, from any directory |
 | [27](0027-quiet.md) | A quiet run hides the trace, keeps its warnings, and still shows what a question asks about |
 
 ## Known gaps, by record
@@ -111,9 +112,15 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   run`; and `jli slot` inside a project ran live once.
 - [25](0025-command-help.md): a request with `-h` or `--help` as a word of its own before `--` is now
   help (quote the request, or put those words after `--` with a word before it); help is plain text
-  under `--json`; the word after a bare `--project` is taken as its id unless it names a command;
-  the interactive session still routes `--help`; a command's usage refusal is written apart from the
-  table; and the help lists `--project` and `JLI_QUIET` before ADRs 26 and 27 are merged.
+  under `--json`; the word after a bare `--project` is taken as its id unless it names a command,
+  which ADR 26 does not do; the interactive session still routes `--help`; and a command's usage
+  refusal is written apart from the table.
+- [26](0026-project-flag.md): the space form takes the next word as the id, so `jli --project deploy
+  the app` scopes into a project called `deploy`, and the note on stderr is the only guard; a mistyped
+  id that names another real project gets no note; `jli skills --project=<id>` names but does not show
+  the global skills the project learned about; the projects named are those with skills of their own;
+  `jli project --project=<id>` cannot say where the checkouts are; and an older jli reads the flag as
+  words of the request, so its `teach` puts it in a global phrasing.
 - [27](0027-quiet.md): `-q -n` prints nothing; a quiet run nobody could confirm does not name the
   command or the plan it stored; the agent's answer to a request that is not a command, and System 1's
   "not a command", are hidden under `--quiet`; and `jli fix` prints its learned and dry-run lines

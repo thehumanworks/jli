@@ -123,11 +123,11 @@ acceptance checks of [ADR 9](0009-port-to-rust.md) were not re-run.
   it: `jli show disk usage -- -h` routes "show disk usage -h". `jli -- du -h` does not, since with
   no word before `--` it is the interactive session, or the full help with no terminal.
 - **Known gap:** help is plain text even with `--json`.
-- **Known gap:** the word after a bare `--project` is read as its id unless it names a command. That
-  is a guess at ADR 26's reading of the flag, and it only decides which command's help is shown.
+- **Known gap:** the word after a bare `--project` is read as its id unless it names a command.
+  [ADR 26](0026-project-flag.md) reads it as the id whatever it is, so `jli --project skills --help`
+  is the `skills` command's help while `jli --project skills` acts in a project called `skills`. It
+  only decides which command's help is shown.
 - **Known gap:** the interactive session has no commands and routes what is typed, `skills --help`
   as much as `skills`.
 - **Known gap:** the usage line a command prints when its words do not fit its shape (`Usage: jli
   teach …`) is written apart from the table.
-- **Known gap:** this record was written before ADRs 26 and 27 were merged. Until they are,
-  `--project` is a word of the request and `JLI_QUIET` is ignored, though the help lists both.

@@ -823,6 +823,24 @@ impl Brain {
         )
     }
 
+    /// Whether this user has anything in the project this brain is opened in: a skill, a lesson or a
+    /// scenario for a global skill, a request, a plan, or an eval record. True outside every project.
+    /// A project named with `--project` that has none of these may be a typo (ADR 26).
+    pub fn knows_project(&self) -> Result<bool> {
+        if !self.scope.has_project() {
+            return Ok(true);
+        }
+        let tables = ["scoped_skills", "project_lessons", "project_scenarios", "scoped_events", "plans", "scoped_meta"];
+        let any: Vec<String> = tables
+            .iter()
+            .map(|table| format!("EXISTS (SELECT 1 FROM {table} WHERE user_id = ? AND project_id = ?)"))
+            .collect();
+        let args = tables.iter().flat_map(|_| self.scope.args(vec![])).collect();
+        let found = self
+            .query(&format!("SELECT {}", any.join(" OR ")), args, |row| opt_int(row.get_value(0).unwrap_or(Value::Null)))?;
+        Ok(found.into_iter().flatten().any(|found| found != 0))
+    }
+
     /// One project's own skills, for this user.
     pub fn skills_in(&self, project: &str) -> Result<Vec<Skill>> {
         self.skills_of(&Scope::in_project(&self.scope.user, project))
