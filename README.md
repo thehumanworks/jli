@@ -35,7 +35,11 @@ Learning is writing to that database:
 | You wrote `dir=src` for a slot called `directory` | `dir` as another name for that slot | `dir=` is read with no model next time |
 
 One command can hold many phrasings. Teaching a phrase for a command that a skill already runs adds
-the phrase to that skill.
+the phrase to that skill. If that skill runs only the one command, as one taught in manual mode
+does, and the translator finds a value in it, the skill is made general in place and keeps its
+phrasings: teaching `git log --oneline -n 3` again turns it into `git log --oneline -n {count}`, with
+3 as the count's default. Two jli processes teaching one command at once also end up with one skill.
+See [ADR 19](docs/adr/0019-one-row-per-command.md).
 
 ## Learning modes
 
@@ -209,8 +213,9 @@ See [ADR 14](docs/adr/0014-shell-integration.md).
 
 ## Slots
 
-Skills are templates such as `git log -n {count}` or `git commit -m {message}`. A value you state
-is passed as written, by a parser and no model:
+Skills are templates such as `git log -n {count}` or `git commit -m {message}`. A flag is never a
+value: `cd -` is a skill of its own, not `cd {directory}` with `-`. A value you state is passed as
+written, by a parser and no model:
 
 ```sh
 jli commit message="fix the parser"            # name=value, for the slot called message
@@ -277,7 +282,8 @@ users existed. A user sees, routes against, teaches, fixes and forgets only thei
 history, stats and settings are their own; a new user starts from the seed skills with the built-in
 settings. `jli share` copies one skill as it is now, with its phrasings and slot names but not its
 counter-examples, and refuses if the other user already has that label or that command. Several
-jli processes can write one brain at once without losing a lesson. An older jli on the same brain
+jli processes can write one brain at once without losing a lesson, and two that teach the same
+command at once get one skill ([ADR 19](docs/adr/0019-one-row-per-command.md)). An older jli on the same brain
 sees only the default user. See [ADR 15](docs/adr/0015-user-scope.md).
 
 ## Projects
@@ -309,7 +315,7 @@ say yes. Without a `.jlirc` nothing changes. See [ADR 17](docs/adr/0017-project-
 | `src/system1.rs` | builds the matrix from the database and asks Jev; the only module that uses `typesafe-jev` |
 | `src/system2.rs` | the agent: structured proposals, free-text slot filling, naming an unknown argument's slot, rewriting a weak row, and proposing how a project skill could be global |
 | `src/translator.rs` | turns a taught phrase and command into a general matrix row |
-| `src/learn.rs` | writes a row once System 1 has verified it, and settles a skill the agent proposed |
+| `src/learn.rs` | writes a row once System 1 has verified it, or makes a literal skill general in place, and settles a skill the agent proposed |
 | `src/eval.rs` | measures the matrix against its own examples and history, optimises it, and checks a new row against its closest skills |
 | `src/suggest.rs` | auto mode: diagnoses a failure and offers alternatives |
 | `src/llm.rs` | the one HTTP call every language model request goes through |
@@ -319,7 +325,7 @@ say yes. Without a `.jlirc` nothing changes. See [ADR 17](docs/adr/0017-project-
 | `src/project.rs` | finds, reads and writes the `.jlirc` that names a project |
 | `src/generalize.rs` | `jli generalize`: checks the agent's proposal for a project skill and writes it once approved |
 | `src/args.rs` | reads the arguments a request states: `name=value`, labels and quoted text |
-| `src/slots.rs` | fills, expands and shell-quotes `{slot}` values |
+| `src/slots.rs` | fills, expands and shell-quotes `{slot}` values, and matches a command back to its template |
 | `src/shell.rs` | the shell function, and which steps it must run in your shell |
 | `src/seed.rs` | the original hard-coded matrix, now only the seed for an empty brain |
 | `src/exec.rs` | runs the steps with `bash -c`, watching stderr in auto mode and for a new proposal, and tries builtins before they are handed over |
