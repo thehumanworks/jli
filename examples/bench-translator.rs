@@ -5,6 +5,11 @@
 //! held-out paraphrases through both and compares.
 //!
 //!   cargo run --release --example bench-translator     about 150 System 1 calls and 12 translator calls
+//!   cargo run --release --example bench-translator -- --forgetting
+//!                                  also the forgetting rate: about 330 more System 1 calls and 10 translator calls
+//!
+//! The forgetting rate is the share of held-out requests that routed home after one lesson and stop
+//! doing so after the next.
 //!
 //! Run it from the repository root: some cases name files that live there.
 
@@ -209,6 +214,69 @@ fn row(score: &Score) -> String {
     )
 }
 
+/// Whether a held-out request routes to the skill that holds its case's taught phrase.
+fn routes_home(
+    models: &Models,
+    context: &Context,
+    skills: &[jli::types::Skill],
+    item: &Case,
+    request: &str,
+) -> Result<bool> {
+    let wanted = skills.iter().find(|skill| skill.examples.iter().any(|example| example == item.phrase));
+    let decision = models.system1.decide(request, context, skills)?;
+    Ok(decision.skill.as_ref().map(|skill| &skill.label) == wanted.map(|skill| &skill.label)
+        && decision.confidence >= DEFAULT_THRESHOLD)
+}
+
+/// The forgetting rate: teach the cases one at a time, and after each lesson route the held-out
+/// requests of every case taught so far. A request that routed home after one lesson and does not
+/// after the next was forgotten. Returns (forgotten, chances to forget, what was forgotten).
+fn forgetting(
+    models: &Models,
+    dir: &Path,
+    cwd: &Path,
+    context: &Context,
+    mode: Mode,
+) -> Result<(usize, usize, Vec<String>)> {
+    let brain = Brain::open(BrainConfig::file(&dir.join(format!("forgetting-{mode}.db"))))?;
+    let quiet = Ui::new(false);
+    let mut home: Vec<[bool; 3]> = Vec::new();
+    let (mut forgotten, mut chances, mut lost) = (0, 0, Vec::new());
+    for (taught, item) in CASES.iter().enumerate() {
+        let input = LearnInput {
+            phrase: item.phrase.into(),
+            steps: vec![item.command.into()],
+            risk: Some(Risk::Safe),
+            mode,
+            threshold: DEFAULT_THRESHOLD,
+            cwd: cwd.to_path_buf(),
+        };
+        learn_phrase(&brain, models, &input, &quiet)?;
+        let skills = brain.skills()?;
+        let mut now = Vec::new();
+        for earlier in &CASES[..=taught] {
+            let mut routed = [false; 3];
+            for (slot, (request, _)) in earlier.tests.iter().enumerate() {
+                routed[slot] = routes_home(models, context, &skills, earlier, request)?;
+            }
+            now.push(routed);
+        }
+        for (case, was) in home.iter().enumerate() {
+            for slot in 0..3 {
+                if was[slot] {
+                    chances += 1;
+                    if !now[case][slot] {
+                        forgotten += 1;
+                        lost.push(format!("  \"{}\" after teaching \"{}\"", CASES[case].tests[slot].0, item.phrase));
+                    }
+                }
+            }
+        }
+        home = now;
+    }
+    Ok((forgotten, chances, lost))
+}
+
 struct Scratch(PathBuf);
 
 impl Drop for Scratch {
@@ -252,6 +320,16 @@ fn main() -> Result<()> {
     for (mode, score) in [("manual", a), ("semi", b)] {
         println!("\n{mode} misses:");
         println!("{}", if score.misses.is_empty() { "  none".to_string() } else { score.misses.join("\n") });
+    }
+    if std::env::args().any(|arg| arg == "--forgetting") {
+        println!("\nForgetting: requests that routed home after one lesson and stopped after the next");
+        for mode in [Mode::Manual, Mode::Semi] {
+            let (forgotten, chances, lost) = forgetting(&models, &scratch.0, &cwd, &context, mode)?;
+            println!("{mode:<8} {forgotten} of {chances} ({})", pct(forgotten, chances).trim());
+            if !lost.is_empty() {
+                println!("{}", lost.join("\n"));
+            }
+        }
     }
     if let Some((requests, tokens, cost)) = models.system1.usage() {
         println!("\nSystem 1: {requests} requests, {tokens} input tokens, about ${cost:.4}");

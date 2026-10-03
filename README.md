@@ -28,7 +28,7 @@ Learning is writing to that database:
 
 | What happened | What is stored | Effect |
 | --- | --- | --- |
-| System 2 proposed a command and it ran, with exit 0 or a failure that was not the command's fault ([ADR 13](docs/adr/0013-learning-fixes.md)) | a new skill with the request as its first example, its values hidden; a command a skill already runs adds the phrasing to that skill instead | System 1 answers next time |
+| System 2 proposed a command and it ran, with exit 0 or a failure that was not the command's fault ([ADR 13](docs/adr/0013-learning-fixes.md)) | a new skill with the request as its first example, its values hidden, once System 1 has checked it; a command a skill already runs adds the phrasing to that skill instead | System 1 answers next time |
 | You said yes to "Run it?" | the phrasing, as an example of that skill | that phrasing becomes more confident |
 | You said no and typed the right command | a counter-example on the wrong skill, and the phrasing on the right one | it routes to your command next time |
 | You ran `jli teach` or `jli fix` | a phrasing, or a counter-example | same as above, by hand |
@@ -47,9 +47,12 @@ Set with `jli config mode <manual|semi|auto>`, `JLI_MODE`, or `--mode=`. The def
 | `semi` | the translator generalises what you teach | asks you to type the right command | nothing |
 | `auto` | the translator, from what happens | offers numbered alternatives; pick one or say what you expected | diagnoses it, and offers alternatives only if the command was wrong |
 
-**Translated rows are checked, not trusted.** After the translator writes a row, System 1 is asked
-to route your original phrase and up to eight phrasings that belong to other skills. The row is kept
-only if your phrase lands on it and none of the others do. It gets one retry with that feedback, and
+**Translated rows are checked, not trusted.** After the translator writes a row, and before it is
+stored, System 1 is asked to route your original phrase with the row in the matrix, then up to eight
+phrasings of the skills closest to it: those System 1 ranked just behind it, then those that share
+the most words. The row is kept only if your phrase lands on it, none of the others do, and none
+that routed home without it stops doing so. A skill the agent proposes gets the same check while
+its command runs. It gets one retry with that feedback, and
 then falls back to your raw phrase. Slots are kept only if filling them back in reproduces the exact
 command you taught.
 
@@ -71,6 +74,31 @@ The gain is entirely in commands that carry a value, such as a count, a file or 
 already generalises well for fixed commands. A run costs about 200 System 1 requests (about $0.012)
 and a dozen translator calls. Earlier runs, including the TypeScript prototype's, are in
 [ADR 6](docs/adr/0006-learning-modes.md).
+
+## Measuring the matrix
+
+The learning curve in `jli stats` counts a confident wrong route as a win. `jli eval` measures
+whether routes are right, from the brain's own evidence and with the real System 1:
+
+- every stored example is routed with itself held out of the matrix, and should come home;
+- every accepted request that was not declined or corrected later is routed again, and should
+  reach the skill that was accepted.
+
+Each phrasing comes **home**, is **stolen** by another skill, or **escalates** below the threshold.
+The report lists, per skill, the least confident phrasings, even those that came home, and who
+stole what. The number of System 1 calls and their price are printed before anything is spent,
+about $0.00006 a call. `jli stats` shows the trend, and how often a request was right the first
+time, with declined and corrected attempts counted.
+
+`jli eval --optimise` ranks skills by expected gain: how much each is used and how often the
+person accepted its routes, times how far its phrasings fall short of coming home. System 2 then
+rewrites the top rows. A rewrite is kept only if the measured score of the skill and its
+competitors rises and no other skill loses a phrasing. Nobody is asked: the measurement is the
+approval. Each kept change is recorded, and `jli eval undo` puts it back. With `-n` nothing at all
+is written. On a scratch brain of 16 skills on 2026-10-03, a measurement took 22 System 1 calls
+($0.0014). An optimisation run took 80 System 1 and 6 System 2 calls, kept one rewrite of six, and
+cut the steal rate from 9% to 5%: the phrasing it freed
+now escalates to the agent instead, so the share that came home stayed at 91%. See [ADR 16](docs/adr/0016-measuring-the-matrix.md).
 
 ## Confirmation
 
@@ -117,15 +145,39 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | `jli config mode <manual\|semi\|auto>` | set the learning mode |
 | `jli --json <request>` | machine-readable outcome with captured output, for agents |
 | `jli skills` | every skill, with learned phrasings and counter-examples |
-| `jli stats` | routing mix, latency, and the learning curve |
+| `jli stats` | routing mix, latency, the learning curve, how often routes were right first time, and the `jli eval` trend |
+| `jli eval [<label>] [--limit N]` | route every stored example with itself held out, and replay accepted requests; priced before it spends |
+| `jli eval --optimise` | the agent rewrites the weakest rows; a rewrite is kept only if the measurement improves |
+| `jli eval -n [--optimise]` | measure, and show the rewrites and their effect, but write nothing |
+| `jli eval undo [<label>]` | put back what the last optimisation changed |
 | `jli history` | recent requests and how each was routed |
 | `jli teach "<phrase>" -- <command>` | link a phrase to a command; repeat to add more phrasings |
 | `jli fix` | the last command run here was wrong: unlearn it and ask the agent |
 | `jli forget <label>` | delete a skill |
+| `jli shell-init [zsh\|bash\|fish]` | print the shell function that lets `cd`, `export` and `source` change your shell |
 | `jli --user-id=<id> …` | any command, as another user with their own skills, history and settings (also `JLI_USER_ID`) |
 | `jli share <label> --to <user>` | give another user a copy of one of your skills |
 
 The decision trace goes to stderr and the command's output to stdout, so `jli` composes in pipes.
+
+## Commands that change your shell
+
+jli runs commands in a shell of its own, so on its own a `cd` or an `export` would change nothing
+you can see. Install the shell function once:
+
+```sh
+eval "$(jli shell-init zsh)"        # in ~/.zshrc; bash: the same with bash, in ~/.bashrc
+jli shell-init fish | source        # in ~/.config/fish/config.fish
+```
+
+Then a step such as `cd`, `pushd`, `export`, `unset`, `source` or `alias`, and every step after it,
+is handed to your shell, which runs it once jli exits: `jli go to src` leaves you in `src`. jli
+passes it through a temp file, not stdout, so output still goes down a pipe, and the function
+returns jli's exit code, or the status of what your shell ran. A plain `cd` to a directory that does
+not exist fails in jli, with the shell's own message, before anything is handed over.
+Without the function such a step is not run and nothing is learned from it: jli says how to install
+the function and exits 3, and `--json` lists the steps in `callerShell` for an agent to run itself.
+See [ADR 14](docs/adr/0014-shell-integration.md).
 
 ## Slots
 
@@ -154,6 +206,13 @@ slot as `{name}` in the command, with its other names below it. See
 Anything not stated is filled by the cheapest method that works: a number in the request, a System 1
 `choice` among the real files or branches, the agent, and last the slot's default. See
 [ADR 11](docs/adr/0011-stated-arguments.md).
+
+A file value has a leading `~` and any `$NAME` or `${NAME}` expanded by jli before it is quoted, so
+`jli list dir=~/notes` runs `ls /Users/you/notes`, and the trace says
+`(from request, ~/notes expanded)`. Nothing is ever run to expand a value, an unset variable is left
+as written, and a text value such as a commit message is never expanded. A path named anywhere in
+the request, not only in the working directory, can be picked for a file slot. See
+[ADR 14](docs/adr/0014-shell-integration.md).
 
 What is learned is the shape of a request, not the instance: every value the command ran with is
 hidden in the stored phrasing wherever it appears as a whole word, so `how many lines are in
@@ -198,22 +257,25 @@ sees only the default user. See [ADR 15](docs/adr/0015-user-scope.md).
 | File | Role |
 | --- | --- |
 | `src/system1.rs` | builds the matrix from the database and asks Jev; the only module that uses `typesafe-jev` |
-| `src/system2.rs` | the agent: structured proposals, free-text slot filling, and naming an unknown argument's slot |
+| `src/system2.rs` | the agent: structured proposals, free-text slot filling, naming an unknown argument's slot, and rewriting a weak row |
 | `src/translator.rs` | turns a taught phrase and command into a general matrix row |
-| `src/learn.rs` | writes a row and verifies it against System 1, one thread per check |
+| `src/learn.rs` | writes a row once System 1 has verified it, and settles a skill the agent proposed |
+| `src/eval.rs` | measures the matrix against its own examples and history, optimises it, and checks a new row against its closest skills |
 | `src/suggest.rs` | auto mode: diagnoses a failure and offers alternatives |
 | `src/llm.rs` | the one HTTP call every language model request goes through |
 | `src/router.rs` | the loop: decide, escalate, confirm, run, write back |
 | `src/store.rs` | the brain: skills, events and settings per user in libSQL, behind a runtime that never leaves the module |
 | `src/args.rs` | reads the arguments a request states: `name=value`, labels and quoted text |
-| `src/slots.rs` | fills and shell-quotes `{slot}` values |
+| `src/slots.rs` | fills, expands and shell-quotes `{slot}` values |
+| `src/shell.rs` | the shell function, and which steps it must run in your shell |
 | `src/seed.rs` | the original hard-coded matrix, now only the seed for an empty brain |
-| `src/exec.rs` | runs the steps with `bash -c`, watching stderr in auto mode and for a new proposal |
+| `src/exec.rs` | runs the steps with `bash -c`, watching stderr in auto mode and for a new proposal, and tries builtins before they are handed over |
 | `src/cli.rs` | argument parsing, subcommands and the interactive session |
 | `src/ui.rs` | the trace on stderr, and the one owner of stdin |
 | `src/demo.rs` | the two-pass learning demo |
 | `src/tests.rs` | the router and learning loop, offline, against fake models and a scripted prompt |
-| `examples/bench-translator.rs` | manual versus semi on held-out paraphrases |
+| `src/tests/eval_tests.rs` | `jli eval`, the optimiser, undo, and the check a new row gets, offline |
+| `examples/bench-translator.rs` | manual versus semi on held-out paraphrases, and with `--forgetting` the forgetting rate |
 | `docs/adr/` | the design decisions, and the lessons and known gaps behind them |
 
 ## How it talks to the world

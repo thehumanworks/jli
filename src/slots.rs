@@ -46,6 +46,10 @@ pub struct Filled {
     pub aliases: Vec<(String, String)>,
     /// The request with its stated values hidden: what is learned as a phrasing.
     pub phrase: String,
+    /// File values that were expanded, as (slot, the value as written).
+    pub expanded: Vec<(String, String)>,
+    /// Variables a file value names that are not set, as (slot, variable). Left as written.
+    pub not_set: Vec<(String, String)>,
     pub ms_system1: u64,
     pub ms_system2: u64,
 }
@@ -158,6 +162,7 @@ pub fn fill_slots(
 
     // An argument the skill does not take stops the run, so no model is asked for the rest.
     if !filled.unmatched.is_empty() {
+        expand_files(&mut filled, skill.slots, context);
         return Ok(filled);
     }
 
@@ -166,7 +171,18 @@ pub fn fill_slots(
             continue;
         }
         if matches!(slot.kind, SlotKind::File | SlotKind::Branch) {
-            let options = if slot.kind == SlotKind::File { list_entries(&context.cwd) } else { list_branches(&context.cwd) };
+            let options = if slot.kind == SlotKind::File {
+                // The top level of the working directory, and any path the request names elsewhere.
+                let mut options = list_entries(&context.cwd);
+                for word in path_words(query) {
+                    if !options.contains(&word) {
+                        options.push(word);
+                    }
+                }
+                options
+            } else {
+                list_branches(&context.cwd)
+            };
             if !options.is_empty() {
                 let picked = models.system1.pick(query, &slot.description, &options)?;
                 filled.ms_system1 += picked.ms;
@@ -200,6 +216,8 @@ pub fn fill_slots(
             None => filled.missing.push(slot.name.clone()),
         }
     }
+    // After expansion, so the values are those of the command that is logged, which `jli fix` reads back.
+    expand_files(&mut filled, skill.slots, context);
     // Learn the shape of the request, not the instance: a value found in it by any means is hidden too.
     filled.phrase = shape(&filled.phrase, skill.steps, &render(skill.steps, &filled.values).join(" && "));
     Ok(filled)
@@ -222,6 +240,22 @@ pub fn learned_phrase(query: &str, steps: &[String], slots: &[Slot], command: Op
     match command {
         Some(command) => shape(&stated, steps, command),
         None => stated,
+    }
+}
+
+/// Expand `~` and `$NAME` in every file value, whoever found it. Text is left as written: a
+/// commit message that says `$5` means five dollars.
+fn expand_files(filled: &mut Filled, slots: &[Slot], context: &Context) {
+    for slot in slots.iter().filter(|slot| slot.kind == SlotKind::File) {
+        let Some(written) = filled.values.get(&slot.name).cloned() else { continue };
+        let expanded = expand_path(&written, &context.cwd, |name| std::env::var(name).ok());
+        for variable in expanded.not_set {
+            filled.not_set.push((slot.name.clone(), variable));
+        }
+        if expanded.value != written {
+            filled.values.insert(slot.name.clone(), expanded.value);
+            filled.expanded.push((slot.name.clone(), written));
+        }
     }
 }
 
@@ -263,8 +297,12 @@ fn parts(template: &str) -> Vec<Part<'_>> {
     out
 }
 
+/// A value as one word for bash and zsh. A leading `=` is quoted too: zsh would read `=name` as
+/// the path of the command `name` (ADR 14).
 fn shell_quote(value: &str) -> String {
-    let plain = !value.is_empty() && value.chars().all(|ch| ch.is_ascii_alphanumeric() || "_-.,/:=@%+".contains(ch));
+    let plain = !value.is_empty()
+        && !value.starts_with('=')
+        && value.chars().all(|ch| ch.is_ascii_alphanumeric() || "_-.,/:=@%+".contains(ch));
     if plain {
         value.to_string()
     } else {
@@ -272,8 +310,17 @@ fn shell_quote(value: &str) -> String {
     }
 }
 
-/// Substitute shell-quoted slot values into the step templates.
-pub fn render(steps: &[String], values: &HashMap<String, String>) -> Vec<String> {
+/// A value as one word for fish, whose single quotes give `\'` and `\\` a meaning that bash's do not.
+fn fish_quote(value: &str) -> String {
+    let plain = !value.is_empty() && value.chars().all(|ch| ch.is_ascii_alphanumeric() || "_-.,/:=@+".contains(ch));
+    if plain {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\\', r"\\").replace('\'', r"\'"))
+    }
+}
+
+fn render_with(steps: &[String], values: &HashMap<String, String>, quote: fn(&str) -> String) -> Vec<String> {
     steps
         .iter()
         .map(|step| {
@@ -282,13 +329,114 @@ pub fn render(steps: &[String], values: &HashMap<String, String>) -> Vec<String>
                 .map(|part| match part {
                     Part::Text(text) => text.to_string(),
                     Part::Slot(name) => match values.get(name) {
-                        Some(value) => shell_quote(value),
+                        Some(value) => quote(value),
                         None => format!("{{{name}}}"),
                     },
                 })
                 .collect()
         })
         .collect()
+}
+
+/// Substitute shell-quoted slot values into the step templates.
+pub fn render(steps: &[String], values: &HashMap<String, String>) -> Vec<String> {
+    render_with(steps, values, shell_quote)
+}
+
+/// The same, with values quoted for fish, for steps handed to a fish shell.
+pub fn render_fish(steps: &[String], values: &HashMap<String, String>) -> Vec<String> {
+    render_with(steps, values, fish_quote)
+}
+
+/// A path value after `~` and `$NAME` have been read from jli's own environment.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Expanded {
+    pub value: String,
+    /// Variables the value names that are unset or empty. They are left as written.
+    pub not_set: Vec<String>,
+}
+
+fn is_name_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || ch == '_'
+}
+
+fn is_name_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+/// Expand a path the way a shell would, but only these: a leading `~` or `~/` to `$HOME`, and
+/// `$NAME` or `${NAME}` to that variable. Nothing is ever run: `$(…)`, backticks, `${NAME:-x}`,
+/// `$1` and `$$` stay as written, as does a variable that is unset or empty, and a value that
+/// names an existing path just as it is written. The result is quoted like any value (ADR 7).
+pub fn expand_path(value: &str, cwd: &std::path::Path, env: impl Fn(&str) -> Option<String>) -> Expanded {
+    let mut expanded = Expanded { value: value.to_string(), not_set: vec![] };
+    if !value.contains(['~', '$']) || cwd.join(value).symlink_metadata().is_ok() {
+        return expanded;
+    }
+    let lookup = |name: &str| env(name).filter(|found| !found.is_empty());
+    let mut out = String::new();
+    let mut rest = value;
+    if value == "~" || value.starts_with("~/") {
+        match lookup("HOME") {
+            Some(home) => {
+                out.push_str(&home);
+                rest = &value[1..];
+            }
+            None => expanded.not_set.push("HOME".into()),
+        }
+    }
+    let mut chars = rest.char_indices().peekable();
+    while let Some((at, ch)) = chars.next() {
+        if ch != '$' {
+            out.push(ch);
+            continue;
+        }
+        let after = &rest[at + 1..];
+        let (name, written) = if let Some(braced) = after.strip_prefix('{') {
+            match braced.find('}') {
+                Some(close) => (&braced[..close], &rest[at..at + close + 3]),
+                None => ("", ""),
+            }
+        } else {
+            let len = after.find(|ch: char| !is_name_char(ch)).unwrap_or(after.len());
+            (&after[..len], &rest[at..at + 1 + len])
+        };
+        let valid = name.starts_with(is_name_start) && name.chars().all(is_name_char);
+        if !valid {
+            out.push('$');
+            continue;
+        }
+        match lookup(name) {
+            Some(found) => out.push_str(&found),
+            None => {
+                out.push_str(written);
+                if !expanded.not_set.iter().any(|known| known == name) {
+                    expanded.not_set.push(name.to_string());
+                }
+            }
+        }
+        for _ in 1..written.chars().count() {
+            chars.next();
+        }
+    }
+    expanded.value = out;
+    expanded
+}
+
+/// Words in the request that are paths outside the working directory's top level, such as
+/// `~/notes/todo.md` or `src/main.rs`, so a file slot can be given one of them.
+fn path_words(query: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for word in query.split_whitespace() {
+        let word = word.trim_matches(['"', '\'', '`']).trim_end_matches([',', ';', ':', '!', '?', ')']);
+        let variable =
+            word.strip_prefix('$').is_some_and(|name| name.starts_with(|ch: char| is_name_start(ch) || ch == '{'));
+        let pathlike = word.contains('/') || word == "~" || word.starts_with("~/") || variable;
+        if pathlike && !word.contains("://") && !word.contains('=') && !found.iter().any(|seen| seen == word) {
+            found.push(word.to_string());
+        }
+    }
+    found
 }
 
 /// A literal piece of a template as a pattern: escaped, with any run of whitespace matching any run.
@@ -501,5 +649,77 @@ mod tests {
             aliases: vec![],
         }];
         assert_eq!(undeclared(&steps(&["cp {file} {dest}", "ls {dest} ${HOME}"]), &slots), ["dest"]);
+    }
+
+    fn env(name: &str) -> Option<String> {
+        match name {
+            "HOME" => Some("/home/ada".into()),
+            "PROJECT" => Some("jli".into()),
+            "SPACED" => Some("my notes; rm -rf /".into()),
+            "EMPTY" => Some(String::new()),
+            _ => None,
+        }
+    }
+
+    fn expand(value: &str) -> (String, Vec<String>) {
+        let expanded = expand_path(value, std::path::Path::new("/nonexistent-cwd"), env);
+        (expanded.value, expanded.not_set)
+    }
+
+    #[test]
+    fn a_path_expands_home_and_variables_and_nothing_else() {
+        assert_eq!(expand("~").0, "/home/ada");
+        assert_eq!(expand("~/notes").0, "/home/ada/notes");
+        assert_eq!(expand("$HOME/src").0, "/home/ada/src");
+        assert_eq!(expand("${HOME}/src/$PROJECT").0, "/home/ada/src/jli");
+        assert_eq!(expand("a/${PROJECT}b").0, "a/jlib");
+        assert_eq!(expand("~ada/notes").0, "~ada/notes", "another user's home is not looked up");
+        assert_eq!(expand("notes/~").0, "notes/~", "only a leading ~");
+        for literal in ["$(rm -rf ~)", "`id`", "${HOME:-x}", "$1", "$$", "$", "a$", "${", "${1}", "x$?y"] {
+            assert_eq!(expand(literal).0, literal, "{literal}");
+        }
+        assert_eq!(expand("$NOPE/x"), ("$NOPE/x".into(), vec!["NOPE".into()]), "an unset variable is left as written");
+        assert_eq!(expand("$EMPTY/build"), ("$EMPTY/build".into(), vec!["EMPTY".into()]), "never /build");
+        let no_home = expand_path("~/x", std::path::Path::new("/nonexistent-cwd"), |_| None);
+        assert_eq!((no_home.value.as_str(), no_home.not_set), ("~/x", vec!["HOME".to_string()]));
+    }
+
+    #[test]
+    fn an_expanded_value_is_still_quoted() {
+        let (value, _) = expand("$SPACED");
+        let rendered = render(&steps(&["ls {dir}"]), &values(&[("dir", &value)]));
+        assert_eq!(rendered, ["ls 'my notes; rm -rf /'"], "a variable's value cannot inject either");
+        assert_eq!(render(&steps(&["ls {dir}"]), &values(&[("dir", "/home/ada/notes")])), ["ls /home/ada/notes"]);
+    }
+
+    #[test]
+    fn a_value_that_names_an_existing_path_is_kept() {
+        let dir = std::env::temp_dir().join(format!("jli-expand-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("$PROJECT")).unwrap();
+        assert_eq!(expand_path("$PROJECT", &dir, env).value, "$PROJECT");
+        assert_eq!(expand_path("$PROJECT/x", &dir, env).value, "jli/x");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quoting_holds_in_zsh_and_fish_too() {
+        let one = |value: &str| values(&[("v", value)]);
+        let template = steps(&["echo {v}"]);
+        assert_eq!(render(&template, &one("=ls")), ["echo '=ls'"], "zsh expands a leading =");
+        assert_eq!(render(&template, &one("a=b")), ["echo a=b"]);
+        assert_eq!(render_fish(&template, &one(r"a\b")), [r"echo 'a\\b'"]);
+        assert_eq!(render_fish(&template, &one("it's")), [r"echo 'it\'s'"]);
+        assert_eq!(render_fish(&template, &one(r"end\")), [r"echo 'end\\'"]);
+        assert_eq!(render_fish(&template, &one("%self")), ["echo '%self'"]);
+        assert_eq!(render_fish(&template, &one("/tmp/a.b")), ["echo /tmp/a.b"]);
+    }
+
+    #[test]
+    fn paths_in_the_request_are_found() {
+        assert_eq!(
+            path_words("count the lines of ~/notes/n.txt, and src/main.rs; then ~ and $HOME/x"),
+            ["~/notes/n.txt", "src/main.rs", "~", "$HOME/x"]
+        );
+        assert!(path_words("open https://x.io/a and dir=src/a, it costs $5 or ~5 notes.txt").is_empty());
     }
 }

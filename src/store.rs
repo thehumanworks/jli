@@ -740,6 +740,23 @@ impl Brain {
         self.set_meta(&self.scope, &format!("setting:{key}"), value, "DO UPDATE SET value = excluded.value")
     }
 
+    /// Write a `meta` entry for this brain's user, replacing the value under the same key.
+    pub fn put_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.set_meta(&self.scope, key, value, "DO UPDATE SET value = excluded.value")
+    }
+
+    /// Every `meta` entry of this brain's user whose key starts with `prefix`, in key order.
+    pub fn meta_with_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        let sql = if self.scope.is_legacy() {
+            "SELECT key, value FROM meta WHERE substr(key, 1, length(?)) = ? ORDER BY key"
+        } else {
+            "SELECT key, value FROM scoped_meta WHERE user_id = ? AND project_id = ? AND substr(key, 1, length(?)) = ? ORDER BY key"
+        };
+        self.query(sql, self.scope.args(vec![prefix.into(), prefix.into()]), |row| {
+            (text(row.get_value(0).unwrap_or(Value::Null)), text(row.get_value(1).unwrap_or(Value::Null)))
+        })
+    }
+
     pub fn forget(&self, label: &str) -> Result<bool> {
         let (table, rows) = (self.scope.skills(), self.scope.rows());
         Ok(self.execute(&format!("DELETE FROM {table} WHERE {rows} AND label = ?"), self.scope.args(vec![label.into()]))?
@@ -824,6 +841,10 @@ impl Brain {
     /// Remember that `phrase` does NOT mean `label`.
     pub fn add_counter_example(&self, label: &str, phrase: &str) -> Result<bool> {
         self.edit_list(label, ListColumn::CounterExamples, |list| with(list, phrase))
+    }
+
+    pub fn remove_counter_example(&self, label: &str, phrase: &str) -> Result<bool> {
+        self.edit_list(label, ListColumn::CounterExamples, |list| without(list, phrase))
     }
 
     /// Remember that `alias` is another name for a slot of `label`. Returns false if nothing changed.

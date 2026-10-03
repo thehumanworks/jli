@@ -6,12 +6,14 @@ use anyhow::{anyhow, Result};
 
 use crate::args;
 use crate::demo::run_demo;
+use crate::eval;
 use crate::learn::{learn_phrase, LearnInput};
 use crate::plan::{self, PlanRecord, RunFlags};
 use crate::router::{
     is_another_command, route, split_steps, teach_instead, unlearn_phrase, Outcome, RouteOptions, DEFAULT_THRESHOLD,
     DRY_RUN, DRY_RUN_CODE,
 };
+use crate::shell::{init_script, HandOff, Shell};
 use crate::slots::learned_phrase;
 use crate::store::{user_id, Brain, BrainConfig, Correction, Shared, DEFAULT_USER};
 use crate::types::{coded, error_code, BrainEvent, Mode, Path, Risk, CONFIGURATION, DEFAULT_MODE, USAGE};
@@ -53,8 +55,17 @@ fn help() -> String {
   jli config mode <manual|semi|auto>   who does the teaching (default semi)
   jli fix                              the last command run here was wrong: unlearn it and try again
   jli forget <label>                   delete a skill
+  jli eval [<label>] [--limit N]       route every stored example with itself held out, and replay accepted
+                                       requests: how often each skill comes home (System 1 calls, priced first)
+  jli eval --optimise                  the agent rewrites the weakest rows; a rewrite is kept only if the
+                                       measurement improves (--max-skills=3, --max-calls=400)
+  jli eval -n [--optimise]             measure, and show the rewrites and their effect, but write nothing:
+                                       no summary is stored and no rewrite is applied
+  jli eval undo [<label>]              put back what the last optimisation changed
   jli share <label> --to <user>        give another user a copy of one of your skills
   jli sync                             sync the local replica with the cloud brain
+  jli shell-init [zsh|bash|fish]       the shell function that lets jli cd and export in your shell:
+                                       eval \"$(jli shell-init zsh)\" in ~/.zshrc
   jli demo                             watch it learn in a sandbox (about 12 API calls)
 
 {}
@@ -315,6 +326,7 @@ impl App {
             agent_only: flags.agent,
             rejected,
             clarification,
+            hand_off: HandOff::from_env(env),
             ..RouteOptions::new(cwd, threshold, resolve_mode(&self.brain, flags).map_err(configuration)?)
         };
         let outcome = route(&self.brain, &self.models, query, &ui, &mut self.terminal, &options)?;
@@ -448,6 +460,7 @@ impl App {
             .collect();
         say(format!("\n{} {}", c::bold("Learning curve"), c::dim("share of requests answered instantly, oldest to newest")));
         say(format!("  {}  {}% now", c::cyan(sparkline(&curve)), (curve.last().copied().unwrap_or(0.0) * 100.0).round()));
+        self.show_correctness()?;
 
         let mut seen = HashSet::new();
         let hosts: Vec<&str> = skills
@@ -457,6 +470,38 @@ impl App {
             .filter(|host| !host.is_empty() && seen.insert(*host))
             .collect();
         say(format!("\n{} {}", c::bold("Hosts"), hosts.join(", ")));
+        Ok(())
+    }
+
+    /// Whether the routes were right, beside how fast they were: the learning curve above counts a
+    /// confident wrong route as a win. Declined and corrected attempts stay in the count.
+    fn show_correctness(&self) -> Result<()> {
+        let mut events = self.brain.events(500)?;
+        events.reverse();
+        let tally = eval::correctness(&events);
+        let of = |part: usize, whole: usize| format!("{}%", (100.0 * part as f64 / whole.max(1) as f64).round());
+        say(format!("\n{} {}", c::bold("Correctness"), c::dim(format!("over {} routed requests", tally.requests))));
+        let rows = [
+            ("right the first time", tally.first_try),
+            ("declined or corrected", tally.turned_down),
+            ("ran and failed", tally.failed),
+            ("never judged", tally.blocked),
+        ];
+        for (name, count) in rows {
+            say(format!("  {name:<22} {} {count:>4}", bar(count as f64 / tally.requests.max(1) as f64)));
+        }
+        if tally.system1_routes > 0 {
+            say(format!(
+                "  {} of System 1's {} routes still called a language model ({})",
+                tally.system1_with_model,
+                tally.system1_routes,
+                of(tally.system1_with_model, tally.system1_routes)
+            ));
+        }
+        say(format!("\n{} {}", c::bold("Evaluation"), c::dim("share of stored phrasings that route home, from jli eval")));
+        for line in eval::render_trend(&eval::trend(&self.brain)?) {
+            say(line);
+        }
         Ok(())
     }
 
@@ -690,6 +735,69 @@ impl App {
         })
     }
 
+    /// `jli eval …`. Returns None when the words do not fit its shape, so they are a request instead.
+    fn measure(&self, args: &[String], flags: &Flags) -> Result<Option<i32>> {
+        // The trace and the price go to stderr even with --json: stdout is the report alone.
+        let ui = Ui::new(!flags.quiet);
+        if args.first().map(String::as_str) == Some("undo") {
+            let label = match args {
+                [_] => None,
+                [_, label] => Some(label.as_str()),
+                _ => return Ok(None),
+            };
+            let undone = eval::undo(&self.brain, label, flags.dry_run)?;
+            if flags.json {
+                say(serde_json::to_string_pretty(&undone)?);
+                return Ok(Some(0));
+            }
+            let verb = if undone.dry_run { "Would put back" } else { "Put back" };
+            say(format!("{verb} the scenario of {}: {}", c::bold(&undone.label), undone.scenario));
+            for example in &undone.examples {
+                say(format!("  {} \"{example}\" {}", c::green("+"), c::dim("as an example again")));
+            }
+            for ce in &undone.counter_examples {
+                say(format!(
+                    "  {} \"{}\" {}",
+                    c::red("−"),
+                    ce.phrase,
+                    c::dim(format!("no longer a counter-example of {}", ce.label))
+                ));
+            }
+            return Ok(Some(0));
+        }
+
+        let number = |text: &str| text.trim().parse::<usize>().ok().filter(|n| *n > 0);
+        let (mut only, mut limit, mut optimise) = (None, None, false);
+        let mut bounds = eval::Bounds { max_skills: 3, max_calls: 400 };
+        let mut words = args.iter();
+        while let Some(word) = words.next() {
+            let value = |prefix: &str| word.strip_prefix(prefix).and_then(number);
+            match word.as_str() {
+                "--optimise" | "--optimize" => optimise = true,
+                "--limit" => match words.next().and_then(|next| number(next)) {
+                    Some(n) => limit = Some(n),
+                    None => return Ok(None),
+                },
+                _ if value("--limit=").is_some() => limit = value("--limit="),
+                _ if value("--max-skills=").is_some() => bounds.max_skills = value("--max-skills=").unwrap_or(3),
+                _ if value("--max-calls=").is_some() => bounds.max_calls = value("--max-calls=").unwrap_or(400),
+                label if only.is_none() && self.brain.skill(label)?.is_some() => only = Some(label.to_string()),
+                _ => return Ok(None),
+            }
+        }
+        let options = eval::EvalOptions {
+            cwd: cwd()?,
+            threshold: resolve_threshold(&self.brain, flags)?,
+            only,
+            limit,
+            dry_run: flags.dry_run,
+            optimise: optimise.then_some(bounds),
+        };
+        let report = eval::run(&self.brain, &self.models, &options, &ui)?;
+        say(if flags.json { serde_json::to_string_pretty(&report)? } else { eval::render(&report) });
+        Ok(Some(0))
+    }
+
     fn repl(&mut self, flags: &Flags) -> Result<()> {
         eprintln!(
             "{} {}",
@@ -807,6 +915,11 @@ impl App {
             say(if self.brain.forget(label)? { format!("Forgot {label}.") } else { format!("No skill called {label}.") });
             return Ok(0);
         }
+        if first == "eval" && rest.is_empty() {
+            if let Some(code) = self.measure(others, flags)? {
+                return Ok(code);
+            }
+        }
         if first == "teach" {
             if others.is_empty() || rest.is_empty() {
                 say("Usage: jli teach \"<phrase>\" [--risk=safe|modifies|destructive] -- <command>");
@@ -830,6 +943,21 @@ fn path_tag(path: Path) -> String {
     }
 }
 
+/// Print the shell function for the named shell, or for `$SHELL`. Needs no brain and no keys.
+fn shell_init(name: Option<&str>) -> Result<i32> {
+    let names = || Shell::ALL.map(Shell::as_str).join(", ");
+    let shell = match name {
+        Some(name) => {
+            Shell::parse(name).ok_or_else(|| anyhow!("no shell function for {name}: there is one for {}", names()))?
+        }
+        None => Shell::of_user().ok_or_else(|| {
+            anyhow!("cannot tell your shell from $SHELL; name it: jli shell-init <{}>", names().replace(", ", "|"))
+        })?,
+    };
+    say(init_script(shell).trim_end());
+    Ok(0)
+}
+
 fn run(argv: &[String]) -> Result<i32> {
     let Parsed { mut flags, words, rest } = parse(argv).map_err(|error| coded(USAGE, format!("{error:#}")))?;
     flags.yes |= switched_on(env, "JLI_YES");
@@ -842,6 +970,9 @@ fn run(argv: &[String]) -> Result<i32> {
     let user = resolve_user(&flags, env).map_err(configuration)?;
     if first == Some("demo") && words.len() == 1 {
         return run_demo(&user);
+    }
+    if first == Some("shell-init") && words.len() <= 2 && rest.is_empty() {
+        return shell_init(words.get(1).map(String::as_str));
     }
 
     let mut app = App {
