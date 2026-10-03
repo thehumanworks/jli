@@ -847,6 +847,9 @@ impl Brain {
     /// Insert a skill, or change what an existing label runs. Re-teaching a label keeps
     /// what was learned about it: examples, counter-examples and uses are never replaced,
     /// and a slot that keeps its name keeps its aliases.
+    ///
+    /// Inside a project, a label only the user's global skills hold is changed there, like an
+    /// alias: what a skill runs and when it applies is the skill's, not a lesson (ADR 17).
     pub fn add_skill(&self, skill: &NewSkill) -> Result<()> {
         let mut skill = skill.clone();
         for known in self.skill(&skill.label)?.map(|known| known.slots).unwrap_or_default() {
@@ -854,8 +857,12 @@ impl Brain {
                 add_alias(&mut skill.slots, &known.name, alias);
             }
         }
+        let global = self.scope.base();
+        let only_global = self.scope.has_project()
+            && self.row(&self.scope, &skill.label)?.is_none()
+            && self.row(&global, &skill.label)?.is_some();
         self.insert_skill(
-            &self.scope,
+            if only_global { &global } else { &self.scope },
             &skill,
             "DO UPDATE SET steps = excluded.steps, scenario = excluded.scenario, slots = excluded.slots, risk = excluded.risk",
         )?;
@@ -2066,8 +2073,13 @@ mod tests {
         assert_eq!(shop.learn_command("size of it", &["du  -sh".into()], Risk::Safe).unwrap().0, "du-sh-x");
         assert_eq!(shop.skill("du-sh").unwrap().unwrap().steps, ["du -sh ."]);
 
-        // A clash that happens anyway, by an upsert or an older jli, is won by the project.
-        shop.add_skill(&new_skill("list-files", "ls -1", &[])).unwrap();
+        // Re-teaching a global skill from inside a project changes the global row, as an alias would.
+        shop.add_skill(&new_skill("list-files-with-sizes", "ls -lhS", &[])).unwrap();
+        assert_eq!(global.skill("list-files-with-sizes").unwrap().unwrap().steps, ["ls -lhS"]);
+        assert!(shop.project_skills().unwrap().iter().all(|skill| skill.label != "list-files-with-sizes"));
+
+        // A clash that happens anyway, by another writer or an older jli, is won by the project.
+        shop.add_skill_if_missing(&new_skill("list-files", "ls -1", &[])).unwrap();
         assert_eq!(shop.skill("list-files").unwrap().unwrap().steps, ["ls -1"]);
         assert_eq!(shop.skills().unwrap().iter().filter(|skill| skill.label == "list-files").count(), 1);
         assert_eq!(global.skill("list-files").unwrap().unwrap().steps, ["ls"]);
