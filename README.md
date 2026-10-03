@@ -117,6 +117,17 @@ now escalates to the agent instead, so the share that came home stayed at 91%. S
 Answer no and it asks what it should have run: type the command, type `?` to ask the agent, or
 press enter to skip.
 
+`-q`, `--quiet` or `JLI_QUIET=1` hides the decision trace, System 1's table with it, but a question
+still shows what it asks about: the command and its risk before "Run it?", the numbered options
+before "Pick a number". Warnings stay, so a quiet run that does nothing says why. `--json` hides the
+warnings too, since its outcome says the same. See [ADR 27](docs/adr/0027-quiet.md).
+
+```
+$ JLI_QUIET=1 jli list the files here
+→ ls  risk: safe
+? Run it? [Y/n]
+```
+
 System 1's pick is used when its confidence reaches the threshold, 0.5 by default. Below that the
 agent is asked. Set the threshold with `jli config confidence 0.7` (stored in the brain, so shared
 across hosts), `JLI_THRESHOLD=0.7` (`JLI_CONFIDENCE` also works), or `--confidence=0.7` for one run.
@@ -145,14 +156,17 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | Command | What it does |
 | --- | --- |
 | `jli <request>` | route, run, learn |
+| `jli <command> --help` | that command's usage and the options that matter to it, with no brain opened and no model asked (also `-h`, `jli help <command>`); `jli --help` lists everything. Only before `--`: after it, `--help` is the command's |
 | `jli -n <request>` | dry run: show the command, execute and learn nothing, and keep it as a plan for `jli run` |
 | `jli -y <request>` | run without asking; never approves destructive commands (also `--yes`, `JLI_YES=1`) |
 | `jli -Y <request>` | run without asking, destructive commands included (also `--yolo`, `JLI_YOLO=1`) |
+| `jli -q <request>` | hide the decision trace; a question still shows what it asks about (also `--quiet`, `JLI_QUIET=1`) |
 | `jli config confidence <0..1>` | set the confidence threshold |
 | `jli config mode <manual\|semi\|auto>` | set the learning mode |
 | `jli --json <request>` | machine-readable outcome with captured output, for agents; an error is one JSON object too |
 | `jli run <planId> [<planId> …] [name=value …]` | run stored plans exactly as shown, in order, with no model call; stop at the first that fails |
 | `jli skills` | every skill, with learned phrasings and counter-examples |
+| `jli skills --project` | only the project's own skills, not the global ones |
 | `jli stats` | routing mix, latency, the learning curve, how often routes were right first time, and the `jli eval` trend |
 | `jli eval [<label>] [--limit N]` | route every stored example with itself held out, and replay accepted requests; priced before it spends |
 | `jli eval --optimise` | the agent rewrites the weakest rows; a rewrite is kept only if the measurement improves, and inside a project only for that project |
@@ -162,15 +176,17 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | `jli teach "<phrase>" -- <command>` | link a phrase to a command; repeat to add more phrasings |
 | `jli teach --global "<phrase>" -- <command>` | the same, from inside a project, for every project |
 | `jli fix` | the last command run here was wrong: unlearn it and ask the agent |
-| `jli fix <eventId>` | the same for one of your events, from any directory (an event made in a project, from inside that project) |
+| `jli fix <eventId>` | the same for one of your events, from any directory (an event made in a project, from inside that project or with `--project=<id>`) |
 | `jli fix <eventId> -- <command>` | that was wrong, this is right: learn it as a "no" and the command at the prompt would, and return a plan of it (`--run` runs it) |
 | `jli fix <eventId> --expected "<words>"` | unlearn it and ask the agent with what you expected; returns a plan (`--run` runs it) |
 | `jli forget <label>` | delete a skill; inside a project only the project's own, `--global` for a global one |
 | `jli forget-phrase <label> "<phrase>"` | take one phrasing back from a skill and keep it as a counter-example, so it is not learned straight back; inside a project, for a global skill, in that project only (`--global` for every project) |
 | `jli alias <label> <slot> <name>` | give a slot another name for `name=value`; `--remove` takes one away. Inside a project an alias of a global skill holds in every project; `--global` reaches a global skill that a project skill of the same label hides |
-| `jli slot <label> <slot> --default=<value>` | the value a slot takes when the request names none; also `--optional` or `--required`, `--flag=<flag>`, `--choice=<value>=<text>` (repeat; `--no-choices`) and `--kind=`. Written where `jli alias` writes |
-| `jli project` | the project this directory is in, from the nearest `.jlirc`, and how many skills are its own |
+| `jli slot <label> <slot> --default=<value>` | the value a slot takes when the request names none; also `--optional` or `--required`, `--flag=<flag>`, `--choice=` and `--kind=`. Written where `jli alias` writes |
+| `jli slot <label> <slot> --choice=release --choice=debug` | the only values a slot takes, each put in the command as its own name; `--choice=release=--release` puts other text, `--choice=debug=` nothing, and `--no-choices` takes them away |
+| `jli project` | the project this directory is in, from the nearest `.jlirc` (or the one `--project` names), and how many skills are its own |
 | `jli project init [<id>]` | make this directory a project: what jli learns here stays with it |
+| `jli --project=<id> …` | any command, in project `<id>`, as if run in one of its directories (also `--project <id>`); a bare `--project` is the project of this directory's `.jlirc` |
 | `jli generalize [<label>]` | the agent proposes how to make project skills global; each is written only once you approve (`--all-projects`, `--approve-all`, `-n`) |
 | `jli shell-init [zsh\|bash\|fish]` | print the shell function that lets `cd`, `export` and `source` change your shell |
 | `jli --user-id=<id> …` | any command, as another user with their own skills, history and settings (also `JLI_USER_ID`) |
@@ -280,9 +296,17 @@ job without it. A model never leaves out a value that has no flag before it, nev
 slot a default, and never writes choices: those are yours.
 
 `jli slot` sets them. A default is what an unsaid value means, and it wins over leaving the slot out.
-Choices are the only values a slot takes, each with the text it puts in the command, written as you
-wrote it and never quoted. An empty text puts nothing there. For Cargo's profiles, teach the command
-with a placeholder and give it choices:
+Choices are the only values a slot takes. A choice puts its own name in the command, so for a skill
+that runs `cargo install --path . --profile {profile}`:
+
+```sh
+jli slot install-app profile --choice=release --choice=dev --default=release
+```
+
+When the command needs other text than the word you say, write that text after a second `=`. It is
+put in the command as you wrote it and never quoted, and an empty text puts nothing there. For
+`cargo build`, `release` is `--release` and `debug` is nothing, so teach the command with a
+placeholder and give it choices:
 
 ```sh
 jli --mode=manual teach "build the app" -- 'cargo build {profile}'
@@ -296,7 +320,8 @@ jli slot list-largest-files count --default=5
 
 A choice is found by name (`profile=debug`), as a label, or as a word of its own in the request ("a
 debug build"). Each setting is written with `=`, so `--flag=-n` stays one word. `jli skills` shows
-what each slot has: `{profile}: release → --release, debug → nothing; default release`. An older jli
+what each slot has: `{profile}: release → --release, debug → nothing; default release`, and a choice
+that puts its own name in the command as that name alone: `{profile}: release, dev; default release`. An older jli
 reads a slot with choices as a plain one, and writes `cargo build release`. See
 [ADR 24](docs/adr/0024-optional-slots.md).
 
@@ -360,9 +385,9 @@ jli generalize                       # the agent proposes which project skills c
 ```
 
 A project is named by the id in the nearest `.jlirc` at or above the working directory (up to
-`$HOME`), never by a path, so every checkout is the same project. Inside one, System 1 sees the
-project's skills and your global ones together, and a project skill wins a label both hold. A new
-skill is the project's; a phrasing or a counter-example for a global skill is kept as the project's
+`$HOME`), or by `--project`, never by a path, so every checkout is the same project. Inside one,
+System 1 sees the project's skills and your global ones together, and a project skill wins a label
+both hold. A new skill is the project's; a phrasing or a counter-example for a global skill is kept as the project's
 own lesson about it, so correcting `cargo test` to `npm test` in one project never reaches another.
 A scenario `jli eval --optimise` rewrites there for a global skill is kept as the project's own too,
 and `jli skills` tags it `scenario rewritten here`.
@@ -370,8 +395,25 @@ and `jli skills` tags it `scenario rewritten here`.
 yours; history, stats, and the event and plan ids that `jli fix` and `jli run` take are the
 project's. `jli generalize` checks each proposal with System 1 in
 the project, among the global skills and against your other projects, and writes it only when you
-say yes. Without a `.jlirc` nothing changes. See [ADR 17](docs/adr/0017-project-scope.md) and
+say yes. Without a `.jlirc` or `--project` nothing changes. See [ADR 17](docs/adr/0017-project-scope.md) and
 [ADR 22](docs/adr/0022-project-scenarios.md).
+
+`--project=<id>`, or `--project <id>`, runs any command as if from a directory of that project,
+wherever you are, so a project can be reached without a checkout of it:
+
+```sh
+jli skills --project=shop-api              # only that project's own skills, no global ones
+jli teach --project=shop-api "run the tests" -- cargo test   # kept for shop-api
+jli --project=shop-api -n start the app    # routed against shop-api's skills and your global ones
+jli skills --project                       # on its own: this directory's project, from its .jlirc
+```
+
+`--project` on its own outside a project is an error, and so is an id that breaks the `.jlirc` rule.
+In the space form the id is the next word unless it starts with `-`, so `jli --project deploy the
+app` means a project called `deploy`: put `--project` last, or write `--project=<id>`. A project jli
+has nothing for yet gets one line on stderr, `jli has nothing for project shop-ap yet.`, with the
+projects it does know, in case the id was mistyped; the command still runs. `jli project init` takes
+no `--project`. See [ADR 26](docs/adr/0026-project-flag.md).
 
 ## Layout
 
@@ -396,7 +438,8 @@ say yes. Without a `.jlirc` nothing changes. See [ADR 17](docs/adr/0017-project-
 | `src/seed.rs` | the original hard-coded matrix, now only the seed for an empty brain |
 | `src/exec.rs` | runs the steps with `bash -c`, watching stderr in auto mode and for a new proposal, tries builtins before they are handed over, and reads the process table to find the shell jli was started from |
 | `src/cli.rs` | argument parsing, subcommands, the interactive session, and errors as JSON |
-| `src/ui.rs` | the trace on stderr, and the one owner of stdin |
+| `src/help.rs` | the help, written once as a table of commands, options and variables, and which help a command line asks for |
+| `src/ui.rs` | the trace and its warnings on stderr, and the one owner of stdin, which shows each question after what it asks about |
 | `src/demo.rs` | the two-pass learning demo |
 | `src/tests.rs` | the router and learning loop, offline, against fake models and a scripted prompt |
 | `src/tests/eval_tests.rs` | `jli eval`, the optimiser, undo, and the check a new row gets, offline |

@@ -2,7 +2,9 @@
 
 - Status: accepted; superseded in part by [ADR 22](0022-project-scenarios.md), which keeps a
   scenario that `jli eval --optimise` rewrites inside a project for that project, instead of writing
-  the global row
+  the global row; and by [ADR 26](0026-project-flag.md), under which `--project` names the project
+  from any directory instead of the nearest `.jlirc`, and `jli skills --project` lists only the
+  project's own skills
 - Date: 2026-10-03
 - Origin: the Rust version
 - Supersedes in part: [ADR 15](0015-user-scope.md), on `project_id` (now set, from a `.jlirc`), on

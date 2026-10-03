@@ -22,7 +22,7 @@ use crate::system1::Decision;
 use crate::system2::{propose, Proposal, ProposalKind, ProposeInput, Rejected};
 use crate::types::error_code;
 use crate::types::{add_alias, Mode, Origin, Path, Risk, Skill, Slot, SlotKind};
-use crate::ui::{c, fixed, Prompt, Ui};
+use crate::ui::{c, command_lines, fixed, Prompt, Ui};
 use crate::Models;
 
 /// Default for the confidence System 1 needs before its pick is used. Configurable per user.
@@ -750,7 +750,8 @@ impl Route<'_> {
         // ── Permission: one question, every time, unless --yes or --yolo ───────────────────
         let destructive = plan.risk == Risk::Destructive;
         let asked = !(options.yolo || (options.yes && !destructive));
-        let approved = if asked { prompt.confirm("Run it?") } else { Some(true) };
+        let about = ui.about(command_lines(&self.outcome.commands, plan.risk));
+        let approved = if asked { prompt.confirm(&about, "Run it?") } else { Some(true) };
         let Some(approved) = approved else {
             self.outcome.block(
                 if destructive { "destructive commands need an interactive yes or --yolo" } else { "needs confirmation" },
@@ -805,14 +806,9 @@ impl Route<'_> {
             let failure = Failure { exit_code: result.exit_code, stderr: result.stderr.clone() };
             if let Some(diagnosis) = self.diagnose(Some(failure)) {
                 self.outcome.diagnosis = Some(diagnosis.clone());
-                let meaning = match diagnosis.verdict {
-                    Verdict::WrongCommand => "this was the wrong command for the request",
-                    Verdict::Environment => "the command fits the request; the problem is where it ran",
-                    Verdict::WrongValue => "right command, wrong value",
-                    Verdict::NotApplicable => "no verdict",
-                };
-                ui.line(format!("{} {}", c::yellow("◇ diagnosis"), c::dim(format!("· {meaning}"))));
-                ui.line(format!("   {}", diagnosis.explanation));
+                for line in diagnosis_lines(&diagnosis) {
+                    ui.line(line);
+                }
                 // An environment problem says nothing about the route, so nothing is unlearned or offered.
                 let verdict = diagnosis.verdict;
                 diagnosed = Some(verdict);
@@ -1067,6 +1063,8 @@ impl Route<'_> {
         let ui = self.ui;
         let skill = &plan.skill;
 
+        // A failure's diagnosis was in the trace; when the trace is hidden, the question shows it.
+        let mut about = given.as_ref().map(diagnosis_lines).unwrap_or_default();
         let suggestion = match given {
             Some(given) if options.mode == Mode::Auto => Some(given),
             None if options.mode == Mode::Auto => self.diagnose(None),
@@ -1074,7 +1072,9 @@ impl Route<'_> {
         };
         let choice = if let Some(suggestion) = suggestion {
             for (index, option) in suggestion.options.iter().enumerate() {
-                ui.line(format!("   {}  {}  {}", c::bold(index + 1), option.command, c::dim(&option.description)));
+                let line = format!("   {}  {}  {}", c::bold(index + 1), option.command, c::dim(&option.description));
+                ui.line(&line);
+                about.push(line);
             }
             let hint = c::dim("· \"?\" asks the agent · enter skips");
             let question = if suggestion.options.is_empty() {
@@ -1082,7 +1082,8 @@ impl Route<'_> {
             } else {
                 format!("Pick a number, or say what you expected {hint}")
             };
-            let Some(answer) = prompt.ask(&question).map(|answer| answer.trim().to_string()) else { return Ok(None) };
+            let answer = prompt.ask(&ui.about(about), &question);
+            let Some(answer) = answer.map(|answer| answer.trim().to_string()) else { return Ok(None) };
             if answer.is_empty() {
                 return Ok(None);
             }
@@ -1103,7 +1104,8 @@ impl Route<'_> {
         } else {
             let question =
                 format!("What should it run instead? {}", c::dim("a command, \"?\" to ask the agent, or enter to skip"));
-            let Some(answer) = prompt.ask(&question).map(|answer| answer.trim().to_string()) else { return Ok(None) };
+            // Only a "no" to "Run it?" leads here, and that question showed the command.
+            let Some(answer) = prompt.ask(&[], &question).map(|answer| answer.trim().to_string()) else { return Ok(None) };
             if answer.is_empty() {
                 return Ok(None);
             }
@@ -1166,6 +1168,17 @@ impl Route<'_> {
         self.outcome.learned = vec![format!("\"{}\" means {}", self.phrase, taught.label)];
         self.finish().map(Some)
     }
+}
+
+/// Auto mode's reading of a failure, as the trace shows it.
+fn diagnosis_lines(diagnosis: &Suggestion) -> Vec<String> {
+    let meaning = match diagnosis.verdict {
+        Verdict::WrongCommand => "this was the wrong command for the request",
+        Verdict::Environment => "the command fits the request; the problem is where it ran",
+        Verdict::WrongValue => "right command, wrong value",
+        Verdict::NotApplicable => "no verdict",
+    };
+    vec![format!("{} {}", c::yellow("◇ diagnosis"), c::dim(format!("· {meaning}"))), format!("   {}", diagnosis.explanation)]
 }
 
 // ── What a correction teaches, shared by a "no" at the prompt and `jli fix` ──
@@ -1351,7 +1364,7 @@ pub fn run_plan(
     let destructive = plan.risk == Risk::Destructive;
     let asked = destructive && !options.yolo;
     if asked {
-        match prompt.confirm("Run it?") {
+        match prompt.confirm(&ui.about(command_lines(&ready.commands, plan.risk)), "Run it?") {
             Some(true) => {}
             Some(false) => {
                 route.outcome.block("declined", DECLINED);

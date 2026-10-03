@@ -357,7 +357,7 @@ fn slot_in(brain: &Brain, edit: &SlotEdit, from: Option<&str>) -> Result<Edited>
                 return refused(
                     CHOICE_INVALID,
                     format!(
-                        "A choice is one word a person would say, and not a flag: \"{}\" cannot be one. Write --choice=<value>=<what it puts in the command>.",
+                        "A choice is one word a person would say, and not a flag: \"{}\" cannot be one. Write --choice=<value>, which puts the value itself in the command, or --choice=<value>=<text> to put other text there.",
                         choice.value
                     ),
                 );
@@ -605,6 +605,15 @@ mod tests {
             ..Slot::default()
         };
         assert_eq!(profile.settings(), "release → --release, debug → nothing");
+        let plain = Slot {
+            choices: vec![
+                Choice { value: "release".into(), text: "release".into() },
+                Choice { value: "debug".into(), text: String::new() },
+            ],
+            default: Some("release".into()),
+            ..Slot::default()
+        };
+        assert_eq!(plain.settings(), "release, debug → nothing; default release", "a choice that writes its own name");
         assert_eq!(Slot::default().settings(), "");
     }
 

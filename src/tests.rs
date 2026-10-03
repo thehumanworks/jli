@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
-use crate::cli::{App, Fix, FixHow, Flags};
+use crate::cli::{parse, App, Fix, FixHow, Flags, Parsed};
 use crate::learn::{learn_phrase, LearnInput};
 use crate::llm::Llm;
 use crate::plan::{run_plans, RunFlags, SlotValue};
@@ -131,6 +131,8 @@ struct Script {
     confirms: VecDeque<Option<bool>>,
     asks: VecDeque<Option<String>>,
     questions: Vec<String>,
+    /// What each question was about, as (question, the lines shown before it).
+    shown: Vec<(String, Vec<String>)>,
 }
 
 impl Script {
@@ -138,8 +140,14 @@ impl Script {
         Script {
             confirms: confirms.iter().copied().collect(),
             asks: asks.iter().map(|answer| Some(answer.to_string())).collect(),
-            questions: vec![],
+            ..Script::default()
         }
+    }
+
+    /// The lines shown before the question that starts with `question`, joined.
+    fn about(&self, question: &str) -> String {
+        let shown = self.shown.iter().find(|(asked, _)| asked.starts_with(question));
+        shown.unwrap_or_else(|| panic!("never asked {question}")).1.join("\n")
     }
 }
 
@@ -148,13 +156,15 @@ impl Prompt for Script {
         None
     }
 
-    fn confirm(&mut self, question: &str) -> Option<bool> {
+    fn confirm(&mut self, about: &[String], question: &str) -> Option<bool> {
         self.questions.push(question.to_string());
+        self.shown.push((question.to_string(), about.to_vec()));
         self.confirms.pop_front().expect("an unexpected confirmation")
     }
 
-    fn ask(&mut self, question: &str) -> Option<String> {
+    fn ask(&mut self, about: &[String], question: &str) -> Option<String> {
         self.questions.push(question.to_string());
+        self.shown.push((question.to_string(), about.to_vec()));
         self.asks.pop_front().expect("an unexpected question")
     }
 }
@@ -1609,6 +1619,21 @@ fn quiet_flags() -> Flags {
     Flags::quiet()
 }
 
+#[test]
+fn words_that_ask_for_help_are_never_routed() {
+    let scratch = Scratch::new("help");
+    // System 1 and every language model panic: a request routed here would fail the test.
+    let (silent, _) = models(|_| panic!("help asks no model"), no_language_model());
+    let mut app = app(&scratch, "default", silent);
+    for asked in
+        [&["skills", "--help"][..], &["slot", "-h"][..], &["deploy", "the", "app", "--help"][..], &["help", "eval"][..]]
+    {
+        let words: Vec<String> = asked.iter().map(|word| word.to_string()).collect();
+        assert_eq!(app.dispatch(&quiet_flags(), &words, &[]).unwrap(), 0, "{asked:?}");
+    }
+    assert!(scratch.brain.events(10).unwrap().is_empty(), "nothing was routed or logged");
+}
+
 fn lists(scratch: &Scratch, label: &str) -> (Vec<String>, Vec<String>) {
     let skill = scratch.brain.skill(label).unwrap().unwrap();
     (skill.examples, skill.counter_examples)
@@ -1839,6 +1864,143 @@ fn a_skill_learned_in_a_project_stays_there_unless_taught_globally() {
 
 fn models_without_calls() -> (Models, Arc<Replies>) {
     self::models(|_| panic!("System 1 must not be asked"), no_language_model())
+}
+
+// ── --project (ADR 26) ──────────────────────────────────────────────────────────
+
+/// `jli <argv>` from `cwd`, opened on the scratch brain as `run` opens it, with nobody at the keyboard.
+/// The search for a `.jlirc` stops at the scratch directory.
+fn opened(scratch: &Scratch, argv: &[&str], cwd: &std::path::Path, models: Models) -> anyhow::Result<(App, Parsed)> {
+    let parsed = parse(&argv.iter().map(|arg| arg.to_string()).collect::<Vec<_>>())?;
+    let config = BrainConfig::file(&scratch.root.join("brain.db"));
+    let terminal = crate::ui::Terminal::not_a_terminal();
+    Ok((App::open(config, "default", &parsed.flags, cwd, Some(&scratch.root), models, terminal)?, parsed))
+}
+
+fn run_opened(scratch: &Scratch, argv: &[&str], cwd: &std::path::Path, models: Models) -> i32 {
+    let (mut app, parsed) = opened(scratch, argv, cwd, models).unwrap();
+    app.dispatch(&parsed.flags, &parsed.words, &parsed.rest).unwrap()
+}
+
+fn listing(scratch: &Scratch, argv: &[&str], cwd: &std::path::Path) -> String {
+    let (app, parsed) = opened(scratch, argv, cwd, models_without_calls().0).unwrap();
+    app.skills_listing(&parsed.flags).unwrap().join("\n")
+}
+
+#[test]
+fn taught_with_the_project_flag_from_outside_every_project_it_is_that_projects() {
+    let scratch = Scratch::new("project-flag-teach");
+    let teach = ["teach", "-q", "--mode=manual", "--project=demo-app", "run the tests", "--", "echo", "tests"];
+    let (app, _) = opened(&scratch, &teach, &scratch.work, models_without_calls().0).unwrap();
+    assert_eq!((app.project.as_ref(), app.brain.project()), (None, Some("demo-app")), "no .jlirc, and still the project");
+    drop(app);
+    assert_eq!(run_opened(&scratch, &teach, &scratch.work, models_without_calls().0), 0);
+
+    let demo = in_project(&scratch, "demo-app");
+    let own = demo.project_skills().unwrap();
+    assert_eq!((own.len(), own[0].steps.as_slice()), (1, ["echo tests".to_string()].as_slice()));
+    let label = own[0].label.clone();
+    assert!(scratch.brain.skill(&label).unwrap().is_none(), "not one of the global skills");
+
+    // `jli skills --project=demo-app` lists the project's own skills and none of the global ones.
+    let only = listing(&scratch, &["skills", "--project=demo-app"], &scratch.work);
+    assert!(only.contains(&label) && only.contains("project demo-app") && only.contains("1 project skills"), "{only}");
+    assert!(!only.contains("git-status") && !only.contains("list-files"), "{only}");
+    // Without it, outside every project, the listing is the global skills, as before.
+    let global = listing(&scratch, &["skills"], &scratch.work);
+    assert!(global.contains("git-status") && !global.contains(&label), "{global}");
+}
+
+#[test]
+fn a_request_with_the_project_flag_routes_against_that_projects_matrix() {
+    let scratch = Scratch::new("project-flag-route");
+    directory_size(&in_project(&scratch, "demo-app"), "directory-size");
+    let seen = Arc::new(Mutex::new(Value::Null));
+    let recorder = seen.clone();
+    let (models, _) = self::models(
+        move |sent| {
+            *recorder.lock().unwrap() = sent["questions"]["skill"]["criteria"].clone();
+            decision(NONE, 0.9, 0.05, SAFE)
+        },
+        no_language_model(),
+    );
+    run_opened(&scratch, &["-q", "-n", "--project", "demo-app", "how", "big", "is", "src"], &scratch.work, models);
+    let criteria = seen.lock().unwrap().clone();
+    assert!(criteria.get("directory-size").is_some(), "System 1 sees the project's skill: {criteria}");
+    assert!(criteria.get("git-status").is_some(), "and the global ones beside it");
+    assert!(self::criteria(&scratch, &scratch.brain, "how big is src").get("directory-size").is_none(), "not outside it");
+}
+
+#[test]
+fn a_bare_project_flag_means_this_directorys_project_and_outside_one_it_is_a_usage_error() {
+    let scratch = Scratch::new("project-flag-bare");
+    let outside = opened(&scratch, &["skills", "--project"], &scratch.work, models_without_calls().0).err().unwrap();
+    assert_eq!(error_code(&outside), "usage");
+    assert!(format!("{outside:#}").starts_with("Not inside a project"), "{outside:#}");
+
+    let repo = scratch.work.join("shop");
+    let deep = repo.join("src");
+    std::fs::create_dir_all(&deep).unwrap();
+    crate::project::init(&repo, Some("shop")).unwrap();
+    directory_size(&in_project(&scratch, "shop"), "directory-size");
+    let (app, _) = opened(&scratch, &["skills", "--project"], &deep, models_without_calls().0).unwrap();
+    assert_eq!(app.brain.project(), Some("shop"));
+    let only = listing(&scratch, &["skills", "--project"], &deep);
+    assert!(only.contains("directory-size") && !only.contains("git-status"), "{only}");
+    let union = listing(&scratch, &["skills"], &deep);
+    assert!(union.contains("directory-size") && union.contains("git-status"), "without the flag, as before: {union}");
+
+    // `jli project init` names its own project, so --project is refused and nothing is written.
+    for init in [&["project", "init", "--project=other", "-q"][..], &["project", "init", "other", "--project"]] {
+        assert_eq!(run_opened(&scratch, init, &deep, models_without_calls().0), 1, "{init:?}");
+    }
+    assert!(!deep.join(".jlirc").exists());
+}
+
+#[test]
+fn a_named_project_jli_has_nothing_for_gets_a_note_and_carries_on() {
+    let scratch = Scratch::new("project-flag-unknown");
+    let note = |argv: &[&str], cwd: &std::path::Path| {
+        let (app, parsed) = opened(&scratch, argv, cwd, models_without_calls().0).unwrap();
+        app.unknown_project(&parsed.flags).unwrap()
+    };
+    assert_eq!(
+        note(&["--project=demo-ap", "history"], &scratch.work).as_deref(),
+        Some("jli has nothing for project demo-ap yet.")
+    );
+    assert_eq!(
+        listing(&scratch, &["skills", "--project=demo-ap"], &scratch.work),
+        "Project demo-ap has no skills of its own, and no project has any yet."
+    );
+
+    directory_size(&in_project(&scratch, "demo-app"), "directory-size");
+    assert_eq!(
+        note(&["--project=demo-ap", "history"], &scratch.work).as_deref(),
+        Some("jli has nothing for project demo-ap yet. Projects with skills of their own: demo-app.")
+    );
+    assert_eq!(note(&["--project=demo-app", "history"], &scratch.work), None);
+    assert_eq!(note(&["history"], &scratch.work), None, "only a project named with the flag");
+
+    // A lesson about a global skill, or a request, is something too.
+    in_project(&scratch, "lessons").add_counter_example("git-status", "run the tests").unwrap();
+    assert_eq!(note(&["--project=lessons", "history"], &scratch.work), None);
+    let (mut app, parsed) =
+        opened(&scratch, &["--project=asked", "-q", "history"], &scratch.work, models_without_calls().0).unwrap();
+    assert!(app.unknown_project(&parsed.flags).unwrap().is_some());
+    assert_eq!(app.dispatch(&parsed.flags, &parsed.words, &parsed.rest).unwrap(), 0, "a note, not a gate");
+    let (models, _) = self::models(|_| decision(NONE, 0.9, 0.05, SAFE), no_language_model());
+    run_opened(&scratch, &["--project=asked", "-q", "hello", "there"], &scratch.work, models);
+    assert_eq!(note(&["--project=asked", "history"], &scratch.work), None);
+    let lessons = listing(&scratch, &["skills", "--project=lessons"], &scratch.work);
+    let (first, not_listed) = lessons.split_once('\n').unwrap();
+    assert_eq!(first, "Project lessons has no skills of its own. Projects with skills of their own: demo-app.");
+    assert!(not_listed.contains("Not listed: what project lessons learned about the global git-status."), "{lessons}");
+
+    // The project of this directory's .jlirc is not a typo, even before it has anything.
+    let fresh = scratch.work.join("fresh");
+    std::fs::create_dir_all(&fresh).unwrap();
+    crate::project::init(&fresh, Some("fresh")).unwrap();
+    assert_eq!(note(&["--project=fresh", "history"], &fresh), None);
 }
 
 // ── jli generalize ──────────────────────────────────────────────────────────────
@@ -3130,6 +3292,30 @@ fn a_placeholder_is_given_choices_and_a_default_by_hand() {
 }
 
 #[test]
+fn a_choice_given_by_its_name_alone_puts_that_name_in_the_command() {
+    let scratch = Scratch::new("hand-slot-plain");
+    let (label, _) = scratch.brain.learn_command("install the app", &["echo install {profile}".into()], Risk::Safe).unwrap();
+    // As a person writes it: jli slot <label> profile --choice=release --choice=debug --default=release.
+    let words: Vec<String> = [label.as_str(), "profile", "--choice=release", "--choice=debug", "--default=release"]
+        .iter()
+        .map(|word| word.to_string())
+        .collect();
+    let edit = hand::slot_shape(&words, false).unwrap();
+    let choices: Vec<(&str, &str)> =
+        edit.choices.iter().flatten().map(|choice| (choice.value.as_str(), choice.text.as_str())).collect();
+    assert_eq!(choices, [("release", "release"), ("debug", "debug")], "a choice's text is its name");
+    let done = hand::slot(&mut mutable(&scratch), &edit).unwrap();
+    assert_eq!(done.refused, None, "the default is one of the choices: {}", done.message);
+    assert_eq!(done.message, format!("{{profile}} in {label} is now a slot: release, debug; default release."));
+
+    let to = label.clone();
+    let (models, _) = models(move |_| decision(&to, 0.9, 0.9, SAFE), no_language_model());
+    let dry = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    assert_eq!(go(&scratch, &models, "install the app", &mut Script::default(), &dry).commands, ["echo install release"]);
+    assert_eq!(go(&scratch, &models, "a debug install", &mut Script::default(), &dry).commands, ["echo install debug"]);
+}
+
+#[test]
 fn a_slot_is_made_optional_with_its_flag_by_hand_and_keeps_its_aliases() {
     let scratch = Scratch::new("hand-optional");
     first_lines_skill(&scratch);
@@ -3191,4 +3377,116 @@ fn a_slot_setting_that_cannot_hold_is_refused_and_changes_nothing() {
         "{profile} is joined to --profile= in cargo build --profile={profile}, so leaving it out would leave --profile= behind. Name it as its flag too: --flag=--profile="
     );
     assert_eq!(scratch.brain.skills().unwrap(), before);
+}
+
+// ── Quiet runs: no trace, but a question shows what it asks about (ADR 27) ─────
+
+/// The flags `JLI_QUIET=1` gives, with no flag on the command line.
+fn jli_quiet() -> Flags {
+    crate::cli::switches_from(Flags::default(), |name| (name == "JLI_QUIET").then(|| "1".to_string()))
+}
+
+#[test]
+fn a_quiet_confirmation_shows_the_command_and_its_risk() {
+    for (flags, why) in [(Flags::quiet(), "--quiet"), (jli_quiet(), "JLI_QUIET=1")] {
+        let scratch = Scratch::new("quiet-confirm");
+        let (models, _) = models(|_| decision("git-stage-all", 0.9, 0.9, [0.2, 0.8, 0.0]), no_language_model());
+        let mut script = Script::new(&[None], &[]);
+        let options = scratch.options(Mode::Semi);
+        let outcome = route(&scratch.brain, &models, "stage everything", &flags.ui(), &mut script, &options).unwrap();
+        assert_eq!(code(&outcome), Some("needs_confirmation"));
+        let about = script.about("Run it?");
+        assert!(about.contains("→ ") && about.contains("git add -A"), "{why}: {about}");
+        assert!(about.contains("risk:") && about.contains("modifies"), "{why}: {about}");
+        assert_eq!(script.questions, ["Run it?"], "{why}: the question itself is as it was");
+    }
+
+    // With the trace on, the command was shown above the question already, so it is not shown twice.
+    let scratch = Scratch::new("trace-confirm");
+    let (models, _) = models(|_| decision("git-stage-all", 0.9, 0.9, [0.2, 0.8, 0.0]), no_language_model());
+    let mut script = Script::new(&[None], &[]);
+    route(&scratch.brain, &models, "stage everything", &Ui::new(true), &mut script, &scratch.options(Mode::Semi)).unwrap();
+    assert_eq!(script.about("Run it?"), "");
+}
+
+#[test]
+fn a_quiet_correction_shows_the_options_it_offers() {
+    let suggestion = json!({
+        "verdict": "not_applicable", "explanation": "You said no.",
+        "options": [
+            { "command": "ls -la", "description": "everything, with details" },
+            { "command": "ls -ltr", "description": "newest last" },
+        ],
+    });
+    for (ui, shown) in [(Flags::quiet().ui(), true), (Ui::new(true), false)] {
+        let scratch = Scratch::new("quiet-correct");
+        let (models, _) = models(|_| decision("list-files", 0.9, 0.9, SAFE), vec![("suggestion", suggestion.clone())]);
+        let mut script = Script::new(&[Some(false)], &["2"]);
+        let options = scratch.options(Mode::Auto);
+        let outcome = route(&scratch.brain, &models, "recently changed files", &ui, &mut script, &options).unwrap();
+        assert_eq!(outcome.commands, ["ls -ltr"]);
+        let about = script.about("Pick a number");
+        if shown {
+            assert!(script.about("Run it?").contains("→ ") && script.about("Run it?").contains("ls"));
+            for part in ["1", "ls -la", "everything, with details", "2", "ls -ltr", "newest last"] {
+                assert!(about.contains(part), "{part} is not in {about}");
+            }
+        } else {
+            assert_eq!((script.about("Run it?"), about), (String::new(), String::new()), "the trace showed them");
+        }
+    }
+
+    // After a failed run under --yes nobody was asked "Run it?", so the diagnosis comes with the options.
+    let scratch = Scratch::new("quiet-diagnosis");
+    let wrong = json!({
+        "verdict": "wrong_command", "explanation": "This directory is not a git repository.",
+        "options": [{ "command": "ls", "description": "list the files instead" }],
+    });
+    let (models, _) = models(|_| decision("git-status", 0.9, 0.9, SAFE), vec![("suggestion", wrong)]);
+    let mut script = Script::new(&[], &[""]);
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Auto) };
+    let outcome = route(&scratch.brain, &models, "what changed here", &Flags::quiet().ui(), &mut script, &options).unwrap();
+    assert_eq!(outcome.exit_code, Some(128));
+    let about = script.about("Pick a number");
+    assert!(about.contains("diagnosis") && about.contains("wrong command"), "{about}");
+    assert!(about.contains("not a git repository") && about.contains("list the files instead"), "{about}");
+}
+
+#[test]
+fn a_quiet_destructive_plan_shows_what_it_would_delete() {
+    let scratch = Scratch::new("quiet-plan");
+    let log = scratch.work.join("old.log");
+    std::fs::write(&log, "noise\n").unwrap();
+    let proposal = new_proposal("delete-log-files", "rm -f *.log", json!([]), json!([]));
+    let (models, _) = models(|_| decision(NONE, 0.8, 0.95, [0.1, 0.3, 0.6]), vec![("proposal", proposal)]);
+    let options = RouteOptions { yes: true, ..scratch.options(Mode::Semi) };
+    let blocked = go(&scratch, &models, "delete all the log files", &mut Script::new(&[None], &[]), &options);
+    let id = blocked.plan_id.unwrap();
+
+    let mut script = Script::new(&[Some(false)], &[]);
+    let flags = RunFlags { yolo: false, capture: true };
+    run_plans(&scratch.brain, &no_model_at_all(), &[id], &[], &Flags::quiet().ui(), &mut script, flags).unwrap();
+    let about = script.about("Run it?");
+    assert!(about.contains("rm -f *.log") && about.contains("destructive"), "{about}");
+    assert!(log.exists());
+}
+
+#[test]
+fn a_quiet_generalization_shows_what_would_be_written() {
+    for (ui, shown) in [(Ui::of(true, false), true), (Ui::new(true), false)] {
+        let scratch = Scratch::new("quiet-generalize");
+        let (rust, _node) = two_projects(&scratch);
+        let (models, _) =
+            self::models(routes_own_phrasing_to("cargo-test-package"), vec![("generalization", parameterized())]);
+        let mut script = Script::new(&[Some(false)], &[]);
+        generalize(&rust, &models, &options_for(&scratch), &ui, &mut script).unwrap();
+        let about = script.about("Make it global?");
+        if shown {
+            for part in ["cargo-test-package", "cargo test -p {package}", "If approved:", "removed from rust"] {
+                assert!(about.contains(part), "{part} is not in {about}");
+            }
+        } else {
+            assert_eq!(about, "", "the trace showed it");
+        }
+    }
 }

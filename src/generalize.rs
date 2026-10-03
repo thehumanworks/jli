@@ -70,7 +70,7 @@ pub fn generalize(
         all
     } else {
         let Some(project) = brain.project() else {
-            ui.warn("Not inside a project: there is no .jlirc here or above. Run it in a project, or add --all-projects.");
+            ui.warn("Not inside a project: there is no .jlirc here or above. Run it in a project, name one with --project=<id>, or add --all-projects.");
             done.nothing = true;
             return Ok(done);
         };
@@ -138,7 +138,7 @@ fn consider(
             return Ok(());
         }
     };
-    let (row, after) = match &plan {
+    let (row, after, mut about) = match &plan {
         Plan::Keep => {
             ui.note(format!("{} stays in project {project}. Nothing was written.", skill.label));
             return Ok(());
@@ -162,28 +162,31 @@ fn consider(
                 last_used_at: None,
                 created_host: String::new(),
             };
-            show(ui, "after   global, new skill", &row);
+            let lines = shown("after   global, new skill", &row);
             let what = format!(
                 "{} becomes a global skill, with the {} of {}",
                 c::bold(&row.label),
                 count(skill.examples.len(), "phrasing", "phrasings"),
                 skill.label
             );
-            (row, what)
+            (row, what, lines)
         }
         Plan::Into(into) => {
             let mut row = into.clone();
             merge_phrasings(&mut row, &skill.examples);
-            show(ui, "after   global, existing skill", &row);
+            let lines = shown("after   global, existing skill", &row);
             let what = format!(
                 "the {} of {} join the global skill {}",
                 count(skill.examples.len(), "phrasing", "phrasings"),
                 skill.label,
                 c::bold(&into.label)
             );
-            (row, what)
+            (row, what, lines)
         }
     };
+    for line in &about {
+        ui.line(line);
+    }
     done.proposed += 1;
     let kept = if skill.counter_examples.is_empty() {
         String::new()
@@ -191,11 +194,14 @@ fn consider(
         let counters = count(skill.counter_examples.len(), "counter-example stays", "counter-examples stay");
         format!(", and its {counters} with {project} as a lesson about the global skill")
     };
-    ui.line(format!(
+    let approval = format!(
         "   {} {after}. The project skill {} is then removed from {project}{kept}.",
         c::bold("If approved:"),
         skill.label
-    ));
+    );
+    ui.line(&approval);
+    // What would be written, for the question to show when the trace did not.
+    about.push(approval);
 
     match verify(brain, models, project, skill, &row, options)? {
         Ok(summary) => ui.note(format!("Verified with System 1: {summary}.")),
@@ -208,7 +214,7 @@ fn consider(
         ui.note("Dry run: nothing was written.");
         return Ok(());
     }
-    let approved = if options.approve_all { Some(true) } else { prompt.confirm("Make it global?") };
+    let approved = if options.approve_all { Some(true) } else { prompt.confirm(&ui.about(about), "Make it global?") };
     match approved {
         None => {
             ui.warn("Not written: nobody to approve it. Re-run with --approve-all to write what passes the checks.");
@@ -317,9 +323,16 @@ fn plan(proposal: &Generalization, skill: &Skill, global: &[Skill]) -> std::resu
 }
 
 fn show(ui: &Ui, title: &str, skill: &Skill) {
-    ui.line(format!("   {}  {}  {}", c::dim(title), c::bold(&skill.label), risk_tag(skill.risk)));
+    for line in shown(title, skill) {
+        ui.line(line);
+    }
+}
+
+/// A skill as the trace shows it: its command, slots, scenario and phrasings.
+fn shown(title: &str, skill: &Skill) -> Vec<String> {
+    let mut lines = vec![format!("   {}  {}  {}", c::dim(title), c::bold(&skill.label), risk_tag(skill.risk))];
     for step in &skill.steps {
-        ui.line(format!("     {} {step}", c::green("$")));
+        lines.push(format!("     {} {step}", c::green("$")));
     }
     for slot in &skill.slots {
         let mut also = if slot.aliases.is_empty() { String::new() } else { format!(", also {}", slot.aliases.join(", ")) };
@@ -327,15 +340,19 @@ fn show(ui: &Ui, title: &str, skill: &Skill) {
         if !settings.is_empty() {
             also = format!("{also}; {settings}");
         }
-        ui.line(format!("     {}", c::dim(format!("{{{}}} {}: {}{also}", slot.name, slot.kind.as_str(), slot.description))));
+        lines.push(format!(
+            "     {}",
+            c::dim(format!("{{{}}} {}: {}{also}", slot.name, slot.kind.as_str(), slot.description))
+        ));
     }
-    ui.line(format!("     {}", c::dim(&skill.scenario)));
+    lines.push(format!("     {}", c::dim(&skill.scenario)));
     for example in &skill.examples {
-        ui.line(format!("     {} \"{example}\"", c::green("+")));
+        lines.push(format!("     {} \"{example}\"", c::green("+")));
     }
     for example in &skill.counter_examples {
-        ui.line(format!("     {} \"{example}\"", c::red("−")));
+        lines.push(format!("     {} \"{example}\"", c::red("−")));
     }
+    lines
 }
 
 /// "1 phrasing", "3 phrasings".

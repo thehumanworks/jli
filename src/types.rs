@@ -117,7 +117,8 @@ impl Slot {
     }
 
     /// What was set on it, for `jli skills`, `jli slot` and `jli generalize`: "optional, left out with
-    /// -n; release → --release, debug → nothing; default release". Empty for a slot with none of it.
+    /// -n; release → --release, debug → nothing; default release". A choice that puts its own name in
+    /// the command is shown as that name alone: "release, debug". Empty for a slot with none of it.
     pub fn settings(&self) -> String {
         let mut said: Vec<String> = Vec::new();
         if self.optional {
@@ -132,6 +133,7 @@ impl Slot {
                 .iter()
                 .map(|choice| match choice.text.trim() {
                     "" => format!("{} → nothing", choice.value),
+                    text if text == choice.value => text.to_string(),
                     text => format!("{} → {text}", choice.value),
                 })
                 .collect();
