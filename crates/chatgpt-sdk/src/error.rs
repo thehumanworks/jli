@@ -444,6 +444,9 @@ pub enum SignInError {
     /// No callback arrived before the deadline.
     #[error("no sign-in callback arrived in time")]
     TimedOut,
+    /// A device code was not entered before it expired.
+    #[error("the code was not entered before it expired")]
+    CodeExpired,
 }
 
 /// Why an ID token was rejected.

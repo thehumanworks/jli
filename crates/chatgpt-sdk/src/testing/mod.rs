@@ -3,7 +3,8 @@
 //! [`FakeChatGpt`] is an authorization server, a browser, and both Responses backends behind one
 //! [`HttpClient`]. It checks PKCE and the client id, issues and rotates tokens, signs ID tokens
 //! with a key that ships with this crate, and streams scripted replies. Use it to test an app's
-//! sign-in, refresh, sign-out and requests without a network or an account.
+//! sign-in, refresh, sign-out and requests without a network or an account. It also serves the
+//! device code endpoints, as for Codex's client only, and plays a person who enters the code.
 //!
 //! The signing key is public: never trust a token it signed outside a test.
 //!
@@ -47,6 +48,7 @@ use serde_json::{json, Value};
 
 use crate::auth::{form_decode, form_encode, OAuthConfig, DYNAMIC_CLIENT_ID};
 use crate::client::Backend;
+use crate::codex::CODEX_CLIENT_ID;
 use crate::error::TransportError;
 use crate::http::{HttpClient, HttpRequest, HttpResponse};
 
@@ -70,9 +72,12 @@ pub enum FakeReply {
 #[derive(Debug)]
 struct Pending {
     challenge: String,
-    nonce: String,
+    /// The browser sign-in's nonce; a device code has none.
+    nonce: Option<String>,
     client_id: String,
     code: String,
+    /// The redirect URI the exchange must name, when it is checked.
+    redirect_uri: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -90,6 +95,18 @@ struct State {
     models: Vec<Value>,
     requests: Vec<HttpRequest>,
     revoked: Vec<String>,
+    device: Option<FakeDevice>,
+    devices: u32,
+    device_lifetime: i64,
+    device_polls: VecDeque<FakeReply>,
+}
+
+/// A device code waiting to be entered.
+#[derive(Debug)]
+struct FakeDevice {
+    id: String,
+    user_code: String,
+    verifier: String,
 }
 
 /// A fake authorization server, browser and Responses API. See the [module docs](self).
@@ -119,6 +136,7 @@ impl FakeChatGpt {
                 json!({ "slug": "gpt-6.1-sol", "display_name": "GPT-6.1-Sol", "visibility": "list" }),
                 json!({ "slug": "hidden-model", "visibility": "hide" }),
             ],
+            device_lifetime: 15 * 60,
             ..State::default()
         };
         Arc::new(FakeChatGpt { key, state: Mutex::new(state) })
@@ -179,6 +197,18 @@ impl FakeChatGpt {
         locked(&self.state).requests.clone()
     }
 
+    /// Queue a reply to the next device code poll, such as `Status(403, "")` for a code not entered
+    /// yet. While none is queued, a poll finds the code entered. A reply other than a status
+    /// counts as not entered yet.
+    pub fn script_device_poll(&self, reply: FakeReply) {
+        locked(&self.state).device_polls.push_back(reply);
+    }
+
+    /// How long the next device code lasts, in seconds: 15 minutes unless set.
+    pub fn device_code_lifetime(&self, seconds: i64) {
+        locked(&self.state).device_lifetime = seconds;
+    }
+
     /// The refresh tokens revoked so far.
     pub fn revoked(&self) -> Vec<String> {
         locked(&self.state).revoked.clone()
@@ -234,8 +264,13 @@ impl FakeChatGpt {
                     if new_registration {
                         pairs.push(("client_id", client_id.clone()));
                     }
-                    state.pending =
-                        Some(Pending { challenge: field("code_challenge"), nonce: field("nonce"), client_id, code });
+                    state.pending = Some(Pending {
+                        challenge: field("code_challenge"),
+                        nonce: Some(field("nonce")),
+                        client_id,
+                        code,
+                        redirect_uri: None,
+                    });
                 }
                 let borrowed: Vec<(&str, &str)> = pairs.iter().map(|(name, value)| (*name, value.as_str())).collect();
                 let rest = redirect.strip_prefix("http://127.0.0.1:").unwrap_or_default();
@@ -258,7 +293,8 @@ impl FakeChatGpt {
         state.refresh_token = Some(refresh.clone());
         let now = chrono::Utc::now().timestamp();
         let mut claims = json!({ "iss": FAKE_ISSUER, "sub": state.subject, "aud": [client_id], "iat": now, "exp": now + 3600,
-            "email": state.email, "email_verified": true });
+            "email": state.email, "email_verified": true,
+            "https://api.openai.com/auth": { "chatgpt_account_id": format!("account-{}", state.subject), "chatgpt_plan_type": "plus" } });
         if let Some(nonce) = nonce {
             claims["nonce"] = json!(nonce);
         }
@@ -269,9 +305,17 @@ impl FakeChatGpt {
     fn answer(&self, request: HttpRequest) -> HttpResponse {
         let mut state = locked(&self.state);
         state.requests.push(request.clone());
+        // A form, or a JSON object as Codex's endpoints take.
+        let object: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
         let form = form_decode(&request.body_text());
-        let field =
-            |name: &str| form.iter().find(|(key, _)| key == name).map(|(_, value)| value.clone()).unwrap_or_default();
+        let field = |name: &str| {
+            object
+                .get(name)
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| form.iter().find(|(key, _)| key == name).map(|(_, value)| value.clone()))
+                .unwrap_or_default()
+        };
         let oauth_error = |code: &str| HttpResponse::new(400, json!({ "error": code }).to_string());
         let url = request.url.as_str();
         let codex = Backend::Codex.base_url();
@@ -279,7 +323,56 @@ impl FakeChatGpt {
         if url == format!("{FAKE_ISSUER}/jwks") {
             return HttpResponse::new(200, self.jwks().to_string());
         }
-        if url == format!("{FAKE_ISSUER}/revoke") {
+        if url == format!("{FAKE_ISSUER}/api/accounts/deviceauth/usercode") {
+            if field("client_id") != CODEX_CLIENT_ID {
+                let refused = json!({ "error": { "message": "This app is unavailable. Contact the app owner and try again later.",
+                    "type": "invalid_request_error", "param": null, "code": "invalid_client" } });
+                return HttpResponse::new(400, refused.to_string());
+            }
+            state.devices += 1;
+            let device = FakeDevice {
+                id: format!("fake-device-{}", state.devices),
+                user_code: format!("FAKE-{:04}", state.devices),
+                verifier: format!("fake-device-verifier-{}", state.devices),
+            };
+            let expires_at = chrono::Utc::now() + chrono::Duration::seconds(state.device_lifetime);
+            let reply = json!({ "device_auth_id": device.id, "user_code": device.user_code, "interval": "5",
+                "expires_at": expires_at.to_rfc3339() });
+            state.device = Some(device);
+            return HttpResponse::new(200, reply.to_string());
+        }
+        if url == format!("{FAKE_ISSUER}/api/accounts/deviceauth/token") {
+            let known = state
+                .device
+                .as_ref()
+                .is_some_and(|device| device.id == field("device_auth_id") && device.user_code == field("user_code"));
+            if !known {
+                return HttpResponse::new(
+                    404,
+                    r#"{"error":{"message":"Resource not found","code":"deviceauth_not_found"}}"#,
+                );
+            }
+            if let Some(reply) = state.device_polls.pop_front() {
+                return match reply {
+                    FakeReply::Status(status, body) => HttpResponse::new(status, body),
+                    _ => HttpResponse::new(403, ""),
+                };
+            }
+            let Some(device) = state.device.take() else { return HttpResponse::new(404, "") };
+            state.serial += 1;
+            let code = format!("fake-device-code-{}", state.serial);
+            let challenge = URL_SAFE_NO_PAD.encode(ring::digest::digest(&ring::digest::SHA256, device.verifier.as_bytes()));
+            state.pending = Some(Pending {
+                challenge: challenge.clone(),
+                nonce: None,
+                client_id: CODEX_CLIENT_ID.into(),
+                code: code.clone(),
+                redirect_uri: Some(format!("{FAKE_ISSUER}/deviceauth/callback")),
+            });
+            let grant = json!({ "authorization_code": code, "code_challenge": challenge, "code_verifier": device.verifier });
+            return HttpResponse::new(200, grant.to_string());
+        }
+        if url == format!("{FAKE_ISSUER}/revoke") || url == format!("{FAKE_ISSUER}/oauth/revoke") {
             state.revoked.push(field("token"));
             if state.refresh_token.as_deref() == Some(field("token").as_str()) {
                 state.refresh_token = None;
@@ -287,7 +380,8 @@ impl FakeChatGpt {
             }
             return HttpResponse::new(200, "");
         }
-        if url == format!("{FAKE_ISSUER}/token") {
+        // The documented token endpoint, and the one Codex uses.
+        if url == format!("{FAKE_ISSUER}/token") || url == format!("{FAKE_ISSUER}/oauth/token") {
             return match field("grant_type").as_str() {
                 "authorization_code" => {
                     let Some(pending) = state.pending.take() else { return oauth_error("invalid_grant") };
@@ -296,10 +390,13 @@ impl FakeChatGpt {
                     if field("code") != pending.code || challenge != pending.challenge {
                         return oauth_error("invalid_grant");
                     }
+                    if pending.redirect_uri.as_ref().is_some_and(|expected| field("redirect_uri") != *expected) {
+                        return oauth_error("invalid_grant");
+                    }
                     if field("client_id") != pending.client_id {
                         return oauth_error("invalid_client");
                     }
-                    let tokens = self.tokens(&mut state, &pending.client_id, Some(&pending.nonce));
+                    let tokens = self.tokens(&mut state, &pending.client_id, pending.nonce.as_deref());
                     HttpResponse::new(200, tokens.to_string())
                 }
                 "refresh_token" => {

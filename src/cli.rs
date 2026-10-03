@@ -4,11 +4,11 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 
-use crate::account::{Accounts, SignedIn, SignedOut, Source, MANAGE_USAGE_URL};
+use crate::account::{Accounts, SignInCode, SignedIn, SignedOut, Source, MANAGE_USAGE_URL};
 use crate::args;
 use crate::demo::run_demo;
 use crate::eval;
-use crate::exec::{codex_device_login, open_in_browser};
+use crate::exec::open_in_browser;
 use crate::generalize::{generalize, GeneralizeOptions};
 use crate::hand;
 use crate::help;
@@ -1282,7 +1282,7 @@ fn path_tag(path: Path) -> String {
     }
 }
 
-/// `jli login` (`--new`, `--codex`, `--codex --device-auth`), `jli logout` and `jli models`: the ChatGPT plan on this host.
+/// `jli login` (`--new`, `--codex`, `--device-auth`), `jli logout` and `jli models`: the ChatGPT plan on this host.
 /// They need no brain (ADR 28). `None` when the words are not one of them.
 fn account(words: &[String], flags: &Flags) -> Result<Option<i32>> {
     let shape: Vec<&str> = words.iter().map(String::as_str).collect();
@@ -1300,14 +1300,21 @@ fn account(words: &[String], flags: &Flags) -> Result<Option<i32>> {
             say_signed_in(&signed_in, flags);
         }
         ["login", "--codex"] => say_signed_in(&Accounts::from_env()?.login_codex()?, flags),
-        ["login", "--codex", "--device-auth"] | ["login", "--device-auth", "--codex"] => {
-            say_signed_in(&Accounts::from_env()?.login_codex_device(&codex_device_login)?, flags)
-        }
-        // OpenAI answers jli's own client with `invalid_client`, and a new registration's client id
-        // comes back only to the browser's callback (ADR 29).
         ["login", "--device-auth"] | ["login", "--new", "--device-auth"] | ["login", "--device-auth", "--new"] => {
-            let why = "OpenAI gives a sign-in code to the Codex CLI but not to jli: run jli login --codex --device-auth to sign Codex in with a code and use its account, or jli login where a browser can open.";
-            return Ok(Some(refuse(flags, USAGE, why)));
+            // The code is the sign-in itself, so it reaches stderr even with --quiet or --json.
+            let show = |code: &SignInCode| {
+                eprintln!(
+                    "{} To sign in with ChatGPT, open this page on any device:\n  {}\nand enter this code, which expires in {} minutes:\n  {}\n{}",
+                    c::yellow("!"),
+                    code.url,
+                    code.minutes,
+                    c::bold(&code.code),
+                    c::dim("The page names Codex: jli signs in through Codex's client. If it says device codes are off, turn\non device code sign-in in ChatGPT's security settings. Never give this code to anyone.")
+                )
+            };
+            let another = shape.contains(&"--new");
+            let signed_in = Accounts::from_env()?.login_device(&show, &mut std::thread::sleep, another)?;
+            say_signed_in(&signed_in, flags);
         }
         ["logout"] => say_signed_out(&Accounts::from_env()?.logout()?, flags),
         ["models"] => {
@@ -1334,15 +1341,14 @@ fn account(words: &[String], flags: &Flags) -> Result<Option<i32>> {
     Ok(Some(0))
 }
 
-/// Whether the words are exactly one of the account commands that act. `--device-auth` without
-/// `--codex` is left out: it is refused for its own reason, with or without -n.
+/// Whether the words are exactly one of the account commands.
 fn account_shape(shape: &[&str]) -> bool {
     matches!(
         shape,
         ["login"]
-            | ["login", "--new" | "--codex"]
-            | ["login", "--codex", "--device-auth"]
-            | ["login", "--device-auth", "--codex"]
+            | ["login", "--new" | "--codex" | "--device-auth"]
+            | ["login", "--new", "--device-auth"]
+            | ["login", "--device-auth", "--new"]
             | ["logout"]
             | ["models"]
     )
@@ -1368,12 +1374,11 @@ fn say_signed_in(signed_in: &SignedIn, flags: &Flags) {
         ));
         return;
     }
+    let plan = signed_in.plan_type.as_deref().map(|plan| format!(", {plan} plan")).unwrap_or_default();
     match signed_in.source {
         Source::SignIn => say(format!("Signed in with ChatGPT as {who}.")),
-        Source::Codex => {
-            let plan = signed_in.plan_type.as_deref().map(|plan| format!(", {plan} plan")).unwrap_or_default();
-            say(format!("Using the ChatGPT account Codex is signed in with: {who}{plan}."));
-        }
+        Source::Device => say(format!("Signed in with ChatGPT as {who}{plan}.")),
+        Source::Codex => say(format!("Using the ChatGPT account Codex is signed in with: {who}{plan}.")),
     }
     say(format!(
         "The agent and the translator now run on {} using your ChatGPT plan. jli models lists the others.",
@@ -1400,6 +1405,12 @@ fn say_signed_out(out: &SignedOut, flags: &Flags) {
             say(format!("Signed out of ChatGPT{who}. jli no longer uses your ChatGPT plan."));
             if !out.revoked {
                 say("The session could not be ended remotely: to end it now, disconnect jli in ChatGPT's settings.");
+            }
+        }
+        Some(Source::Device) => {
+            say(format!("Signed out of ChatGPT{who}. jli no longer uses your ChatGPT plan."));
+            if !out.revoked {
+                say("The session could not be ended remotely: to end it now, log out of all devices in ChatGPT's security settings.");
             }
         }
     }
@@ -1513,6 +1524,7 @@ mod tests {
             &["login", "--codex", "x"],
             &["login", "--device-auth", "now"],
             &["login", "--new", "--codex"],
+            &["login", "--codex", "--device-auth"],
         ] {
             assert_eq!(account(&args(words), &Flags::quiet()).unwrap(), None, "{words:?}");
         }
@@ -1522,25 +1534,14 @@ mod tests {
             &["login"][..],
             &["login", "--new"],
             &["login", "--codex"],
-            &["login", "--codex", "--device-auth"],
-            &["login", "--device-auth", "--codex"],
+            &["login", "--device-auth"],
+            &["login", "--new", "--device-auth"],
+            &["login", "--device-auth", "--new"],
             &["logout"],
         ] {
             assert_eq!(account(&args(words), &dry).unwrap(), Some(1), "{words:?}");
         }
         assert_eq!(account(&args(&["login", "to", "the", "server"]), &dry).unwrap(), None, "a request stays a request");
-    }
-
-    #[test]
-    fn a_device_code_for_jli_own_sign_in_is_refused_before_any_account_is_read() {
-        for words in
-            [&["login", "--device-auth"][..], &["login", "--new", "--device-auth"], &["login", "--device-auth", "--new"]]
-        {
-            assert_eq!(account(&args(words), &Flags::quiet()).unwrap(), Some(1), "{words:?}");
-            let dry = Flags { dry_run: true, ..Flags::quiet() };
-            assert_eq!(account(&args(words), &dry).unwrap(), Some(1), "{words:?}");
-            assert!(!account_shape(words), "under -n it is refused for its own reason, not for -n: {words:?}");
-        }
     }
 
     #[test]

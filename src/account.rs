@@ -5,17 +5,21 @@
 //! a sign-in is a credential, and another host may have no account at all.
 //!
 //!   host-id, active, accounts/<client id>.json   chatgpt-sdk's credential store
+//!   device.json                                  the sign-in from `jli login --device-auth`, in
+//!                                                Codex's auth.json format (ADR 29)
 //!   jli.json                                     which sign-in jli uses, its model, and whether
 //!                                                the first-sign-in message was shown
 
 use std::path::PathBuf;
-use std::process::ExitStatus;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use chatgpt_sdk::auth::{AuthorizationRequest, LoopbackListener, OAuthConfig, Registration};
-use chatgpt_sdk::{Client, CodexAuth, Credential, CredentialStore, Credentials, HttpClient, HttpRequest, Model, Recovery};
+use chatgpt_sdk::{
+    Client, CodexAccount, CodexAuth, Credential, CredentialStore, Credentials, DeviceCode, HttpClient, HttpRequest, Model,
+    Recovery,
+};
 use serde::{Deserialize, Serialize};
 
 /// Where a person reviews and limits what jli uses of their plan.
@@ -40,7 +44,12 @@ pub enum Source {
     SignIn,
     /// The Codex CLI's, from `jli login --codex`: the Codex backend.
     Codex,
+    /// jli's own through Codex's client, from `jli login --device-auth`: the Codex backend.
+    Device,
 }
+
+/// What a person runs when the sign-in from `jli login --device-auth` stops working.
+const DEVICE_SIGN_IN: &str = "jli login --device-auth";
 
 /// `jli.json`: what jli chose. A field this version does not know is dropped on the next write;
 /// the file is this host's and holds no lesson.
@@ -76,6 +85,32 @@ pub struct SignedOut {
     /// Whether the server confirmed the session is revoked. Always true for Codex's sign-in, which
     /// jli only stops using.
     pub revoked: bool,
+}
+
+/// What `jli login --device-auth` asks the person to do on another device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignInCode {
+    /// The page to open: it names Codex, whose client the sign-in goes through.
+    pub url: String,
+    /// The one-time code to enter there.
+    pub code: String,
+    /// Whole minutes until the code expires, rounded up.
+    pub minutes: i64,
+}
+
+/// Whether two sign-ins are for the same ChatGPT account: by account id, else by email, else
+/// taken to be.
+fn same_account(a: &CodexAccount, b: &CodexAccount) -> bool {
+    match (&a.account_id, &b.account_id, &a.email, &b.email) {
+        (Some(a), Some(b), _, _) => a == b,
+        (_, _, Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+        _ => true,
+    }
+}
+
+/// An account as a person knows it.
+fn named(account: &CodexAccount) -> String {
+    account.email.clone().or_else(|| account.account_id.clone()).unwrap_or_else(|| "an unnamed account".into())
 }
 
 /// jli's ChatGPT sign-ins on this host.
@@ -169,6 +204,19 @@ impl Accounts {
         Client::builder(credential).http_client(self.http()).originator(APP_NAME).build()
     }
 
+    fn device_path(&self) -> PathBuf {
+        self.dir.join("device.json")
+    }
+
+    /// The sign-in from `jli login --device-auth`, refreshed and revoked where it was issued.
+    fn device_auth(&self) -> chatgpt_sdk::Result<CodexAuth> {
+        let issuer = self.config.issuer.trim_end_matches('/');
+        Ok(CodexAuth::open(self.device_path())?
+            .sign_in_command(DEVICE_SIGN_IN)
+            .refresh_url(format!("{issuer}/oauth/token"))
+            .revoke_url(format!("{issuer}/oauth/revoke")))
+    }
+
     fn codex_auth(&self) -> Result<CodexAuth> {
         let path = self
             .codex
@@ -195,6 +243,16 @@ impl Accounts {
                 })?;
                 let email = auth.account().ok().and_then(|account| account.email);
                 Ok(Some(ChatGpt { client: self.client(auth), model, email, sign_in: "codex login" }))
+            }
+            Some(Source::Device) => {
+                let auth = self.device_auth().map_err(|_| {
+                    coded(
+                        CONFIGURATION,
+                        format!("Your ChatGPT sign-in has ended. Run `{DEVICE_SIGN_IN}` to sign in again, or `jli logout` to stop using it."),
+                    )
+                })?;
+                let email = auth.account().ok().and_then(|account| account.email);
+                Ok(Some(ChatGpt { client: self.client(auth), model, email, sign_in: DEVICE_SIGN_IN }))
             }
             Some(Source::SignIn) => {
                 let store = self.store()?;
@@ -284,22 +342,60 @@ impl Accounts {
         })
     }
 
-    /// Sign the Codex CLI in with a one-time code, for a host where no browser opens, then use its
-    /// account. OpenAI gives a device code to Codex's own client and not to jli's (ADR 29), so
-    /// `codex_login` runs `codex login --device-auth` and jli reads what Codex saved.
-    pub fn login_codex_device(&self, codex_login: &dyn Fn() -> std::io::Result<ExitStatus>) -> Result<SignedIn> {
-        match codex_login() {
-            Ok(status) if status.success() => self.login_codex(),
-            Ok(status) => Err(coded(
-                CONFIGURATION,
-                format!("`codex login --device-auth` did not sign in ({status}), so jli changed nothing."),
-            )),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(coded(
-                CONFIGURATION,
-                "Cannot find the Codex CLI. Install it to sign in with a code, or run `jli login` where a browser can open.",
-            )),
-            Err(error) => Err(coded(CONFIGURATION, format!("Could not run `codex login --device-auth`: {error}"))),
+    /// Sign in with a one-time code entered on another device, for a host where no browser opens.
+    /// OpenAI gives such a code to the Codex CLI's client only (ADR 29), so jli asks as Codex does
+    /// and keeps the tokens in a file of its own, never in Codex's. `show` must put the page and the
+    /// code in front of the person, whatever the trace's setting; `sleep` waits between polls.
+    /// Unless `another`, a sign-in as another account than the one saved is refused.
+    pub fn login_device(
+        &self,
+        show: &dyn Fn(&SignInCode),
+        sleep: &mut dyn FnMut(Duration),
+        another: bool,
+    ) -> Result<SignedIn> {
+        let failed = |error: chatgpt_sdk::Error| coded(CONFIGURATION, format!("Sign-in did not complete: {error}"));
+        let code = DeviceCode::request(&self.http(), &self.config.issuer).map_err(failed)?;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs());
+        let seconds_left = code.expires_at.timestamp().saturating_sub(i64::try_from(now).unwrap_or(i64::MAX));
+        show(&SignInCode {
+            url: code.verification_url.clone(),
+            code: code.user_code.clone(),
+            minutes: (seconds_left.max(0) + 59) / 60,
+        });
+        let tokens = code.wait(&self.http(), sleep).map_err(failed)?;
+        let account = CodexAccount::from_tokens(&tokens);
+        if let Ok(saved) = self.device_auth() {
+            let before = saved.account().ok();
+            if let Some(before) = before.filter(|before| !same_account(before, &account)) {
+                if !another {
+                    return Err(coded(
+                        CONFIGURATION,
+                        format!(
+                            "Sign-in did not complete: you signed in as {}, a different ChatGPT account than the one saved here ({}). Run `jli login --new --device-auth` to use it instead.",
+                            named(&account),
+                            named(&before)
+                        ),
+                    ));
+                }
+                // The session it replaces is ended as `jli logout` would end it; if that fails, it expires.
+                let _ = saved.revoke(&self.http());
+            }
         }
+        CodexAuth::create(self.device_path(), &tokens).map_err(failed)?;
+
+        let mut choice = self.choice_to_rewrite();
+        let welcome = !choice.welcomed;
+        choice.source = Some(Source::Device);
+        choice.welcomed = true;
+        self.save_choice(&choice)?;
+        Ok(SignedIn {
+            source: Source::Device,
+            email: account.email,
+            plan_usage: true,
+            welcome,
+            plan_type: account.plan_type,
+            model: choice.model.unwrap_or_else(|| DEFAULT_MODEL.into()),
+        })
     }
 
     /// Stop using the ChatGPT plan. jli's own session is revoked and its tokens cleared; the
@@ -311,6 +407,17 @@ impl Accounts {
             Some(Source::Codex) => {
                 let email = self.codex_auth().ok().and_then(|auth| auth.account().ok()).and_then(|account| account.email);
                 SignedOut { source, email, revoked: true }
+            }
+            Some(Source::Device) => {
+                let auth = self.device_auth().ok();
+                let email = auth.as_ref().and_then(|auth| auth.account().ok()).and_then(|account| account.email);
+                let revoked = auth.is_none_or(|auth| auth.revoke(&self.http()).is_ok());
+                match std::fs::remove_file(self.device_path()) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                        return Err(anyhow!("removing {}: {error}", self.device_path().display()))
+                    }
+                    _ => SignedOut { source, email, revoked },
+                }
             }
             _ => {
                 let store = self.store()?;
@@ -332,7 +439,7 @@ impl Accounts {
         let provider = self.provider()?.ok_or_else(|| {
             coded(
                 CONFIGURATION,
-                "jli is not using a ChatGPT plan: run `jli login`, or `jli login --codex` to use Codex's sign-in.",
+                "jli is not using a ChatGPT plan: run `jli login`, `jli login --device-auth` where no browser opens, or `jli login --codex` to use Codex's sign-in.",
             )
         })?;
         let models = provider.client.models().map_err(|error| {
@@ -582,26 +689,86 @@ mod tests {
     }
 
     #[test]
-    fn a_device_code_signs_codex_in_first_and_a_sign_in_codex_did_not_finish_changes_nothing() {
-        use std::os::unix::process::ExitStatusExt;
+    fn a_device_code_signs_in_without_a_browser_or_codex_and_logout_ends_it() {
         let scratch = Scratch::new("device");
         let fake = FakeChatGpt::new();
-        let accounts = Accounts::fake(scratch.0.join("chatgpt"), &fake, Some(scratch.0.join("auth.json")));
+        let codex = scratch.0.join("codex").join("auth.json");
+        let accounts = Accounts::fake(scratch.0.join("chatgpt"), &fake, Some(codex.clone()));
+        fake.script_device_poll(chatgpt_sdk::testing::FakeReply::Status(403, String::new()));
 
-        let missing = accounts.login_codex_device(&|| Err(std::io::ErrorKind::NotFound.into())).unwrap_err();
-        assert!(missing.to_string().contains("Cannot find the Codex CLI"), "{missing}");
-        let failed = accounts.login_codex_device(&|| Ok(ExitStatus::from_raw(1 << 8))).unwrap_err();
-        assert_eq!(crate::types::error_code(&failed), CONFIGURATION);
-        assert!(failed.to_string().contains("did not sign in"), "{failed}");
+        let shown = std::sync::Mutex::new(Vec::new());
+        let mut pauses = Vec::new();
+        let signed_in = accounts
+            .login_device(
+                &|code: &SignInCode| shown.lock().unwrap().push(code.clone()),
+                &mut |pause| pauses.push(pause),
+                false,
+            )
+            .unwrap();
+        assert_eq!((signed_in.source, signed_in.welcome, signed_in.plan_usage), (Source::Device, true, true));
+        assert_eq!((signed_in.email.as_deref(), signed_in.plan_type.as_deref()), (Some("user@example.com"), Some("plus")));
+        let shown = shown.into_inner().unwrap();
+        assert_eq!(shown.len(), 1);
+        assert_eq!((shown[0].url.as_str(), shown[0].code.as_str()), ("https://auth.chatgpt.fake/codex/device", "FAKE-0001"));
+        assert!((14..=15).contains(&shown[0].minutes), "{}", shown[0].minutes);
+        assert_eq!(pauses, [Duration::from_secs(5)], "one poll found the code not entered yet");
+        assert!(scratch.0.join("chatgpt").join("device.json").exists());
+        assert!(!codex.exists(), "Codex's own sign-in is never written");
+
+        let provider = accounts.provider().unwrap().unwrap();
+        assert_eq!((provider.client.backend(), provider.sign_in), (chatgpt_sdk::Backend::Codex, DEVICE_SIGN_IN));
+        fake.reply("hello");
+        assert_eq!(provider.client.create(&chatgpt_sdk::ResponseRequest::new(DEFAULT_MODEL)).unwrap().text, "hello");
+        let sent = fake.requests().last().cloned().unwrap();
+        assert!(sent.url.starts_with(chatgpt_sdk::Backend::Codex.base_url()), "{}", sent.url);
+        assert_eq!(sent.header_value("chatgpt-account-id"), Some("account-user-fake"));
+
+        let out = accounts.logout().unwrap();
+        assert_eq!((out.source, out.revoked, out.email.as_deref()), (Some(Source::Device), true, Some("user@example.com")));
+        assert_eq!(fake.revoked().len(), 1, "the session is revoked");
+        assert!(!scratch.0.join("chatgpt").join("device.json").exists());
+        assert!(accounts.provider().unwrap().is_none());
+    }
+
+    #[test]
+    fn another_account_by_device_code_needs_new_and_ends_the_one_it_replaces() {
+        let scratch = Scratch::new("device-another");
+        let fake = FakeChatGpt::new();
+        let accounts = Accounts::fake(scratch.0.clone(), &fake, None);
+        accounts.login_device(&|_: &SignInCode| {}, &mut |_| {}, false).unwrap();
+        fake.sign_in_as("user-2", "two@example.com");
+        let refused = accounts.login_device(&|_: &SignInCode| {}, &mut |_| {}, false).unwrap_err();
+        assert_eq!(crate::types::error_code(&refused), CONFIGURATION);
+        assert!(
+            refused.to_string().contains("different ChatGPT account") && refused.to_string().contains("--new --device-auth")
+        );
+        assert_eq!(accounts.provider().unwrap().unwrap().email.as_deref(), Some("user@example.com"), "the first is kept");
+
+        let second = accounts.login_device(&|_: &SignInCode| {}, &mut |_| {}, true).unwrap();
+        assert_eq!((second.email.as_deref(), second.welcome), (Some("two@example.com"), false));
+        assert_eq!(accounts.provider().unwrap().unwrap().email.as_deref(), Some("two@example.com"));
+        assert_eq!(fake.revoked().len(), 1, "the replaced session is ended");
+    }
+
+    #[test]
+    fn a_device_code_never_entered_changes_nothing_and_an_ended_one_says_how_to_sign_in() {
+        let scratch = Scratch::new("device-expired");
+        let fake = FakeChatGpt::new();
+        let accounts = Accounts::fake(scratch.0.clone(), &fake, None);
+        fake.device_code_lifetime(10);
+        for _ in 0..5 {
+            fake.script_device_poll(chatgpt_sdk::testing::FakeReply::Status(403, String::new()));
+        }
+        let error = accounts.login_device(&|_: &SignInCode| {}, &mut |_| {}, false).unwrap_err();
+        assert_eq!(crate::types::error_code(&error), CONFIGURATION);
+        assert!(error.to_string().contains("expired"), "{error}");
         assert_eq!(accounts.choice().unwrap(), Choice::default());
+        assert!(!scratch.0.join("device.json").exists());
 
-        let codex_signs_in = || {
-            codex_file(&scratch.0);
-            Ok(ExitStatus::from_raw(0))
-        };
-        let signed_in = accounts.login_codex_device(&codex_signs_in).unwrap();
-        assert_eq!((signed_in.source, signed_in.email.as_deref()), (Source::Codex, Some("codex@example.com")));
-        assert_eq!(accounts.provider().unwrap().unwrap().sign_in, "codex login");
+        accounts.login_device(&|_: &SignInCode| {}, &mut |_| {}, false).unwrap();
+        std::fs::remove_file(scratch.0.join("device.json")).unwrap();
+        let ended = accounts.provider().err().unwrap();
+        assert!(ended.to_string().contains("jli login --device-auth"), "{ended}");
     }
 
     #[test]

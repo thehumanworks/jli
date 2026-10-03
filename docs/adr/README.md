@@ -39,7 +39,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [26](0026-project-flag.md) | `--project` names the project a command acts on, from any directory |
 | [27](0027-quiet.md) | A quiet run hides the trace, keeps its warnings, and still shows what a question asks about |
 | [28](0028-chatgpt-plan.md) | The agent and the translator can run on the user's ChatGPT plan, through a crate of jli's own |
-| [29](0029-device-code.md) | Where no browser opens, `jli login --codex --device-auth` signs the Codex CLI in with a code |
+| [29](0029-device-code.md) | Where no browser opens, `jli login --device-auth` signs in with a code, through Codex's client |
 
 ## Known gaps, by record
 
@@ -136,8 +136,9 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   project; a returning sign-in's URL carries the saved ID token as a hint, printed without a browser
   and in the process list while the opener runs; a Codex refresh is locked against other jli
   processes, not against Codex; and an older jli ignores the sign-in.
-- [29](0029-device-code.md): no sign-in with a code has completed live, only the steps up to the code
-  being shown; it needs the Codex CLI, whose prompt is shown as Codex prints it; jli's own sign-in
-  has no route for a remote host, since OpenAI refuses its client a device code and a new
-  registration's client id comes back only to the browser, and copying the credential file, the
-  documented route, is not built; and signing Codex in moves Codex on that host to the same account.
+- [29](0029-device-code.md): no sign-in with a code has completed live, only the code being issued,
+  and the revocation has not ended a real session; jli asks as Codex, which OpenAI could stop, and
+  the page names Codex; a refusal on the other device may look like a code not entered yet until
+  it expires; a sign-in refused as another account, or replaced by the same account, is dropped
+  without being revoked; an older jli cannot read `"source": "device"` in `jli.json`; and there is
+  one device sign-in per host.

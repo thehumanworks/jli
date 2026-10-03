@@ -1,8 +1,8 @@
 # 28. The agent and the translator can run on the user's ChatGPT plan, through a crate of jli's own
 
 - Status: accepted; superseded in part by [ADR 29](0029-device-code.md), which adds
-  `jli login --codex --device-auth` for a host where no browser opens, and refuses `--device-auth`
-  for jli's own sign-in
+  `jli login --device-auth`, a sign-in with a code through Codex's client for a host where no
+  browser opens, whose requests go to the Codex backend
 - Date: 2026-10-03
 - Origin: the Rust version
 - Supersedes in part: [ADR 4](0004-language-models.md), on every request being one OpenAI-compatible

@@ -298,7 +298,7 @@ impl fmt::Debug for TokenResponse {
     }
 }
 
-fn post_form(http: &dyn HttpClient, url: &str, pairs: &[(&str, &str)]) -> Result<(u16, String, Option<String>)> {
+pub(crate) fn post_form(http: &dyn HttpClient, url: &str, pairs: &[(&str, &str)]) -> Result<(u16, String, Option<String>)> {
     let request = HttpRequest::post(url, form_encode(pairs).into_bytes())
         .header("content-type", "application/x-www-form-urlencoded")
         .header("accept", "application/json");
@@ -307,7 +307,7 @@ fn post_form(http: &dyn HttpClient, url: &str, pairs: &[(&str, &str)]) -> Result
     Ok((status, reply.text()?, request_id))
 }
 
-fn token_reply(status: u16, body: &str, request_id: Option<String>) -> Result<TokenResponse> {
+pub(crate) fn token_reply(status: u16, body: &str, request_id: Option<String>) -> Result<TokenResponse> {
     if !(200..300).contains(&status) {
         return Err(OAuthError::from_reply(status, body, request_id).into());
     }

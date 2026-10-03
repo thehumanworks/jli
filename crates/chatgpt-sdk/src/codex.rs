@@ -10,6 +10,9 @@
 //! Codex makes it, and the new tokens are written back atomically with every other field kept, so
 //! that Codex reads them on its next request. Codex reloads the file before it refreshes, and skips
 //! its own refresh when the file has changed.
+//!
+//! An app can also keep a sign-in of the same kind in a file of its own: [`CodexAuth::create`]
+//! saves the tokens a [`crate::DeviceCode`] sign-in returns, in the same format.
 
 use std::path::{Path, PathBuf};
 
@@ -17,26 +20,32 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::auth::unverified_claims;
+use crate::auth::{unverified_claims, TokenResponse};
 use crate::client::{Backend, Bearer, Credential};
-use crate::error::{Error, OAuthError, Result};
-use crate::files::{lock_existing, read_optional, write_private};
+use crate::error::{Error, OAuthError, Result, SignInError};
+use crate::files::{lock_existing, private_dir, read_optional, write_private};
 use crate::http::{HttpClient, HttpRequest};
 
 /// Where Codex refreshes its tokens. `CODEX_REFRESH_TOKEN_URL_OVERRIDE` overrides it, as it does
 /// for Codex.
 pub const CODEX_REFRESH_URL: &str = "https://auth.openai.com/oauth/token";
+/// Where Codex revokes its refresh token when it signs out. `CODEX_REVOKE_TOKEN_URL_OVERRIDE`
+/// overrides it, as it does for Codex.
+pub const CODEX_REVOKE_URL: &str = "https://auth.openai.com/oauth/revoke";
 /// The Codex CLI's public client id, used when the access token does not name its client.
 pub const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
-/// The Codex CLI's ChatGPT sign-in.
+/// A ChatGPT sign-in in Codex's `auth.json` format: the Codex CLI's own, or an app's from
+/// [`CodexAuth::create`].
 #[derive(Debug)]
 pub struct CodexAuth {
     path: PathBuf,
     refresh_url: String,
+    revoke_url: String,
+    sign_in_command: String,
 }
 
-/// Who Codex is signed in as.
+/// Who a sign-in in Codex's format is for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexAccount {
     /// The account's email.
@@ -47,6 +56,28 @@ pub struct CodexAccount {
     pub account_id: Option<String>,
     /// When the access token expires.
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl CodexAccount {
+    /// Who the tokens of a [`crate::DeviceCode`] sign-in are for, read from their claims without
+    /// verifying them, before they are saved.
+    pub fn from_tokens(tokens: &TokenResponse) -> CodexAccount {
+        CodexAccount::from_claims(tokens.id_token.as_deref(), tokens.access_token.as_deref().unwrap_or_default(), None)
+    }
+
+    /// The ID token's claims first, then the access token's. `account_id` is the one the file
+    /// names, when it names one.
+    fn from_claims(id_token: Option<&str>, access_token: &str, account_id: Option<String>) -> CodexAccount {
+        let id: IdClaims = id_token.and_then(|token| unverified_claims(token).ok()).unwrap_or_default();
+        let access: AccessClaims = unverified_claims(access_token).unwrap_or_default();
+        let (id_auth, access_auth) = (id.auth.unwrap_or_default(), access.auth.unwrap_or_default());
+        CodexAccount {
+            email: id.email,
+            plan_type: id_auth.chatgpt_plan_type.or(access_auth.chatgpt_plan_type),
+            account_id: account_id.or(id_auth.chatgpt_account_id).or(access_auth.chatgpt_account_id),
+            expires_at: access.exp.and_then(|exp| DateTime::from_timestamp(exp, 0)),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -128,15 +159,46 @@ impl CodexAuth {
         CodexAuth::open(path)
     }
 
-    /// Codex's sign-in in `path`. Fails unless Codex is signed in with a ChatGPT account there.
+    /// The sign-in in `path`. Fails unless the file holds a ChatGPT sign-in.
     pub fn open(path: impl Into<PathBuf>) -> Result<CodexAuth> {
-        let refresh_url = std::env::var("CODEX_REFRESH_TOKEN_URL_OVERRIDE")
-            .ok()
-            .filter(|url| !url.trim().is_empty())
-            .unwrap_or_else(|| CODEX_REFRESH_URL.into());
-        let auth = CodexAuth { path: path.into(), refresh_url };
+        let from_env = |name: &str, default: &str| {
+            std::env::var(name).ok().filter(|url| !url.trim().is_empty()).unwrap_or_else(|| default.into())
+        };
+        let auth = CodexAuth {
+            path: path.into(),
+            refresh_url: from_env("CODEX_REFRESH_TOKEN_URL_OVERRIDE", CODEX_REFRESH_URL),
+            revoke_url: from_env("CODEX_REVOKE_TOKEN_URL_OVERRIDE", CODEX_REVOKE_URL),
+            sign_in_command: "codex login".into(),
+        };
         auth.read()?;
         Ok(auth)
+    }
+
+    /// Save the tokens of a [`crate::DeviceCode`] sign-in to `path`, in Codex's `auth.json` format
+    /// with mode 0600, and open them. The file must be the app's own: given Codex's `auth.json`,
+    /// this would replace Codex's sign-in.
+    pub fn create(path: impl Into<PathBuf>, tokens: &TokenResponse) -> Result<CodexAuth> {
+        let path = path.into();
+        let access_token =
+            tokens.access_token.as_deref().filter(|token| !token.is_empty()).ok_or(SignInError::MissingAccessToken)?;
+        let account = CodexAccount::from_tokens(tokens);
+        let file = json!({
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": null,
+            "tokens": {
+                "id_token": tokens.id_token,
+                "access_token": access_token,
+                "refresh_token": tokens.refresh_token,
+                "account_id": account.account_id,
+            },
+            "last_refresh": Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true),
+        });
+        if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            private_dir(dir)?;
+        }
+        let pretty = serde_json::to_vec_pretty(&file).map_err(|error| Error::json("serialising the sign-in", error))?;
+        write_private(&path, &pretty)?;
+        CodexAuth::open(path)
     }
 
     /// The same sign-in, refreshed at `url` instead.
@@ -145,38 +207,72 @@ impl CodexAuth {
         self
     }
 
+    /// The same sign-in, revoked at `url` instead.
+    pub fn revoke_url(mut self, url: impl Into<String>) -> CodexAuth {
+        self.revoke_url = url.into();
+        self
+    }
+
+    /// The same sign-in, telling the person to run `command` when it can no longer be used,
+    /// instead of `codex login`.
+    pub fn sign_in_command(mut self, command: impl Into<String>) -> CodexAuth {
+        self.sign_in_command = command.into();
+        self
+    }
+
     /// The file.
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// Who Codex is signed in as, read from the file's tokens without verifying them.
+    /// Who is signed in, read from the file's tokens without verifying them.
     pub fn account(&self) -> Result<CodexAccount> {
         let snapshot = self.read()?;
-        let id: IdClaims = snapshot.id_token.as_deref().and_then(|token| unverified_claims(token).ok()).unwrap_or_default();
-        let access: AccessClaims = unverified_claims(&snapshot.access_token).unwrap_or_default();
-        let plan_type = id.auth.as_ref().and_then(|auth| auth.chatgpt_plan_type.clone());
-        let plan_type = plan_type.or_else(|| access.auth.and_then(|auth| auth.chatgpt_plan_type));
-        Ok(CodexAccount { email: id.email, plan_type, account_id: snapshot.account_id, expires_at: snapshot.expires_at })
+        Ok(CodexAccount::from_claims(snapshot.id_token.as_deref(), &snapshot.access_token, snapshot.account_id))
+    }
+
+    /// End the sign-in's renewable session: revoke its refresh token as `codex logout` does, with a
+    /// JSON body. A refresh token the server no longer accepts counts as revoked. The file is left
+    /// for the app to remove. Never call it on Codex's own file: it would sign Codex out.
+    pub fn revoke(&self, http: &dyn HttpClient) -> Result<()> {
+        let current = self.read()?;
+        let Some(refresh_token) = current.refresh_token.as_deref() else { return Ok(()) };
+        let client_id = current.client_id.as_deref().unwrap_or(CODEX_CLIENT_ID);
+        let body = json!({ "token": refresh_token, "token_type_hint": "refresh_token", "client_id": client_id });
+        let request = HttpRequest::post(&self.revoke_url, body.to_string().into_bytes())
+            .header("content-type", "application/json")
+            .header("accept", "application/json");
+        let reply = http.send(request)?;
+        let (status, request_id) = (reply.status, reply.request_id());
+        let text = reply.text()?;
+        if (200..300).contains(&status) {
+            return Ok(());
+        }
+        let error = OAuthError::from_reply(status, &text, request_id);
+        if error.refresh_token_unusable() {
+            Ok(())
+        } else {
+            Err(error.into())
+        }
     }
 
     fn not_signed_in(&self, why: &str) -> Error {
-        Error::SignInRequired { reason: format!("{why} in {}: run `codex login`", self.path.display()) }
+        Error::SignInRequired { reason: format!("{why} in {}: run `{}`", self.path.display(), self.sign_in_command) }
     }
 
     fn read_value(&self) -> Result<Value> {
-        let text = read_optional(&self.path)?.ok_or_else(|| self.not_signed_in("Codex has no sign-in"))?;
+        let text = read_optional(&self.path)?.ok_or_else(|| self.not_signed_in("there is no ChatGPT sign-in"))?;
         serde_json::from_str(&text).map_err(|error| Error::json(format!("reading {}", self.path.display()), error))
     }
 
     fn read(&self) -> Result<Snapshot> {
         let file: AuthFile = serde_json::from_value(self.read_value()?)
             .map_err(|error| Error::json(format!("reading {}", self.path.display()), error))?;
-        let tokens = file.tokens.ok_or_else(|| self.not_signed_in("Codex is not signed in with ChatGPT"))?;
+        let tokens = file.tokens.ok_or_else(|| self.not_signed_in("there is no ChatGPT sign-in"))?;
         let access_token = tokens
             .access_token
             .filter(|token| !token.is_empty())
-            .ok_or_else(|| self.not_signed_in("Codex has no access token"))?;
+            .ok_or_else(|| self.not_signed_in("the sign-in has no access token"))?;
         let claims: AccessClaims = unverified_claims(&access_token).unwrap_or_default();
         let claimed_account = claims.auth.as_ref().and_then(|auth| auth.chatgpt_account_id.clone());
         Ok(Snapshot {
@@ -198,7 +294,7 @@ impl CodexAuth {
             return Ok(current);
         }
         let refresh_token =
-            current.refresh_token.as_deref().ok_or_else(|| self.not_signed_in("Codex's sign-in has expired"))?;
+            current.refresh_token.as_deref().ok_or_else(|| self.not_signed_in("the ChatGPT sign-in has expired"))?;
         let client_id = current.client_id.as_deref().unwrap_or(CODEX_CLIENT_ID);
         let body = json!({ "client_id": client_id, "grant_type": "refresh_token", "refresh_token": refresh_token });
         let request = HttpRequest::post(&self.refresh_url, body.to_string().into_bytes())
@@ -210,7 +306,7 @@ impl CodexAuth {
         if !(200..300).contains(&status) {
             let error = OAuthError::from_reply(status, &text, request_id);
             return Err(if error.refresh_token_unusable() || status == 401 {
-                self.not_signed_in(&format!("Codex's sign-in can no longer be refreshed ({})", error.error))
+                self.not_signed_in(&format!("the ChatGPT sign-in can no longer be refreshed ({})", error.error))
             } else {
                 error.into()
             });
@@ -220,7 +316,7 @@ impl CodexAuth {
         let tokens = file
             .get_mut("tokens")
             .and_then(Value::as_object_mut)
-            .ok_or_else(|| self.not_signed_in("Codex is not signed in with ChatGPT"))?;
+            .ok_or_else(|| self.not_signed_in("there is no ChatGPT sign-in"))?;
         for name in ["id_token", "access_token", "refresh_token"] {
             if let Some(token) = fresh.get(name).and_then(Value::as_str).filter(|token| !token.is_empty()) {
                 tokens.insert(name.into(), Value::String(token.into()));
@@ -235,7 +331,7 @@ impl CodexAuth {
         let target = std::fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone());
         write_private(&target, &pretty).map_err(|error| {
             // The server has already spent the old refresh token, so the file on disk is no longer usable.
-            self.not_signed_in(&format!("Codex's refreshed sign-in could not be saved ({error})"))
+            self.not_signed_in(&format!("the refreshed ChatGPT sign-in could not be saved ({error})"))
         })?;
         self.read()
     }
@@ -265,7 +361,7 @@ impl Credential for CodexAuth {
         if current.expired(Utc::now()) {
             return Ok(self.refresh(http)?.bearer());
         }
-        Err(self.not_signed_in("Codex's ChatGPT sign-in was rejected"))
+        Err(self.not_signed_in("the ChatGPT sign-in was rejected"))
     }
 }
 
@@ -373,6 +469,58 @@ mod tests {
         let second = access_token(&key, Utc::now().timestamp() + 7200);
         write_auth(&dir, &second);
         assert_eq!(auth.after_rejection(&never(), &rejected).unwrap().access_token, second);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_device_sign_in_is_saved_in_codex_format_and_revoked_as_codex_does() {
+        let dir = scratch_dir("codex-create");
+        let key = TestKey::load();
+        let id = key.token(&json!({ "email": "d@example.com",
+            "https://api.openai.com/auth": { "chatgpt_account_id": "acct-d", "chatgpt_plan_type": "plus" } }));
+        let access = access_token(&key, Utc::now().timestamp() + 3600);
+        let tokens: TokenResponse =
+            serde_json::from_value(json!({ "access_token": access, "refresh_token": "rt-d", "id_token": id })).unwrap();
+        assert_eq!(CodexAccount::from_tokens(&tokens).account_id.as_deref(), Some("acct-d"), "the ID token's account first");
+
+        let path = dir.join("app").join("device.json");
+        let auth = CodexAuth::create(&path, &tokens)
+            .unwrap()
+            .sign_in_command("my-app login")
+            .revoke_url("https://revoke.test/oauth/revoke");
+        let written: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!((written["auth_mode"].as_str(), written["OPENAI_API_KEY"].is_null()), (Some("chatgpt"), true));
+        assert_eq!(written["tokens"]["account_id"], "acct-d");
+        assert_eq!(written["tokens"]["refresh_token"], "rt-d");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let account = auth.account().unwrap();
+        assert_eq!((account.email.as_deref(), account.plan_type.as_deref()), (Some("d@example.com"), Some("plus")));
+        assert_eq!(auth.bearer(&never()).unwrap().account_id.as_deref(), Some("acct-d"));
+
+        let revoked = |request: HttpRequest| {
+            assert_eq!(request.url, "https://revoke.test/oauth/revoke");
+            assert_eq!(request.header_value("content-type"), Some("application/json"));
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(body, json!({ "token": "rt-d", "token_type_hint": "refresh_token", "client_id": "app_codex" }));
+            Ok(HttpResponse::new(200, ""))
+        };
+        auth.revoke(&revoked).unwrap();
+        let unknown = |_: HttpRequest| {
+            Ok(HttpResponse::new(
+                401,
+                r#"{"error":{"message":"Could not validate your refresh token.","code":"invalid_refresh_token"}}"#,
+            ))
+        };
+        auth.revoke(&unknown).expect("a token the server no longer accepts has nothing left to end");
+        assert!(auth.revoke(&|_: HttpRequest| Ok(HttpResponse::new(503, ""))).is_err());
+
+        std::fs::remove_file(&path).unwrap();
+        let error = auth.bearer(&never()).unwrap_err();
+        assert!(matches!(&error, Error::SignInRequired { reason } if reason.ends_with("run `my-app login`")), "{error}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

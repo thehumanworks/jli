@@ -4,7 +4,7 @@
 //! cargo test -p chatgpt-sdk --test live -- --ignored --nocapture
 //! ```
 //!
-//! They use the Codex CLI's sign-in (`codex login`, in `$CODEX_HOME/auth.json`), and the model in
+//! All but the device code check use the Codex CLI's sign-in (`codex login`, in `$CODEX_HOME/auth.json`), and the model in
 //! `CHATGPT_SDK_LIVE_MODEL`, `gpt-6-luna` by default.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -95,4 +95,14 @@ fn an_unknown_model_is_a_typed_error() {
     let error = client().create(&request).unwrap_err();
     println!("{error} ({:?})", error.recovery());
     assert_eq!(error.recovery(), chatgpt_sdk::Recovery::FixRequest);
+}
+
+#[test]
+#[ignore = "asks OpenAI for a device code, which expires unused"]
+fn a_device_code_is_issued_to_codex_client() {
+    let code = chatgpt_sdk::DeviceCode::request(&chatgpt_sdk::UreqClient::new(), chatgpt_sdk::auth::ISSUER).unwrap();
+    // The code itself is not printed: whoever holds it can sign in as the person who enters it.
+    println!("{} every {:?}, until {}", code.verification_url, code.interval, code.expires_at);
+    assert_eq!(code.verification_url, "https://auth.openai.com/codex/device");
+    assert!(!code.user_code.is_empty() && code.expires_at > chrono::Utc::now());
 }

@@ -86,11 +86,11 @@ const COMMANDS: &[Command] = &[
         lines: &[
             ("jli login", "continue with ChatGPT: the agent and the translator run on your\nChatGPT plan instead of an API key"),
             ("jli login --new", "the same with another ChatGPT account than the one saved here"),
-            ("jli login --codex", "use the ChatGPT account the Codex CLI is signed in with"),
             (
-                "jli login --codex --device-auth",
-                "sign the Codex CLI in with a code entered on another device, over\nSSH or wherever no browser opens, then use its account",
+                "jli login --device-auth",
+                "sign in with a code entered on another device, over SSH or wherever\nno browser opens (with --new, as another account)",
             ),
+            ("jli login --codex", "use the ChatGPT account the Codex CLI is signed in with"),
         ],
         options: &[QUIET, JSON],
     },
