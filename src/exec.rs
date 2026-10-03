@@ -119,6 +119,17 @@ pub fn open_in_browser(url: &str) -> bool {
     true
 }
 
+/// Run `codex login --device-auth`, for `jli login --codex --device-auth` (ADR 29): the Codex
+/// CLI signs in with a one-time code entered on another device, for a host where no browser opens.
+pub fn codex_device_login() -> std::io::Result<ExitStatus> {
+    device_login("codex")
+}
+
+fn device_login(program: &str) -> std::io::Result<ExitStatus> {
+    // The link and the code reach stderr, so stdout keeps only jli's answer, even with --json.
+    Command::new(program).args(["login", "--device-auth"]).stdout(std::io::stderr()).status()
+}
+
 /// Run shell steps in order with `bash -c`, stopping at the first failure.
 pub fn run(commands: &[String], cwd: &Path, options: RunOptions) -> Result<RunResult> {
     let mut output = String::new();
@@ -189,6 +200,22 @@ mod tests {
         assert_eq!(result.output.as_deref(), Some("one\ntwo\n"));
         assert_eq!(result.stderr, "two\n");
         assert_eq!((result.captured_stdout.as_deref(), result.captured_stderr.as_deref()), (Some("one\n"), Some("two\n")));
+    }
+
+    #[test]
+    fn codex_is_asked_for_a_device_code_and_its_status_returned() {
+        use std::os::unix::fs::PermissionsExt;
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("jli-codex-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let codex = dir.join("codex");
+        std::fs::write(&codex, "#!/bin/sh\n[ \"$*\" = 'login --device-auth' ] && exit 0\nexit 3\n").unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let status = device_login(&codex.to_string_lossy());
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(status.unwrap().success());
+        let missing = device_login("/nonexistent/codex").unwrap_err();
+        assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
     }
 
     #[test]

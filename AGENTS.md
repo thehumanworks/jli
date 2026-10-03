@@ -34,7 +34,8 @@ The hooks run the same checks: `pre-commit` runs the linters and fixes what it c
   `~/.jli/brain.db` or `~/.jli/chatgpt`. Unset `JLI_YES` and `JLI_YOLO` first: with `JLI_YOLO=1` in
   the environment a destructive command runs without asking. To run the models on a ChatGPT plan
   without a browser, `jli login --codex` uses the Codex CLI's sign-in; it writes Codex's file only to
-  refresh a token that has expired.
+  refresh a token that has expired. `jli login --codex --device-auth` signs Codex in again and
+  replaces that file: run it only with `CODEX_HOME` set to a scratch directory.
 - **`crates/chatgpt-sdk` is a library of its own** ([ADR 28](docs/adr/0028-chatgpt-plan.md)), kept
   to the standard of a published crate: every public item documented, tests in the crate, and its
   live tests `#[ignore]`d (`cargo test -p chatgpt-sdk --test live -- --ignored`). jli uses it only

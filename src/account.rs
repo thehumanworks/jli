@@ -9,6 +9,7 @@
 //!                                                the first-sign-in message was shown
 
 use std::path::PathBuf;
+use std::process::ExitStatus;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -281,6 +282,24 @@ impl Accounts {
             plan_type: account.plan_type,
             model: choice.model.unwrap_or_else(|| DEFAULT_MODEL.into()),
         })
+    }
+
+    /// Sign the Codex CLI in with a one-time code, for a host where no browser opens, then use its
+    /// account. OpenAI gives a device code to Codex's own client and not to jli's (ADR 29), so
+    /// `codex_login` runs `codex login --device-auth` and jli reads what Codex saved.
+    pub fn login_codex_device(&self, codex_login: &dyn Fn() -> std::io::Result<ExitStatus>) -> Result<SignedIn> {
+        match codex_login() {
+            Ok(status) if status.success() => self.login_codex(),
+            Ok(status) => Err(coded(
+                CONFIGURATION,
+                format!("`codex login --device-auth` did not sign in ({status}), so jli changed nothing."),
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(coded(
+                CONFIGURATION,
+                "Cannot find the Codex CLI. Install it to sign in with a code, or run `jli login` where a browser can open.",
+            )),
+            Err(error) => Err(coded(CONFIGURATION, format!("Could not run `codex login --device-auth`: {error}"))),
+        }
     }
 
     /// Stop using the ChatGPT plan. jli's own session is revoked and its tokens cleared; the
@@ -560,6 +579,29 @@ mod tests {
         let missing = Accounts::fake(scratch.0.join("other"), &fake, Some(scratch.0.join("absent.json")));
         let error = missing.login_codex().unwrap_err();
         assert!(error.to_string().contains("codex login"), "{error}");
+    }
+
+    #[test]
+    fn a_device_code_signs_codex_in_first_and_a_sign_in_codex_did_not_finish_changes_nothing() {
+        use std::os::unix::process::ExitStatusExt;
+        let scratch = Scratch::new("device");
+        let fake = FakeChatGpt::new();
+        let accounts = Accounts::fake(scratch.0.join("chatgpt"), &fake, Some(scratch.0.join("auth.json")));
+
+        let missing = accounts.login_codex_device(&|| Err(std::io::ErrorKind::NotFound.into())).unwrap_err();
+        assert!(missing.to_string().contains("Cannot find the Codex CLI"), "{missing}");
+        let failed = accounts.login_codex_device(&|| Ok(ExitStatus::from_raw(1 << 8))).unwrap_err();
+        assert_eq!(crate::types::error_code(&failed), CONFIGURATION);
+        assert!(failed.to_string().contains("did not sign in"), "{failed}");
+        assert_eq!(accounts.choice().unwrap(), Choice::default());
+
+        let codex_signs_in = || {
+            codex_file(&scratch.0);
+            Ok(ExitStatus::from_raw(0))
+        };
+        let signed_in = accounts.login_codex_device(&codex_signs_in).unwrap();
+        assert_eq!((signed_in.source, signed_in.email.as_deref()), (Source::Codex, Some("codex@example.com")));
+        assert_eq!(accounts.provider().unwrap().unwrap().sign_in, "codex login");
     }
 
     #[test]

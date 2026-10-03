@@ -169,6 +169,7 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | `jli login` | continue with ChatGPT in the browser: the agent and the translator run on your ChatGPT plan |
 | `jli login --new` | the same with another ChatGPT account than the one saved here |
 | `jli login --codex` | use the ChatGPT account the Codex CLI is signed in with |
+| `jli login --codex --device-auth` | sign the Codex CLI in with a code entered on another device, then use its account: over SSH, or wherever no browser opens |
 | `jli logout` | stop using your ChatGPT plan; jli's session with it is revoked |
 | `jli models` | the models your ChatGPT plan has, the one in use marked |
 | `jli --json <request>` | machine-readable outcome with captured output, for agents; an error is one JSON object too |
@@ -446,7 +447,7 @@ no `--project`. See [ADR 26](docs/adr/0026-project-flag.md).
 | `src/slots.rs` | fills, expands and shell-quotes `{slot}` values, leaves out an optional slot with its flag, writes a choice's text, holds a model's slots to what it may say, and matches a command back to its template |
 | `src/shell.rs` | the shell function, which steps it must run in your shell, and which shell jli is running under |
 | `src/seed.rs` | the original hard-coded matrix, now only the seed for an empty brain |
-| `src/exec.rs` | runs the steps with `bash -c`, watching stderr in auto mode and for a new proposal, tries builtins before they are handed over, and reads the process table to find the shell jli was started from |
+| `src/exec.rs` | runs the steps with `bash -c`, watching stderr in auto mode and for a new proposal, tries builtins before they are handed over, and reads the process table to find the shell jli was started from; for `jli login`, opens the browser or runs `codex login --device-auth` |
 | `src/cli.rs` | argument parsing, subcommands, the interactive session, and errors as JSON |
 | `src/help.rs` | the help, written once as a table of commands, options and variables, and which help a command line asks for |
 | `src/ui.rs` | the trace and its warnings on stderr, and the one owner of stdin, which shows each question after what it asks about |
@@ -498,7 +499,11 @@ $ jli config model gpt-6.1-sol
 it again after that; it asks to use your plan for jli's requests, and nothing changes if you say no.
 The sign-in is kept on this host only, in `~/.jli/chatgpt` (`JLI_CHATGPT_DIR`), never in the brain.
 If the Codex CLI is signed in, `jli login --codex` uses its account instead, and leaves Codex's file
-as it is. `jli logout` stops, and `jli login --new` adds another account. Requests count toward your
+as it is. On a host where no browser opens, such as over SSH, `jli login --codex --device-auth` runs
+`codex login --device-auth`: Codex prints a link and a one-time code to enter on any other device,
+and jli then uses the account Codex signed in with. OpenAI gives such a code to Codex but not to jli's
+own sign-in, so `jli login --device-auth` says to use Codex's. `jli logout` stops, and
+`jli login --new` adds another account. Requests count toward your
 plan's usage; review and limit them at <https://chatgpt.com/settings/usage>. System 1 still needs
 `TYPESAFE_API_KEY`.
 
