@@ -35,6 +35,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [22](0022-project-scenarios.md) | A scenario rewritten inside a project is kept for that project, and the global row is left as it was |
 | [23](0023-shell-fixes-and-number-words.md) | The install line follows the running shell, the function cleans up after ctrl-c, and a hyphenated number word is not a count |
 | [24](0024-optional-slots.md) | A slot can be left out with its flag, a person can give it a default, and choices say how each value is written |
+| [27](0027-quiet.md) | A quiet run hides the trace, keeps its warnings, and still shows what a question asks about |
 
 ## Known gaps, by record
 
@@ -107,3 +108,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   it; nothing checks a value left out by hand or a choice's text; the translator's scenario can still
   be narrower than an optional value makes the skill; a plan's left-out slot cannot be given to `jli
   run`; and `jli slot` inside a project ran live once.
+- [27](0027-quiet.md): `-q -n` prints nothing; a quiet run nobody could confirm does not name the
+  command or the plan it stored; the agent's answer to a request that is not a command, and System 1's
+  "not a command", are hidden under `--quiet`; and `jli fix` prints its learned and dry-run lines
+  under `--quiet` and `--json`.
