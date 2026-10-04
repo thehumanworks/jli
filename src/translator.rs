@@ -60,6 +60,9 @@ scenario
 - Read knownSkills. If one is close, your scenario must say what differs from it, so the classifier can
   tell them apart. Never write a scenario that would also be true of a known skill.
 - Do not copy details that only belong to this instance (a specific file name, a specific number).
+- description, when present, is the person's own account of when and why to run this command. Keep its
+  meaning and never contradict it. Where it is broader than the command, describe what the command does.
+- name, when present, is what the person calls this skill. Read it as a hint to what they mean.
 
 steps and slots
 - Replace values that belong only to this instance (a file, a branch, a count, a message) with {slot}
@@ -91,15 +94,18 @@ pub struct TranslateInput<'a> {
     pub skills: &'a [Skill],
     /// What went wrong with the previous draft, when retrying.
     pub feedback: Option<&'a str>,
+    /// What the person calls the skill, from `jli teach --name`.
+    pub name: Option<&'a str>,
+    /// When and why to run it, in the person's words, from `jli teach --description`.
+    pub description: Option<&'a str>,
+}
+
+fn known_skills(skills: &[Skill]) -> Vec<Value> {
+    skills.iter().map(|skill| json!({ "label": skill.label, "steps": skill.steps, "scenario": skill.scenario })).collect()
 }
 
 /// Turn one taught instance into a generalised row for the decision matrix.
 pub fn translate(llm: &Llm, input: &TranslateInput) -> Result<(Draft, u64)> {
-    let known: Vec<Value> = input
-        .skills
-        .iter()
-        .map(|skill| json!({ "label": skill.label, "steps": skill.steps, "scenario": skill.scenario }))
-        .collect();
     llm.complete_json(&JsonRequest {
         model: &llm.translator_model(),
         system: INSTRUCTIONS,
@@ -110,8 +116,75 @@ pub fn translate(llm: &Llm, input: &TranslateInput) -> Result<(Draft, u64)> {
         input: json!({
             "phrase": input.phrase,
             "command": input.steps,
+            "name": input.name,
+            "description": input.description,
             "previousAttemptProblem": input.feedback,
-            "knownSkills": known,
+            "knownSkills": known_skills(input.skills),
+        }),
+    })
+}
+
+/// What the translator makes of a phrase and a command that is kept exactly as taught (ADR 30).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Description {
+    pub label: String,
+    pub scenario: String,
+    pub risk: Risk,
+}
+
+fn description_schema() -> Value {
+    object(json!({
+        "label": { "type": "string", "description": "short kebab-case name for the skill, e.g. git-pull-origin" },
+        "scenario": { "type": "string", "description": "one sentence starting with 'the user wants'" },
+        "risk": risk_schema(),
+    }))
+}
+
+const DESCRIBE: &str = r#"You write the scenario of one row of a decision matrix.
+
+A fast classifier reads a user's plain-language request and picks the row whose "scenario" fits it best.
+A person has just told us that a phrase means a command. The command is kept exactly as they wrote it
+and runs as written every time. Write the scenario that makes every way of asking for what this command
+does land on this row, and nothing else.
+
+scenario
+- One sentence starting with "the user wants". Describe the outcome of running the command as written,
+  not the wording of the phrase and not the name of the tool.
+- Every value in the command is fixed: a remote, a branch, a file, a task, a number. Name the ones that
+  set this command apart, so that a request for another value does not fit: "the three most recent
+  commits", not "recent commits".
+- Be exactly as broad as the command. If you are unsure whether a neighbouring intent is covered, leave
+  it out.
+- description, when present, is the person's own account of when and why to run this command. Keep its
+  meaning and never contradict it. Where it is broader than the command, describe what the command does.
+- name, when present, is what the person calls this skill. Read it as a hint to what they mean.
+- Read knownSkills. If one is close, your scenario must say what differs from it, so the classifier can
+  tell them apart. Never write a scenario that would also be true of a known skill.
+
+label
+- A short kebab-case name for what the command does.
+
+risk
+- "safe" only reads. "modifies" changes local state and can be undone. "destructive" deletes data,
+  rewrites history or changes remote systems."#;
+
+/// Write the scenario for a command that is stored as taught: the default of `jli teach` (ADR 30).
+/// The steps are not the model's to change, so it is given no way to change them.
+pub fn describe(llm: &Llm, input: &TranslateInput) -> Result<(Description, u64)> {
+    llm.complete_json(&JsonRequest {
+        model: &llm.translator_model(),
+        system: DESCRIBE,
+        name: "skill_scenario",
+        timeout: Duration::from_secs(8),
+        reasoning: Reasoning::Off,
+        schema: description_schema(),
+        input: json!({
+            "phrase": input.phrase,
+            "command": input.steps,
+            "name": input.name,
+            "description": input.description,
+            "previousAttemptProblem": input.feedback,
+            "knownSkills": known_skills(input.skills),
         }),
     })
 }

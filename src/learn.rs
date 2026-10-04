@@ -3,16 +3,38 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
+use crate::args::numbers_in;
 use crate::context::{read_context, Context};
 use crate::eval::{closest, verify_row};
 use crate::llm::SlotDraft;
-use crate::slots::{checked_slots, is_flag, is_literal, match_proposal, match_skill, render, undeclared};
+use crate::slots::{checked_slots, is_flag, is_literal, match_proposal, match_skill, program_slots, render, undeclared};
 use crate::store::{slug, Brain, NewSkill, MAX_EXAMPLES};
 use crate::system2::{rewrite_row, RewriteInput, WeakPhrasing};
-use crate::translator::{translate, TranslateInput};
-use crate::types::{Mode, Origin, Risk, Skill, Slot};
+use crate::translator::{describe, translate, TranslateInput};
+use crate::types::{coded, Mode, Origin, Risk, Skill, Slot, USAGE};
 use crate::ui::{c, duration, Ui};
 use crate::Models;
+
+/// How a taught phrase and command become a row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Teaching {
+    /// Manual mode: the phrase and the command are stored as given, and no model is asked.
+    AsGiven,
+    /// `jli teach` with no `--mode` (ADR 30): the command is stored as given, and the translator writes
+    /// only the scenario, from the phrase and the description, which System 1 checks before it is kept.
+    Described,
+    /// Semi and auto mode: the translator may turn the command's values into slots, and writes the scenario.
+    Generalised,
+}
+
+impl From<Mode> for Teaching {
+    fn from(mode: Mode) -> Teaching {
+        match mode {
+            Mode::Manual => Teaching::AsGiven,
+            Mode::Semi | Mode::Auto => Teaching::Generalised,
+        }
+    }
+}
 
 pub struct LearnInput {
     pub phrase: String,
@@ -20,9 +42,13 @@ pub struct LearnInput {
     pub steps: Vec<String>,
     /// Overrides the translator's reading of the risk.
     pub risk: Option<Risk>,
-    pub mode: Mode,
+    pub teaching: Teaching,
     pub threshold: f64,
     pub cwd: PathBuf,
+    /// The label the person chose (`jli teach --name`). A new skill takes it, and no other.
+    pub name: Option<String>,
+    /// When and why to run the command, in the person's words (`jli teach --description`).
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,9 +172,186 @@ fn with_defaults(slots: Vec<Slot>, values: &HashMap<String, String>) -> Vec<Slot
         .collect()
 }
 
-/// Link a phrase to a command. In manual mode the pair is stored as given. Otherwise a fast model
-/// rewrites it into a general row, and the row is kept only if the classifier confirms that it
-/// matches the phrase and does not capture phrasings that belong to other skills.
+/// The scenario in the person's own words, for when no model's holds: the phrase, and their
+/// description after it when they gave one.
+fn own_words(phrase: &str, description: Option<&str>) -> String {
+    match description.map(str::trim).filter(|description| !description.is_empty()) {
+        Some(description) => format!("the user wants: {phrase}. {description}"),
+        None => format!("the user wants: {phrase}"),
+    }
+}
+
+/// A name the person gave is theirs to keep, so it is checked before any model is asked (ADR 30). It
+/// must not be another command's label, and the command must not already be another skill's: one
+/// command has one row (ADR 19), and a label is never renamed.
+fn check_name(brain: &Brain, skills: &[Skill], name: &str, runs_it: impl Fn(&&Skill) -> bool) -> Result<()> {
+    let forget = |label: &str| -> Result<String> {
+        Ok(format!("jli forget {}{label}", if brain.owns(label)? { "" } else { "--global " }))
+    };
+    if let Some(known) = skills.iter().filter(&runs_it).find(|skill| skill.label != name) {
+        return Err(coded(
+            USAGE,
+            format!(
+                "{} already runs {}, so the phrase would join it, not a skill called {name}. To add the phrase to {}, teach it without --name. To call the skill {name}, forget {} first: {}",
+                known.label,
+                known.steps.join(" && "),
+                known.label,
+                known.label,
+                forget(&known.label)?
+            ),
+        ));
+    }
+    if let Some(holder) = skills.iter().find(|skill| skill.label == name).filter(|holder| !runs_it(holder)) {
+        return Err(coded(
+            USAGE,
+            format!(
+                "{name} is already a skill, which runs {}. Choose another name, or forget that skill first: {}",
+                holder.steps.join(" && "),
+                forget(name)?
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The values a command kept as taught runs with every time, which a request could name otherwise:
+/// arguments after the program with a digit, a dot, a slash, a colon or a `~` in them, such as
+/// `Cargo.toml`, `3`, `:3000` or `src/main.rs`, without the punctuation around them. A flag, a quoted
+/// word and shell syntax are not values here.
+fn values_in(steps: &[String]) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for word in steps.iter().flat_map(|step| step.split_whitespace().skip(1)) {
+        let plain = word.chars().all(|ch| ch.is_alphanumeric() || "._-/:~@+,".contains(ch));
+        let valued = word.chars().any(|ch| ch.is_ascii_digit() || ".:/~".contains(ch));
+        let value = word.trim_matches(|ch: char| !ch.is_alphanumeric());
+        if plain && valued && !is_flag(word) && !value.is_empty() && !found.iter().any(|seen| seen == value) {
+            found.push(value.to_string());
+        }
+    }
+    found
+}
+
+/// Whether a scenario names a value: as it is written, or each part of it as a word or a number, so
+/// that `3` is named by "the three most recent commits" and `8080:80` by "port 8080 to 80".
+fn names_value(scenario: &str, value: &str) -> bool {
+    let lower = scenario.to_lowercase();
+    let value_lower = value.to_lowercase();
+    let alone = |(at, _): &(usize, &str)| {
+        let before = lower[..*at].chars().next_back();
+        let after = lower[at + value_lower.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    };
+    if lower.match_indices(&value_lower).any(|found| alone(&found)) {
+        return true;
+    }
+    let numbers = numbers_in(scenario);
+    let words: Vec<&str> = lower.split(|ch: char| !ch.is_alphanumeric()).collect();
+    let mut parts = value.split(|ch: char| !ch.is_alphanumeric()).filter(|part| !part.is_empty());
+    parts.all(|part| {
+        let part = part.to_lowercase();
+        words.contains(&part.as_str()) || numbers.contains(&part)
+    })
+}
+
+/// The phrase and the command as given, under the person's name for it or a slug of the command, with
+/// their own words as the scenario: manual mode, and teaching with every model out of reach.
+fn as_given(brain: &Brain, input: &LearnInput) -> Result<Learned> {
+    let (label, created) = brain.add_new_skill(&NewSkill {
+        label: input.name.clone().unwrap_or_else(|| slug(&input.steps.join(" && "))),
+        steps: input.steps.clone(),
+        scenario: own_words(&input.phrase, input.description.as_deref()),
+        risk: input.risk.unwrap_or(Risk::Modifies),
+        origin: Origin::Taught,
+        examples: vec![input.phrase.clone()],
+        slots: vec![],
+    })?;
+    Ok(Learned { label, created, translated: false, upgraded: false })
+}
+
+/// The command as taught, under the person's name for it. The translator writes only the scenario,
+/// from the phrase and the description, and it is kept once System 1 confirms it, as a translated row
+/// is. If it fails twice, the scenario is the person's own words (ADR 30).
+fn described(brain: &Brain, models: &Models, input: &LearnInput, skills: &[Skill], ui: &Ui) -> Result<Learned> {
+    let mut feedback: Option<String> = None;
+    let mut kept: Option<Kept> = None;
+    for attempt in 0..2 {
+        let written = describe(
+            &models.llm,
+            &TranslateInput {
+                phrase: &input.phrase,
+                steps: &input.steps,
+                skills,
+                feedback: feedback.as_deref(),
+                name: input.name.as_deref(),
+                description: input.description.as_deref(),
+            },
+        );
+        let draft = match written {
+            Ok((draft, ms)) => {
+                let by = models.llm.translator_label();
+                ui.note(format!("{by} described it in {}: {}", duration(ms), c::dim(&draft.scenario)));
+                draft
+            }
+            Err(error) => {
+                ui.warn(format!("Translator unavailable, storing the phrase as given. {error:#}"));
+                break;
+            }
+        };
+        let mut row = Kept {
+            label: input.name.clone().unwrap_or_else(|| slug(&draft.label)),
+            steps: input.steps.clone(),
+            slots: vec![],
+            risk: input.risk.unwrap_or(draft.risk),
+            upgrades: None,
+        };
+        // A name the person gave is free: `check_name` saw to that.
+        while skills.iter().any(|skill| skill.label == row.label) {
+            row.label.push_str("-x");
+        }
+        kept = Some(row);
+        let try_again = if attempt == 0 { " Trying once more." } else { "" };
+        // The command runs its own values every time. A scenario that leaves one out would take a request
+        // for another value and run this one: `wc -l Cargo.toml` for the lines of README.md. Checked
+        // before System 1 is asked, since no route can tell.
+        let unnamed: Vec<String> =
+            values_in(&input.steps).into_iter().filter(|value| !names_value(&draft.scenario, value)).collect();
+        if !unnamed.is_empty() {
+            let problem = format!(
+                "the scenario does not name {}, which the command runs with every time, so a request for another value would fit it",
+                unnamed.join(" or ")
+            );
+            ui.note(format!("Rejected: {problem}.{try_again}"));
+            feedback = Some(problem);
+            continue;
+        }
+        let row = kept.as_ref().expect("set just above");
+        let candidate = row.as_skill(draft.scenario.clone(), &input.phrase);
+        let checked = verify_row(models, skills, &candidate, &input.phrase, &read_context(&input.cwd), input.threshold);
+        match checked {
+            Ok(Ok(summary)) => {
+                ui.note(format!("Verified with System 1: {summary}."));
+                return store(brain, row, draft.scenario, &input.phrase, true, ui);
+            }
+            Ok(Err(problem)) => {
+                ui.note(format!("Rejected by System 1: {problem}.{try_again}"));
+                feedback = Some(problem);
+            }
+            Err(error) => {
+                ui.warn(format!("Could not check the row with System 1. {error:#}"));
+                break;
+            }
+        }
+    }
+    let Some(row) = kept else { return as_given(brain, input) };
+    let learned = store(brain, &row, own_words(&input.phrase, input.description.as_deref()), &input.phrase, false, ui)?;
+    ui.note("Stored with your own words as the scenario instead.");
+    Ok(learned)
+}
+
+/// Link a phrase to a command. In manual mode the pair is stored as given. By default `jli teach`
+/// keeps the command as given too, and a fast model writes only its scenario (ADR 30). In semi and
+/// auto mode the model rewrites the pair into a general row. A model's row is kept only if the
+/// classifier confirms that it matches the phrase and does not capture phrasings of other skills.
 ///
 /// A literal skill that runs exactly the command never absorbs a template (ADR 19): if the translator
 /// finds values in the command, the literal skill is made general in place, keeping its phrasings.
@@ -158,22 +361,33 @@ pub fn learn_phrase(brain: &Brain, models: &Models, input: &LearnInput, ui: &Ui)
     // A skill whose optional slot this command leaves out runs it too: `git log --oneline` is
     // `git log --oneline -n {count}` without the count (ADR 24).
     let runs_it = |skill: &&Skill| match_skill(&skill.steps, &skill.slots, &command).is_some();
+    if let Some(name) = &input.name {
+        check_name(brain, &skills, name, runs_it)?;
+    }
     let linked = |known: &Skill| -> Result<Learned> {
         brain.link_phrase(&known.label, &input.phrase)?;
+        if input.description.is_some() {
+            ui.note(format!(
+                "{} already runs this command, so the phrase joins it, and the description is not used.",
+                known.label
+            ));
+        }
         Ok(Learned { label: known.label.clone(), created: false, translated: false, upgraded: false })
     };
     // A template that runs this command with some values needs no model at all. A literal skill that
-    // runs exactly this command is linked at once only where there is nothing to generalise: in manual
-    // mode, or a seed, which is a fixed command written by hand. Any other is first shown to the translator.
+    // runs exactly this command is linked at once only where there is nothing to generalise: when the
+    // command is kept as taught, or a seed, which is a fixed command written by hand. Any other is first
+    // shown to the translator.
     let template = skills.iter().filter(&runs_it).find(|skill| !is_literal(&skill.steps));
     let literal = skills.iter().filter(&runs_it).find(|skill| is_literal(&skill.steps));
-    let fixed = literal.filter(|literal| input.mode == Mode::Manual || literal.origin == Origin::Seed);
+    let fixed = literal.filter(|literal| input.teaching != Teaching::Generalised || literal.origin == Origin::Seed);
     if let Some(known) = template.or(fixed) {
         return linked(known);
     }
-    if input.mode == Mode::Manual {
-        let (label, created) = brain.learn_command(&input.phrase, &input.steps, input.risk.unwrap_or(Risk::Modifies))?;
-        return Ok(Learned { label, created, translated: false, upgraded: false });
+    match input.teaching {
+        Teaching::AsGiven => return as_given(brain, input),
+        Teaching::Described => return described(brain, models, input, &skills, ui),
+        Teaching::Generalised => {}
     }
     // Only a row this brain owns is made general: inside a project a global skill is every project's,
     // so a template taught there is the project's own skill (ADR 17).
@@ -187,7 +401,14 @@ pub fn learn_phrase(brain: &Brain, models: &Models, input: &LearnInput, ui: &Ui)
     for attempt in 0..2 {
         let translated = translate(
             &models.llm,
-            &TranslateInput { phrase: &input.phrase, steps: &input.steps, skills: &skills, feedback: feedback.as_deref() },
+            &TranslateInput {
+                phrase: &input.phrase,
+                steps: &input.steps,
+                skills: &skills,
+                feedback: feedback.as_deref(),
+                name: input.name.as_deref(),
+                description: input.description.as_deref(),
+            },
         );
         let draft = match translated {
             Ok((draft, ms)) => {
@@ -219,10 +440,16 @@ pub fn learn_phrase(brain: &Brain, models: &Models, input: &LearnInput, ui: &Ui)
         let general = faithful && !is_literal(&draft.steps);
 
         // "This is a known skill with other values": trust it only if the arithmetic checks out, never
-        // with a flag for a value (`cd -` is not `cd {directory}`), and never let a literal skill stand
-        // in for the template just written.
+        // with a flag for a value (`cd -` is not `cd {directory}`), never for a skill whose program is a
+        // slot (`git pull` is not `{editor} {file}`, ADR 30), never for another label than the person
+        // named, and never let a literal skill stand in for the template just written.
         let existing = draft.existing_label.as_ref().and_then(|label| skills.iter().find(|skill| &skill.label == label));
-        let believed = |existing: &&Skill| !slots_a_flag && !(general && is_literal(&existing.steps));
+        let believed = |existing: &&Skill| {
+            !slots_a_flag
+                && !(general && is_literal(&existing.steps))
+                && program_slots(&existing.steps).is_empty()
+                && input.name.as_ref().is_none_or(|name| name == &existing.label)
+        };
         if let Some(existing) = existing.filter(believed) {
             if comparable(&render(&existing.steps, &existing.slots, &values).join(" && ")) == comparable(&command) {
                 brain.link_phrase(&existing.label, &input.phrase)?;
@@ -246,7 +473,7 @@ pub fn learn_phrase(brain: &Brain, models: &Models, input: &LearnInput, ui: &Ui)
                 upgrades: Some(literal.clone()),
             },
             None => Kept {
-                label: slug(&draft.label),
+                label: input.name.clone().unwrap_or_else(|| slug(&draft.label)),
                 steps: if faithful { draft.steps.clone() } else { input.steps.clone() },
                 slots: if faithful { slots } else { vec![] },
                 risk: input.risk.unwrap_or(draft.risk),
@@ -284,13 +511,13 @@ pub fn learn_phrase(brain: &Brain, models: &Models, input: &LearnInput, ui: &Ui)
     if let Some(kept) = kept {
         let scenario = match &kept.upgrades {
             Some(literal) => literal.scenario.clone(),
-            None => format!("the user wants: {}", input.phrase),
+            None => own_words(&input.phrase, input.description.as_deref()),
         };
         let learned = store(brain, &kept, scenario, &input.phrase, false, ui)?;
         ui.note(if learned.upgraded {
             "Its own scenario is kept instead."
         } else {
-            "Stored with your phrase as the scenario instead."
+            "Stored with your own words as the scenario instead."
         });
         return Ok(learned);
     }
@@ -298,8 +525,7 @@ pub fn learn_phrase(brain: &Brain, models: &Models, input: &LearnInput, ui: &Ui)
     if let Some(literal) = literal {
         return linked(literal);
     }
-    let (label, created) = brain.learn_command(&input.phrase, &input.steps, input.risk.unwrap_or(Risk::Modifies))?;
-    Ok(Learned { label, created, translated: false, upgraded: false })
+    as_given(brain, input)
 }
 
 /// How a skill the agent proposed came to be stored.
@@ -391,5 +617,26 @@ mod tests {
     fn comparison_ignores_quotes_and_spacing() {
         assert_eq!(comparable("git commit -m  'first draft' "), "git commit -m first draft");
         assert_eq!(comparable("echo \"a\"\tb"), "echo a b");
+    }
+
+    fn steps(list: &[&str]) -> Vec<String> {
+        list.iter().map(|step| step.to_string()).collect()
+    }
+
+    #[test]
+    fn a_command_kept_as_taught_has_values_its_scenario_must_name() {
+        assert_eq!(values_in(&steps(&["wc -l Cargo.toml"])), ["Cargo.toml"]);
+        assert_eq!(values_in(&steps(&["git log --oneline -n 3", "lsof -i :3000"])), ["3", "3000"]);
+        assert_eq!(values_in(&steps(&["cat ~/notes/todo.md | head -n 5"])), ["notes/todo.md", "5"]);
+        let none =
+            ["git pull origin", "du -sh .", "mise run deploy-preview-shared", "git commit -m 'v1.2 fix'", "ls --color=auto"];
+        assert!(values_in(&steps(&none)).is_empty(), "words, a lone dot, a quoted value and a flag");
+
+        assert!(names_value("the user wants the number of lines in Cargo.toml", "Cargo.toml"));
+        assert!(!names_value("the user wants to count the lines in a file", "Cargo.toml"));
+        assert!(names_value("the user wants exactly the three most recent commits", "3"));
+        assert!(!names_value("the user wants the most recent commits", "3"));
+        assert!(names_value("the user wants port 8080 mapped to 80", "8080:80"));
+        assert!(!names_value("the user wants what listens on port 30000", "3000"), "a number is a word of its own");
     }
 }

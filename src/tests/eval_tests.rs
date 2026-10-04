@@ -55,9 +55,11 @@ fn teach(scratch: &Scratch, models: &Models, phrase: &str, command: &str) -> cra
         phrase: phrase.into(),
         steps: vec![command.into()],
         risk: None,
-        mode: Mode::Semi,
+        teaching: Mode::Semi.into(),
         threshold: 0.5,
         cwd: scratch.work.clone(),
+        name: None,
+        description: None,
     };
     learn_phrase(&scratch.brain, models, &input, &quiet()).unwrap()
 }

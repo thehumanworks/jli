@@ -734,6 +734,7 @@ pub fn is_literal(steps: &[String]) -> bool {
 /// If `command` is what `steps` would produce for some slot values, return those values.
 /// Lets a taught command be recognised as a known skill with different values, with no model call.
 /// A value that would be a flag is not a match: `cd -` is not `cd {directory}` with `-` (ADR 19).
+/// Nor is a program in a slot in its place: `git pull` is not `{editor} {file}` with `git` (ADR 30).
 /// Every slot is read as one that must have a value; `match_skill` knows a skill's optional slots and choices.
 pub fn match_template(steps: &[String], command: &str) -> Option<HashMap<String, String>> {
     match_skill(steps, &[], command)
@@ -743,7 +744,42 @@ pub fn match_template(steps: &[String], command: &str) -> Option<HashMap<String,
 /// command, and a slot with choices is read back from the text of one, as that choice's value. An
 /// optional slot that is absent has no value in the result.
 pub fn match_skill(steps: &[String], slots: &[Slot], command: &str) -> Option<HashMap<String, String>> {
-    captures(steps, slots, command).filter(|values| !values.values().any(|value| is_flag(value)))
+    let programs = program_slots(steps);
+    // A slot in the program's place takes only another template's placeholder there, as `match_proposal`
+    // reads `{program} {path}` for `{editor} {file}`: the same template under other names.
+    let taken = |name: &String, value: &String| is_flag(value) || (programs.contains(name) && !is_placeholder(value));
+    captures(steps, slots, command).filter(|values| !values.iter().any(|(name, value)| taken(name, value)))
+}
+
+/// Placeholders in the place of a command's program: at the start of a step, or right after `|`, `;`,
+/// `&`, `(` or a backtick. A command is never read back into one, since any program would fit it:
+/// `{editor} {file}` would run `git pull`, with `git` for the editor (ADR 30).
+pub fn program_slots(steps: &[String]) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for step in steps {
+        let (mut at_start, mut before) = (true, "");
+        for part in parts(step) {
+            match part {
+                Part::Text(text) => {
+                    at_start &= text.trim().is_empty();
+                    before = text;
+                }
+                Part::Slot(name) => {
+                    let opens = before.trim_end().ends_with(['|', ';', '&', '(', '`']);
+                    if (at_start || opens) && !found.iter().any(|seen| seen == name) {
+                        found.push(name.to_string());
+                    }
+                    (at_start, before) = (false, "");
+                }
+            }
+        }
+    }
+    found
+}
+
+/// True when `value` is one placeholder and nothing else, as a template given for a command holds.
+fn is_placeholder(value: &str) -> bool {
+    matches!(parts(value).as_slice(), [Part::Text(""), Part::Slot(_), Part::Text("")])
 }
 
 /// True when `steps` produce `command` only by taking a flag as a slot value, as `date {format}` does
@@ -953,6 +989,28 @@ mod tests {
         );
         assert!(is_literal(&steps(&["ls -ltr", "find . -exec ls {} \\;"])));
         assert!(!is_literal(&steps(&["git add -A", "git commit -m {message}"])));
+    }
+
+    #[test]
+    fn a_program_is_never_a_slot_value() {
+        // The skill the agent wrote for "open file=Cargo.toml with editor=nvim" took "pull" (ADR 30).
+        let open = steps(&["{editor} {file}"]);
+        assert_eq!(match_template(&open, "git pull"), None, "git is not an editor, and pull is not a file");
+        assert_eq!(match_template(&open, "nvim Cargo.toml"), None, "nor is any other program read back into it");
+        assert_eq!(
+            match_proposal(&open, &[], &steps(&["{program} {path}"]), &values(&[("program", "vim"), ("path", "x")])),
+            Some(values(&[("editor", "vim"), ("file", "x")])),
+            "the same template under other names is still the same skill"
+        );
+        assert_eq!(match_proposal(&open, &[], &steps(&["git pull"]), &values(&[])), None);
+        assert_eq!(program_slots(&open), ["editor"]);
+        assert_eq!(program_slots(&steps(&["cat {file} | {filter}", "cd {dir} && {build}"])), ["filter", "build"]);
+        assert_eq!(program_slots(&steps(&["(cd {dir}; {tool} -v)", "x=`{tool}`"])), ["tool"]);
+        assert!(program_slots(&steps(&["sudo {command}", "echo {a}{b}", "git log -n {count}"])).is_empty());
+        let piped = steps(&["cat {file} | {filter}"]);
+        assert_eq!(match_template(&piped, "cat notes.txt | sort"), None);
+        let sudo = steps(&["sudo {command}"]);
+        assert_eq!(match_template(&sudo, "sudo ls"), Some(values(&[("command", "ls")])), "an argument, not the program");
     }
 
     #[test]

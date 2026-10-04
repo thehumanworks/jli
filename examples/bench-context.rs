@@ -116,9 +116,11 @@ impl Bench {
             phrase: phrase.into(),
             steps: vec![command.into()],
             risk: Some(Risk::Safe),
-            mode: Mode::Semi,
+            teaching: Mode::Semi.into(),
             threshold: DEFAULT_THRESHOLD,
             cwd: self.cwd.clone(),
+            name: None,
+            description: None,
         };
         Ok(learn_phrase(brain, &self.models, &input, &self.quiet)?.label)
     }

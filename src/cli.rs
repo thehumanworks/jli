@@ -12,7 +12,7 @@ use crate::exec::open_in_browser;
 use crate::generalize::{generalize, GeneralizeOptions};
 use crate::hand;
 use crate::help;
-use crate::learn::{learn_phrase, LearnInput};
+use crate::learn::{learn_phrase, LearnInput, Teaching};
 use crate::plan::{self, PlanRecord, RunFlags};
 use crate::project::{self, Found};
 use crate::router::{
@@ -21,7 +21,7 @@ use crate::router::{
 };
 use crate::shell::{init_script, HandOff, Shell};
 use crate::slots::learned_phrase;
-use crate::store::{user_id, Brain, BrainConfig, Correction, Shared, DEFAULT_USER};
+use crate::store::{slug, user_id, Brain, BrainConfig, Correction, Shared, DEFAULT_USER};
 use crate::types::{coded, error_code, BrainEvent, Mode, Path, Risk, CONFIGURATION, DEFAULT_MODE, USAGE};
 use crate::ui::{bar, c, duration, risk_tag, sparkline, Prompt, Terminal, Ui};
 use crate::Models;
@@ -216,6 +216,48 @@ fn refuse(flags: &Flags, code: &str, message: &str) -> i32 {
 fn known_projects(brain: &Brain) -> Result<Option<String>> {
     let known = brain.projects()?;
     Ok((!known.is_empty()).then(|| known.join(", ")))
+}
+
+/// What `jli teach` was told besides the command: the phrase, and the person's own name and
+/// description for the skill.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Teach {
+    pub(crate) phrase: String,
+    pub(crate) name: Option<String>,
+    pub(crate) description: Option<String>,
+}
+
+/// `teach [--name=<name>] [--description=<text>] <phrase>`, each option also with its value as the next
+/// word, or None when an option has no value or there is no phrase. A name becomes a label as any
+/// does (`Pull Origin` is `pull-origin`), so one with no letter or digit is no name.
+fn teach_shape(words: &[String]) -> Option<Teach> {
+    let (mut phrase, mut name, mut description) = (Vec::new(), None, None);
+    let mut words = words.iter();
+    while let Some(word) = words.next() {
+        let (option, inline) = match word.split_once('=') {
+            Some((option, value)) => (option, Some(value)),
+            None => (word.as_str(), None),
+        };
+        let given: &mut Option<String> = match option {
+            "--name" => &mut name,
+            "--description" => &mut description,
+            _ => {
+                phrase.push(word.as_str());
+                continue;
+            }
+        };
+        let value = match inline {
+            Some(value) => value,
+            None => words.next()?.as_str(),
+        };
+        *given = Some(value.trim().to_string()).filter(|value| !value.is_empty());
+        given.as_ref()?;
+    }
+    let name = match name {
+        Some(name) if !name.chars().any(|ch| ch.is_ascii_alphanumeric()) => return None,
+        name => name.map(|name| slug(&name)),
+    };
+    (!phrase.is_empty()).then(|| Teach { phrase: phrase.join(" "), name, description })
 }
 
 /// What `jli fix` was asked to do with the route it corrects.
@@ -588,15 +630,20 @@ impl App {
     }
 
     /// Inside a project what is taught is the project's, unless `global` says it is for every project.
-    fn teach(&mut self, phrase: &str, command: &[String], flags: &Flags, global: bool) -> Result<()> {
+    fn teach(&mut self, taught: Teach, command: &[String], flags: &Flags, global: bool) -> Result<()> {
         let steps = split_steps(&command.join(" "));
+        let phrase = taught.phrase;
         let input = LearnInput {
-            phrase: phrase.to_string(),
+            phrase: phrase.clone(),
             steps,
             risk: flags.risk,
-            mode: resolve_mode(&self.brain, flags)?,
+            // What is taught is kept as given unless --mode on this command line says otherwise, whatever
+            // mode routing runs in (ADR 30).
+            teaching: flags.mode.map_or(Teaching::Described, Teaching::from),
             threshold: resolve_threshold(&self.brain, flags)?,
             cwd: cwd()?,
+            name: taught.name,
+            description: taught.description,
         };
         // Teaching has no JSON outcome, so --json leaves its trace on.
         let (models, ui) = (&self.models, Ui::of(flags.quiet, false));
@@ -1118,7 +1165,7 @@ impl App {
                 say(format!(
                     "mode        {}  {}",
                     resolve_mode(&self.brain, flags)?,
-                    c::dim("manual: stored as taught · semi: a fast model generalises what you teach · auto: also learns from a no or a failed command")
+                    c::dim("for a correction, manual: stored as given · semi: a fast model generalises it · auto: also learns from a no or a failed command. jli teach keeps your command unless given --mode")
                 ));
                 let llm = &self.models.llm;
                 let (agent, translator) = (llm.agent_model(), llm.translator_model());
@@ -1245,11 +1292,11 @@ impl App {
             }
         }
         if first == "teach" {
-            if plain.is_empty() || rest.is_empty() {
-                say("Usage: jli teach [--global] \"<phrase>\" [--risk=safe|modifies|destructive] -- <command>");
+            let Some(taught) = teach_shape(&plain).filter(|_| !rest.is_empty()) else {
+                say("Usage: jli teach [--global] \"<phrase>\" [--name=<name>] [--description=\"<when and why>\"] [--risk=safe|modifies|destructive] [--mode=manual|semi|auto] -- <command>");
                 return Ok(1);
-            }
-            self.teach(&plain.join(" "), rest, flags, global)?;
+            };
+            self.teach(taught, rest, flags, global)?;
             return Ok(0);
         }
         if first == "project" && rest.is_empty() && !global {
@@ -1512,6 +1559,30 @@ mod tests {
         assert_eq!(teach.rest, ["git", "log", "-y"], "flags after -- belong to the command");
         assert_eq!(teach.flags.risk, Some(Risk::Safe));
         assert!(!teach.flags.yes);
+    }
+
+    #[test]
+    fn teach_takes_a_name_and_a_description_beside_its_phrase() {
+        let shape = |words: &[&str]| teach_shape(&args(words));
+        let taught = |phrase: &str, name: Option<&str>, description: Option<&str>| {
+            Some(Teach { phrase: phrase.into(), name: name.map(String::from), description: description.map(String::from) })
+        };
+        assert_eq!(shape(&["pull"]), taught("pull", None, None));
+        assert_eq!(shape(&["--name=pull", "pull", "from", "origin"]), taught("pull from origin", Some("pull"), None));
+        assert_eq!(
+            shape(&["pull", "--name", "pull", "--description", "sync with origin before work"]),
+            taught("pull", Some("pull"), Some("sync with origin before work"))
+        );
+        assert_eq!(shape(&["--description=a=b", "x"]), taught("x", None, Some("a=b")), "only the first = splits");
+        assert_eq!(shape(&["--name=Pull Origin", "x"]), taught("x", Some("pull-origin"), None), "a name is made a label");
+        assert_eq!(shape(&["message=hi", "x"]), taught("message=hi x", None, None), "a value in the phrase stays there");
+        for wrong in
+            [&["--name=pull"][..], &["x", "--name"], &["--name=", "x"], &["--name=!!", "x"], &["--description", "", "x"]]
+        {
+            assert_eq!(shape(wrong), None, "{wrong:?}");
+        }
+        let parsed = parse(&args(&["teach", "--name=pull", "pull", "--mode=semi", "--", "git", "pull"])).unwrap();
+        assert_eq!((parsed.words, parsed.flags.mode), (args(&["teach", "--name=pull", "pull"]), Some(Mode::Semi)));
     }
 
     #[test]
