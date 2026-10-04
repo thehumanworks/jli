@@ -1196,8 +1196,8 @@ pub fn is_another_command(wrong: &Skill, steps: &[String]) -> bool {
 /// with `-` is `cd -`, and `ls {options} {directory}` with `-la` is `ls -la {directory}`. Nor is a program
 /// the request does not name (ADR 30): `{editor} {file}` with `git` and `pull`, for "pull", is `git pull`,
 /// and then every value is written in, since the rest is no template of that command. A translator's draft
-/// is refused the same way when a command is taught. Returns the new proposal, the values left and what to
-/// tell the person; None when every value the steps use can stay a value.
+/// that slots a flag is refused the same way when a command is taught. Returns the new proposal, the values
+/// left and what to tell the person; None when every value the steps use can stay a value.
 fn values_written_in(
     proposal: &Proposal,
     provided: &HashMap<String, String>,
