@@ -20,8 +20,8 @@ Two models, the way people think about fast and slow thinking.
   or Mercury 2.5 with an API key (about 2 s). It is only called when System 1 has no confident
   answer. It proposes a reusable skill, not a one-off command.
 - **The translator** is a fast model, the same one (2 to 5 s on the plan, under 1 s for Mercury). It
-  never sits on the request path. It rewrites what you teach into a general matrix row, and in auto
-  mode it diagnoses failures and suggests alternatives.
+  never sits on the request path. It writes the scenario of what you teach, or in semi mode rewrites
+  it into a general matrix row, and in auto mode it diagnoses failures and suggests alternatives.
 - **The brain** is a SQLite database. Each row is a skill. The rows are rendered into the `choice`
   criteria on every request, so the decision matrix *is* the database.
 
@@ -32,21 +32,67 @@ Learning is writing to that database:
 | System 2 proposed a command and it ran, with exit 0 or a failure that was not the command's fault ([ADR 13](docs/adr/0013-learning-fixes.md)) | a new skill with the request as its first example, its values hidden, once System 1 has checked it; a command a skill already runs adds the phrasing to that skill instead, and drops it from that skill's counter-examples ([ADR 20](docs/adr/0020-write-back.md)) | System 1 answers next time |
 | You said yes to "Run it?" | the phrasing, as an example of that skill and no longer a counter-example of it | that phrasing becomes more confident |
 | You said no and typed the right command | a counter-example on the wrong skill, and the phrasing on the right one | it routes to your command next time |
-| You ran `jli teach` or `jli fix` | a phrasing, or a counter-example; if the agent then proposes the rejected command again, it is refused (`already_rejected`) and nothing is stored | same as above, by hand |
+| You ran `jli teach` | the phrase, and the command exactly as you wrote it, under the name you gave it with `--name`; a fast model writes only when to run it, from your phrase and your `--description`, and it is kept once System 1 has checked it ([ADR 30](docs/adr/0030-taught-as-given.md)) | System 1 answers next time, and runs what you taught |
+| You ran `jli fix` | a phrasing, or a counter-example; if the agent then proposes the rejected command again, it is refused (`already_rejected`) and nothing is stored | as for a "no" and the command you typed |
 | You wrote `dir=src` for a slot called `directory` | `dir` as another name for that slot | `dir=` is read with no model next time |
 | You ran `jli alias` or `jli forget-phrase` | a slot name added or removed; a phrasing moved to the counter-examples | the same, by hand, for one name or one phrasing |
 | You ran `jli slot` | a slot's default, whether it may be left out with its flag, and the choices it takes | an unsaid value runs as you said it should, with no model ([ADR 24](docs/adr/0024-optional-slots.md)) |
 
 One command can hold many phrasings. Teaching a phrase for a command that a skill already runs adds
-the phrase to that skill. If that skill runs only the one command, as one taught in manual mode
-does, and the translator finds a value in it, the skill is made general in place and keeps its
-phrasings: teaching `git log --oneline -n 3` again turns it into `git log --oneline -n {count}`, with
-3 as the count's default. Two jli processes teaching one command at once also end up with one skill.
-See [ADR 19](docs/adr/0019-one-row-per-command.md).
+the phrase to that skill. If that skill runs only the one command, as one taught by default does,
+and you teach it again with `--mode=semi` and the translator finds a value in it, the skill is made
+general in place and keeps its phrasings: teaching `git log --oneline -n 3` again turns it into
+`git log --oneline -n {count}`, with 3 as the count's default. Two jli processes teaching one command
+at once also end up with one skill. See [ADR 19](docs/adr/0019-one-row-per-command.md).
+
+## Teaching
+
+`jli teach` keeps what you teach. The command is stored exactly as you wrote it, under the name you
+give it, and the phrase is its first example:
+
+```
+$ jli teach --name=pull --risk=modifies --description "bring the current branch up to date with origin" pull -- git pull origin
+  gpt-6-luna · using ChatGPT plan described it in 1.9 s: the user wants to integrate changes from the current branch's configured upstream on the remote named origin into the current branch, bringing it up to date with origin
+  Verified with System 1: the phrase routes to it at 0.57, and 1 phrasings of the closest skills still route where they did.
+✚ learned "pull" means pull (git pull origin)
+  new skill
+$ jli -n pull
+⚡ system 1 · jev-1.13.0 · 260 ms · 10 skills in the matrix
+   pull           █████████████░░░░░░░  0.63
+   none-of-these  ███████░░░░░░░░░░░░░  0.37
+→ git pull origin  risk: modifies
+```
+
+A fast model writes one thing: the scenario, the sentence System 1 reads to know when to run the
+skill, so that other ways of asking reach it. It is given your phrase, your `--description` of when
+and why to run it, and the skills it must be told apart from, and it cannot change the command. A
+scenario that leaves out a value the command runs with, a file, a number or a port, is sent back,
+since it would take a request for another value and run this one. Then System 1 checks it as it
+checks every new row. If it fails twice, or no model can be reached, the scenario is your own words:
+`the user wants: pull. bring the current branch up to date with origin`.
+
+- `--name=<name>` is refused, before any model is asked, if a skill of that name runs another
+  command, or another skill already runs this one: one command has one skill, and a skill is never
+  renamed. `jli forget` the other skill first, or teach without `--name` to add the phrase to it.
+- `--description` matters most between neighbours. Taught `mise run deploy-preview` and
+  `mise run deploy-preview-shared` with no description, "put up the preview the team reviews" went
+  to the first; described as "my own preview, which only I look at" and "the preview the whole team
+  reviews before a release", five requests in other words each reached the right one at 0.98 or more.
+- A command with a value stays that value. `teach "show the last 3 commits" -- git log --oneline -n 3`
+  runs `-n 3`, and "the last 10 commits" goes to the agent. `--mode=semi` (or `auto`) on the command
+  line lets the translator turn values into slots as well, `git log --oneline -n {count}`, and
+  `--mode=manual` asks no model at all. `jli config mode` and `JLI_MODE` do not reach `jli teach`.
+
+A skill whose command starts with a slot, such as `{editor} {file}`, never takes a command it was
+not routed to: `git pull` is not that skill with `git` for the editor. See
+[ADR 30](docs/adr/0030-taught-as-given.md).
 
 ## Learning modes
 
-Set with `jli config mode <manual|semi|auto>`, `JLI_MODE`, or `--mode=`. The default is `semi`.
+Set with `jli config mode <manual|semi|auto>`, `JLI_MODE`, or `--mode=`. The default is `semi`. The
+mode decides how jli learns from what happens: a "no" and the command you type, a failed command,
+and `jli fix`. `jli teach` keeps what you teach, and only `--mode=` on its own command line changes
+that (see [Teaching](#teaching)).
 
 | Mode | Who writes the matrix row | What a "no" does | What a failed command does |
 | --- | --- | --- | --- |
@@ -60,27 +106,31 @@ phrasings of the skills closest to it: those System 1 ranked just behind it, the
 the most words. The row is kept only if your phrase lands on it, none of the others do, and none
 that routed home without it stops doing so. A skill the agent proposes gets the same check while
 its command runs. It gets one retry with that feedback, and
-then falls back to your raw phrase. Slots are kept only if filling them back in reproduces the exact
-command you taught.
+then falls back to your own words: the phrase, and your `--description` if you gave one. Slots are
+kept only if filling them back in reproduces the exact command you taught.
 
 **A failure is not a wrong route.** `git status` outside a repository fails, and it was still the
 right command. In auto mode the translator reads stderr and gives one of three verdicts: wrong
 command, wrong value, or an environment problem. Only the first two lead to a correction.
 
-`cargo run --release --example bench-translator`, run from the repository root, compares manual
-and semi on held-out paraphrases. One run on 2026-10-02, ten commands, thirty requests written by
-the author of the benchmark:
+`cargo run --release --example bench-translator`, run from the repository root, compares manual,
+`jli teach`'s default and semi on held-out paraphrases. One run on 2026-10-04 with `gpt-6-luna`, ten
+commands, thirty requests written by the author of the benchmark. "Wrong" is a request that reached
+its skill and still rendered another command:
 
-| | manual routed | manual right command | semi routed | semi right command |
-| --- | --- | --- | --- | --- |
-| fixed commands (21 requests) | 100% | 100% | 100% | 100% |
-| commands with a value (9 requests) | 0% | 0% | 100% | 100% |
-| all (30 requests) | 73% | 70% | 100% | 100% |
+| | manual: routed, right, wrong | `jli teach`: routed, right, wrong | semi: routed, right, wrong |
+| --- | --- | --- | --- |
+| fixed commands (21 requests) | 100%, 100%, 0% | 100%, 100%, 0% | 100%, 100%, 0% |
+| commands with a value (9 requests) | 0%, 0%, 0% | 0%, 0%, 0% | 100%, 100%, 0% |
+| all (30 requests) | 70%, 70%, 0% | 70%, 70%, 0% | 100%, 100%, 0% |
 
-The gain is entirely in commands that carry a value, such as a count, a file or a port. A raw phrase
-already generalises well for fixed commands. A run costs about 200 System 1 requests (about $0.012)
-and a dozen translator calls. Earlier runs, including the TypeScript prototype's, are in
-[ADR 6](docs/adr/0006-learning-modes.md).
+The gain of semi mode is entirely in commands that carry a value, such as a count, a file or a port:
+it turns them into slots. A raw phrase already generalises well for fixed commands. `jli teach`
+keeps the command, so a request for another value goes to the agent rather than running the taught
+one; its scenario pays off where two skills are close, which this benchmark does not test (see
+[Teaching](#teaching)). A run costs about 300 System 1 requests (about $0.02) and two dozen
+translator calls. Earlier runs, including the TypeScript prototype's, are in
+[ADR 6](docs/adr/0006-learning-modes.md) and [ADR 30](docs/adr/0030-taught-as-given.md).
 
 ## Measuring the matrix
 
@@ -183,7 +233,10 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | `jli eval -n [--optimise]` | measure, and show the rewrites and their effect, but write nothing |
 | `jli eval undo [<label>]` | put back what the last optimisation changed (inside a project, the last one made there) |
 | `jli history` | recent requests and how each was routed |
-| `jli teach "<phrase>" -- <command>` | link a phrase to a command; repeat to add more phrasings |
+| `jli teach "<phrase>" -- <command>` | link a phrase to the command as you wrote it; a fast model writes only when to run it; repeat to add more phrasings |
+| `jli teach --name=<name> "<phrase>" -- <command>` | the same, and call the new skill `<name>`; refused if a skill of that name runs another command, or another skill already runs this one |
+| `jli teach --description="<when and why>" "<phrase>" -- <command>` | the same, with your own words about when and why to run it, which the model keeps to |
+| `jli teach --mode=semi "<phrase>" -- <command>` | let the translator turn the command's values into slots too (`--mode=manual`: no model at all) |
 | `jli teach --global "<phrase>" -- <command>` | the same, from inside a project, for every project |
 | `jli fix` | the last command run here was wrong: unlearn it and ask the agent |
 | `jli fix <eventId>` | the same for one of your events, from any directory (an event made in a project, from inside that project or with `--project=<id>`) |
@@ -249,8 +302,11 @@ See [ADR 14](docs/adr/0014-shell-integration.md) and [ADR 23](docs/adr/0023-shel
 
 Skills are templates such as `git log -n {count}` or `git commit -m {message}`. A flag is never read
 as a value, in a command you teach or one the agent proposes: `cd -` is a skill of its own, not
-`cd {directory}` with `-` ([ADR 19](docs/adr/0019-one-row-per-command.md)). A value you state
-is passed as written, by a parser and no model:
+`cd {directory}` with `-` ([ADR 19](docs/adr/0019-one-row-per-command.md)). Nor is a program:
+`git pull` is not `{editor} {file}` with `git` for the editor, and a program the agent gives such a
+skill is written into the command unless the request names it
+([ADR 30](docs/adr/0030-taught-as-given.md)). A value you state is passed as written, by a parser
+and no model:
 
 ```sh
 jli commit message="fix the parser"            # name=value, for the slot called message
@@ -431,8 +487,8 @@ no `--project`. See [ADR 26](docs/adr/0026-project-flag.md).
 | --- | --- |
 | `src/system1.rs` | builds the matrix from the database and asks Jev; the only module that uses `typesafe-jev` |
 | `src/system2.rs` | the agent: structured proposals, free-text slot filling, naming an unknown argument's slot, rewriting a weak row, and proposing how a project skill could be global |
-| `src/translator.rs` | turns a taught phrase and command into a general matrix row |
-| `src/learn.rs` | writes a row once System 1 has verified it, or makes a literal skill general in place, and settles a skill the agent proposed |
+| `src/translator.rs` | writes the scenario of a command kept as taught, or turns a taught phrase and command into a general matrix row |
+| `src/learn.rs` | keeps a taught command and its name as given, writes a row once System 1 has verified it, or makes a literal skill general in place, and settles a skill the agent proposed |
 | `src/eval.rs` | measures the matrix against its own examples and history, optimises it, and checks a new row against its closest skills |
 | `src/suggest.rs` | auto mode: diagnoses a failure and offers alternatives |
 | `src/llm.rs` | where every language model request goes: one HTTP call to an API-key endpoint, or a Responses request on a ChatGPT plan |
@@ -445,7 +501,7 @@ no `--project`. See [ADR 26](docs/adr/0026-project-flag.md).
 | `src/generalize.rs` | `jli generalize`: checks the agent's proposal for a project skill and writes it once approved |
 | `src/hand.rs` | `jli alias`, `jli forget-phrase` and `jli slot`: one slot name, one phrasing or one slot's settings changed by hand, where the router would write it |
 | `src/args.rs` | reads the arguments a request states: `name=value`, labels and quoted text |
-| `src/slots.rs` | fills, expands and shell-quotes `{slot}` values, leaves out an optional slot with its flag, writes a choice's text, holds a model's slots to what it may say, and matches a command back to its template |
+| `src/slots.rs` | fills, expands and shell-quotes `{slot}` values, leaves out an optional slot with its flag, writes a choice's text, holds a model's slots to what it may say, and matches a command back to its template, never with a flag or a program for a value |
 | `src/shell.rs` | the shell function, which steps it must run in your shell, and which shell jli is running under |
 | `src/seed.rs` | the original hard-coded matrix, now only the seed for an empty brain |
 | `src/exec.rs` | runs the steps with `bash -c`, watching stderr in auto mode and for a new proposal, tries builtins before they are handed over, and reads the process table to find the shell jli was started from; for `jli login`, opens the browser |
@@ -455,7 +511,7 @@ no `--project`. See [ADR 26](docs/adr/0026-project-flag.md).
 | `src/demo.rs` | the two-pass learning demo |
 | `src/tests.rs` | the router and learning loop, offline, against fake models and a scripted prompt |
 | `src/tests/eval_tests.rs` | `jli eval`, the optimiser, undo, and the check a new row gets, offline |
-| `examples/bench-translator.rs` | manual versus semi on held-out paraphrases, and with `--forgetting` the forgetting rate |
+| `examples/bench-translator.rs` | manual, `jli teach`'s default and semi on held-out paraphrases, and with `--forgetting` the forgetting rate |
 | `examples/bench-context.rs` | one phrase taught to two commands in two projects: whether a correction in one undoes the other |
 | `docs/adr/` | the design decisions, and the lessons and known gaps behind them |
 

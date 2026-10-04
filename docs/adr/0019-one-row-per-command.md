@@ -1,6 +1,7 @@
 # 19. A flag is never a slot value, a literal skill is made general in place, and a label taken by the same command is joined
 
-- Status: accepted
+- Status: accepted; superseded in part by [ADR 30](0030-taught-as-given.md), under which part 1
+  holds for a program as for a flag, and `flags_written_in` became `values_written_in`
 - Date: 2026-10-03
 - Origin: the Rust version
 - Supersedes in part: [ADR 6](0006-learning-modes.md), on step 1 of learning a phrase and on when the
