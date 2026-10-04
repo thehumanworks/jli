@@ -65,18 +65,33 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "teach",
         lines: &[
-            ("jli teach \"<phrase>\" -- <command>", "link a phrase to a command (repeat to add more phrasings)"),
+            (
+                "jli teach \"<phrase>\" -- <command>",
+                "link a phrase to the command as you wrote it; a fast model writes only\nwhen to run it (repeat to add more phrasings)",
+            ),
             ("jli teach --global \"<phrase>\" -- …", "the same, for every project, from inside one"),
+            (
+                "    --name=<name>",
+                "what to call the skill; refused if a skill of that name runs another\ncommand, or another skill already runs this one",
+            ),
+            ("    --description=<words>", "when and why to run it, in your words: the model keeps to them"),
             ("    --risk=R", "the command's risk, safe, modifies or destructive, instead of jli's guess"),
+            (
+                "    --mode=M",
+                "semi or auto: the model may also turn the command's values into slots;\nmanual: no model at all. jli config mode does not apply here",
+            ),
         ],
-        options: &[MODE],
+        options: &[],
     },
     Command {
         name: "config",
         lines: &[
             ("jli config", "show settings"),
             ("jli config confidence <0..1>", "confidence System 1 needs before its pick is used (default 0.5)"),
-            ("jli config mode <manual|semi|auto>", "who does the teaching (default semi)"),
+            (
+                "jli config mode <manual|semi|auto>",
+                "how a no, a failure and a correction are learned (default semi);\njli teach follows only its own --mode",
+            ),
             ("jli config model <slug>", "the model the agent and the translator run on your ChatGPT plan"),
         ],
         options: &[],
@@ -225,7 +240,7 @@ const ENVIRONMENT: &[Line] = &[
     ("JLI_YOLO", "1 or true: the same as --yolo"),
     ("JLI_QUIET", "1 or true: the same as --quiet"),
     ("JLI_THRESHOLD", "0 to 1: the same as --confidence= (JLI_CONFIDENCE also works)"),
-    ("JLI_MODE", "manual, semi or auto: the same as --mode= (the flag wins)"),
+    ("JLI_MODE", "manual, semi or auto: the same as --mode= (the flag wins), but not for\njli teach"),
     ("JLI_PROVIDER", "chatgpt, openrouter, gateway or custom: where language model requests go\n(default: a ChatGPT sign-in, then OPENROUTER_API_KEY, then AI_GATEWAY_API_KEY)"),
     ("JLI_CHATGPT_DIR", "where this host keeps its ChatGPT sign-in (default ~/.jli/chatgpt)"),
     ("JLI_AGENT_MODEL", "the agent's model, over jli config model; JLI_TRANSLATOR_MODEL the translator's"),

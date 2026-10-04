@@ -132,7 +132,7 @@ fn hyphen_then_word(mut side: impl Iterator<Item = char>) -> bool {
 
 /// Every number in the text, in order: digits standing alone, or a word from one to ten that is
 /// not joined by `-` to another word. The "one" of "one-line" is part of an adjective, not a count.
-fn numbers_in(text: &str) -> Vec<String> {
+pub(crate) fn numbers_in(text: &str) -> Vec<String> {
     let mut found = Vec::new();
     let mut at = 0;
     for word in text.split(|ch: char| !ch.is_alphanumeric()) {

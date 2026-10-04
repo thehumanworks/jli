@@ -1,12 +1,15 @@
 //! Does a translated row match better than a raw taught phrase?
 //!
-//! Teaches the same commands to two fresh brains, one in manual mode (phrase stored as given)
-//! and one in semi mode (a fast model generalises it, System 1 verifies it), then routes
-//! held-out paraphrases through both and compares.
+//! Teaches the same commands to three fresh brains: one in manual mode (phrase and command stored as
+//! given), one as `jli teach` does by default (the command stored as given, a fast model writes only
+//! the scenario, System 1 verifies it, ADR 30), and one in semi mode (a fast model generalises the
+//! command and the scenario, System 1 verifies it). Then routes held-out paraphrases through each and
+//! compares. "wrong" counts requests that reached their skill and still rendered another command: a
+//! command kept as taught runs its own value for a request that asked for another.
 //!
-//!   cargo run --release --example bench-translator     about 150 System 1 calls and 12 translator calls
+//!   cargo run --release --example bench-translator     about 250 System 1 calls and 25 translator calls
 //!   cargo run --release --example bench-translator -- --forgetting
-//!                                  also the forgetting rate: about 330 more System 1 calls and 10 translator calls
+//!                                  also the forgetting rate: about 500 more System 1 calls and 25 translator calls
 //!
 //! The forgetting rate is the share of held-out requests that routed home after one lesson and stop
 //! doing so after the next.
@@ -17,11 +20,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use jli::context::{read_context, Context};
-use jli::learn::{learn_phrase, LearnInput};
+use jli::learn::{learn_phrase, LearnInput, Teaching};
 use jli::router::DEFAULT_THRESHOLD;
 use jli::slots::{fill_slots, render, Template};
 use jli::store::{Brain, BrainConfig};
-use jli::types::{Mode, Risk, Slot};
+use jli::types::{Risk, Slot};
 use jli::ui::{fixed, Ui};
 use jli::Models;
 
@@ -127,19 +130,29 @@ const CASES: [Case; 10] = [
 
 const SLOTTED: [&str; 3] = ["git log --oneline -n 3", "wc -l Cargo.toml", "lsof -i :3000"];
 
-fn teach_all(models: &Models, dir: &Path, cwd: &Path, mode: Mode) -> Result<(Brain, usize)> {
-    let brain = Brain::open(BrainConfig::file(&dir.join(format!("{mode}.db"))))?;
+/// The three ways of teaching that are compared, with the name each is printed under.
+const STYLES: [(&str, Teaching); 3] =
+    [("manual", Teaching::AsGiven), ("taught", Teaching::Described), ("semi", Teaching::Generalised)];
+
+fn lesson(item: &Case, teaching: Teaching, cwd: &Path) -> LearnInput {
+    LearnInput {
+        phrase: item.phrase.into(),
+        steps: vec![item.command.into()],
+        risk: Some(Risk::Safe),
+        teaching,
+        threshold: DEFAULT_THRESHOLD,
+        cwd: cwd.to_path_buf(),
+        name: None,
+        description: None,
+    }
+}
+
+fn teach_all(models: &Models, dir: &Path, cwd: &Path, (name, teaching): (&str, Teaching)) -> Result<(Brain, usize)> {
+    let brain = Brain::open(BrainConfig::file(&dir.join(format!("{name}.db"))))?;
     let quiet = Ui::new(false);
     let mut translated = 0;
     for item in &CASES {
-        let input = LearnInput {
-            phrase: item.phrase.into(),
-            steps: vec![item.command.into()],
-            risk: Some(Risk::Safe),
-            mode,
-            threshold: DEFAULT_THRESHOLD,
-            cwd: cwd.to_path_buf(),
-        };
+        let input = lesson(item, teaching, cwd);
         if learn_phrase(&brain, models, &input, &quiet)?.translated {
             translated += 1;
         }
@@ -211,9 +224,10 @@ fn pct(n: usize, d: usize) -> String {
 
 fn row(score: &Score) -> String {
     format!(
-        "{}    {}      {}",
+        "{}  {}  {}  {}",
         pct(score.routed, score.total),
         pct(score.correct, score.total),
+        pct(score.routed - score.correct, score.total),
         fixed(score.confidence / score.routed.max(1) as f64, 2)
     )
 }
@@ -240,22 +254,14 @@ fn forgetting(
     dir: &Path,
     cwd: &Path,
     context: &Context,
-    mode: Mode,
+    (name, teaching): (&str, Teaching),
 ) -> Result<(usize, usize, Vec<String>)> {
-    let brain = Brain::open(BrainConfig::file(&dir.join(format!("forgetting-{mode}.db"))))?;
+    let brain = Brain::open(BrainConfig::file(&dir.join(format!("forgetting-{name}.db"))))?;
     let quiet = Ui::new(false);
     let mut home: Vec<[bool; 3]> = Vec::new();
     let (mut forgotten, mut chances, mut lost) = (0, 0, Vec::new());
     for (taught, item) in CASES.iter().enumerate() {
-        let input = LearnInput {
-            phrase: item.phrase.into(),
-            steps: vec![item.command.into()],
-            risk: Some(Risk::Safe),
-            mode,
-            threshold: DEFAULT_THRESHOLD,
-            cwd: cwd.to_path_buf(),
-        };
-        learn_phrase(&brain, models, &input, &quiet)?;
+        learn_phrase(&brain, models, &lesson(item, teaching, cwd), &quiet)?;
         let skills = brain.skills()?;
         let mut now = Vec::new();
         for earlier in &CASES[..=taught] {
@@ -296,40 +302,48 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&scratch.0)?;
     let models = Models::from_env();
 
-    let (manual, _) = teach_all(&models, &scratch.0, &cwd, Mode::Manual)?;
-    let (semi, translated) = teach_all(&models, &scratch.0, &cwd, Mode::Semi)?;
-    println!(
-        "Taught {} commands to each brain. Semi mode kept {translated} translated rows and fell back to the raw phrase for {}.\n",
-        CASES.len(),
-        CASES.len() - translated
-    );
+    let mut brains = Vec::new();
+    for style in STYLES {
+        let (brain, translated) = teach_all(&models, &scratch.0, &cwd, style)?;
+        if style.1 != Teaching::AsGiven {
+            println!(
+                "{}: kept {translated} rows a model wrote, and its own words for {}.",
+                style.0,
+                CASES.len() - translated
+            );
+        }
+        brains.push((style.0, brain));
+    }
+    println!("Taught {} commands to each brain.\n", CASES.len());
 
     let all: Vec<&Case> = CASES.iter().collect();
     let fixed_commands: Vec<&Case> = CASES.iter().filter(|item| !SLOTTED.contains(&item.command)).collect();
     let with_value: Vec<&Case> = CASES.iter().filter(|item| SLOTTED.contains(&item.command)).collect();
     let groups = [("all requests", all), ("fixed commands", fixed_commands), ("commands with a value", with_value)];
 
-    println!("                         manual (raw phrase)            semi (translated)");
-    println!("                         routed  right cmd  conf        routed  right cmd  conf");
-    let mut detail = None;
-    for (name, cases) in groups {
-        let a = evaluate(&models, &context, &manual, &cases)?;
-        let b = evaluate(&models, &context, &semi, &cases)?;
-        println!("{name:<24} {}        {}     ({} requests)", row(&a), row(&b), a.total);
-        if name == "all requests" {
-            detail = Some((a, b));
+    println!("                         manual (as given)          taught (described)         semi (generalised)");
+    println!("                         routed right wrong conf    routed right wrong conf    routed right wrong conf");
+    let mut detail = Vec::new();
+    for (group, cases) in groups {
+        let mut scores = Vec::new();
+        for (_, brain) in &brains {
+            scores.push(evaluate(&models, &context, brain, &cases)?);
+        }
+        let rows: Vec<String> = scores.iter().map(row).collect();
+        println!("{group:<24} {}    ({} requests)", rows.join("    "), scores[0].total);
+        if group == "all requests" {
+            detail = scores;
         }
     }
-    let (a, b) = detail.expect("the first group is all requests");
-    for (mode, score) in [("manual", a), ("semi", b)] {
-        println!("\n{mode} misses:");
+    for ((name, _), score) in brains.iter().zip(detail) {
+        println!("\n{name} misses:");
         println!("{}", if score.misses.is_empty() { "  none".to_string() } else { score.misses.join("\n") });
     }
     if std::env::args().any(|arg| arg == "--forgetting") {
         println!("\nForgetting: requests that routed home after one lesson and stopped after the next");
-        for mode in [Mode::Manual, Mode::Semi] {
-            let (forgotten, chances, lost) = forgetting(&models, &scratch.0, &cwd, &context, mode)?;
-            println!("{mode:<8} {forgotten} of {chances} ({})", pct(forgotten, chances).trim());
+        for style in STYLES {
+            let (forgotten, chances, lost) = forgetting(&models, &scratch.0, &cwd, &context, style)?;
+            println!("{:<8} {forgotten} of {chances} ({})", style.0, pct(forgotten, chances).trim());
             if !lost.is_empty() {
                 println!("{}", lost.join("\n"));
             }

@@ -3,7 +3,10 @@
 - Status: accepted; superseded in part by [ADR 16](0016-measuring-the-matrix.md), which checks a row in memory against the
   skills closest to it, not the most used, and also rejects a row that knocks a neighbour off; and by
   [ADR 19](0019-one-row-per-command.md), under which a template wins step 1 over a literal skill, and a
-  literal skill other than a seed is shown to the translator first and made general in place
+  literal skill other than a seed is shown to the translator first and made general in place; and by
+  [ADR 30](0030-taught-as-given.md), under which `jli teach` keeps the command as given and the
+  translator writes only its scenario, unless `--mode=` is on the teach command line, which the
+  stored mode and `JLI_MODE` no longer reach
 - Date: 2026-10-02
 - Origin: the TypeScript prototype; kept unchanged by the Rust port
 

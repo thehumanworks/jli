@@ -13,8 +13,8 @@ use crate::llm::SlotDraft;
 use crate::plan::{self, CandidateInfo, PlanRecord, SlotInfo, SlotValue};
 use crate::shell::{first_caller_step, hand_off_text, safe_to_try, HandOff, Shell};
 use crate::slots::{
-    checked_slots, expand_path, fill_slots, is_flag, match_proposal, match_skill, render, render_fish, undeclared, Filled,
-    Source, Template,
+    checked_slots, expand_path, fill_slots, is_flag, match_proposal, match_skill, program_slots, render, render_fish,
+    undeclared, Filled, Source, Template,
 };
 use crate::store::{slug, Brain, NewEvent, NewSkill};
 use crate::suggest::{suggest, Failure, SuggestInput, Suggestion, Verdict};
@@ -501,10 +501,12 @@ impl Route<'_> {
                 ui.proposal(&proposal, ms);
                 let provided: HashMap<String, String> =
                     proposal.slot_values.iter().map(|slot| (slot.name.clone(), slot.value.clone())).collect();
-                // A flag is never a slot value (ADR 19): given one, the proposal is the command with the flag
-                // written in, which no known skill's slot stands for. Looked up among every skill, so a
-                // rejected template named with a flag is not taken for the rejected command below.
-                let (proposal, provided) = match flags_written_in(&proposal, &provided, &self.all_skills, &self.phrase) {
+                // A flag is never a slot value (ADR 19), nor a program the request does not name (ADR 30):
+                // given one, the proposal is the command with it written in, which no known skill's slot
+                // stands for. Looked up among every skill, so a rejected template named with a flag is not
+                // taken for the rejected command below.
+                let written = values_written_in(&proposal, &provided, &self.all_skills, self.query, &self.phrase);
+                let (proposal, provided) = match written {
                     Some((written, provided, why)) => {
                         ui.note(why);
                         (written, provided)
@@ -1189,15 +1191,18 @@ pub fn is_another_command(wrong: &Skill, steps: &[String]) -> bool {
     match_skill(&wrong.steps, &wrong.slots, &steps.join(" && ")).is_none()
 }
 
-/// A proposal that gives a flag for a slot's value, of the known skill it names or of its own template, as
-/// the command with the flag written into its steps: `cd {directory}` with `-` is `cd -`, and `ls {options}
-/// {directory}` with `-la` is `ls -la {directory}`. A translator's draft is refused the same way when a
-/// command is taught (ADR 19). Returns the new proposal, the values left and what to tell the person;
-/// None when no value the steps use is a flag.
-fn flags_written_in(
+/// A proposal that gives a slot a value it cannot take, of the known skill it names or of its own template,
+/// as the command with the value written into its steps. A flag is never a value (ADR 19): `cd {directory}`
+/// with `-` is `cd -`, and `ls {options} {directory}` with `-la` is `ls -la {directory}`. Nor is a program
+/// the request does not name (ADR 30): `{editor} {file}` with `git` and `pull`, for "pull", is `git pull`,
+/// and then every value is written in, since the rest is no template of that command. A translator's draft
+/// that slots a flag is refused the same way when a command is taught. Returns the new proposal, the values
+/// left and what to tell the person; None when every value the steps use can stay a value.
+fn values_written_in(
     proposal: &Proposal,
     provided: &HashMap<String, String>,
     skills: &[Skill],
+    query: &str,
     phrase: &str,
 ) -> Option<(Proposal, HashMap<String, String>, String)> {
     let named = match proposal.kind {
@@ -1210,16 +1215,23 @@ fn flags_written_in(
         None => (proposal.steps.clone(), proposal.slots.clone()),
     };
     let used = undeclared(&steps, &[]);
-    let flags: HashMap<String, String> = provided
+    let first = |(name, _): &(&String, &String)| used.iter().position(|seen| seen == *name);
+    let programs = program_slots(&steps);
+    let program = provided
         .iter()
-        .filter(|(name, value)| used.contains(name) && is_flag(value))
+        .filter(|(name, value)| used.contains(name) && programs.contains(name) && !names(query, value))
+        .min_by_key(first);
+    let written_in: HashMap<String, String> = provided
+        .iter()
+        .filter(|(name, value)| used.contains(name) && (program.is_some() || is_flag(value)))
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
-    let (name, value) = flags.iter().min_by_key(|(name, _)| used.iter().position(|seen| seen == *name))?;
-    let steps = render(&steps, &[], &flags);
+    let (name, value) = program.or_else(|| written_in.iter().min_by_key(first))?;
+    let steps = render(&steps, &[], &written_in);
     let whose = named.map(|skill| format!(" of {}", c::bold(&skill.label))).unwrap_or_default();
+    let what = if program.is_some() { "a program the request does not name" } else { "a flag" };
     let why =
-        format!("{value} is a flag, not a value for {{{name}}}{whose}, so {} is a command of its own.", steps.join(" && "));
+        format!("{value} is {what}, not a value for {{{name}}}{whose}, so {} is a command of its own.", steps.join(" && "));
     let written = Proposal {
         kind: ProposalKind::New,
         existing_label: None,
@@ -1230,13 +1242,20 @@ fn flags_written_in(
         } else {
             proposal.scenario.clone()
         },
-        slots: slots.into_iter().filter(|slot| !flags.contains_key(&slot.name)).collect(),
-        slot_values: proposal.slot_values.iter().filter(|slot| !flags.contains_key(&slot.name)).cloned().collect(),
+        slots: slots.into_iter().filter(|slot| !written_in.contains_key(&slot.name)).collect(),
+        slot_values: proposal.slot_values.iter().filter(|slot| !written_in.contains_key(&slot.name)).cloned().collect(),
         risk: named.map_or(proposal.risk, |skill| proposal.risk.max(skill.risk)),
         ..proposal.clone()
     };
-    let left = provided.iter().filter(|(name, _)| !flags.contains_key(*name));
+    let left = provided.iter().filter(|(name, _)| !written_in.contains_key(*name));
     Some((written, left.map(|(name, value)| (name.clone(), value.clone())).collect(), why))
+}
+
+/// Whether the request has `value` as a word of its own, as `editor=nvim` and "open it in nvim" both do.
+fn names(query: &str, value: &str) -> bool {
+    let value = value.trim();
+    let mut words = query.split(|ch: char| ch.is_whitespace() || "=:,;'\"`()".contains(ch));
+    !value.is_empty() && words.any(|word| word.eq_ignore_ascii_case(value))
 }
 
 /// Whether a skill's steps run the proposed command: the same template (`match_proposal`), or, once
@@ -1273,9 +1292,11 @@ pub fn teach_instead(
             phrase: phrase.to_string(),
             steps: steps.to_vec(),
             risk: None,
-            mode: options.mode,
+            teaching: options.mode.into(),
             threshold: options.threshold,
             cwd: options.cwd.clone(),
+            name: None,
+            description: None,
         },
         ui,
     )?;

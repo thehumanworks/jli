@@ -40,6 +40,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [27](0027-quiet.md) | A quiet run hides the trace, keeps its warnings, and still shows what a question asks about |
 | [28](0028-chatgpt-plan.md) | The agent and the translator can run on the user's ChatGPT plan, through a crate of jli's own |
 | [29](0029-device-code.md) | Where no browser opens, `jli login --device-auth` signs in with a code, through Codex's client |
+| [30](0030-taught-as-given.md) | What `jli teach` is told is kept as given, with the person's name and description, and a program is never a slot value |
 
 ## Known gaps, by record
 
@@ -142,3 +143,14 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   it expires; a sign-in refused as another account, or replaced by the same account, is dropped
   without being revoked; an older jli cannot read `"source": "device"` in `jli.json`; and there is
   one device sign-in per host.
+- [30](0030-taught-as-given.md): a request for another value still reaches a command kept as taught
+  when the value is a plain word (`pull from upstream` ran into `git pull origin`), and a command with
+  a value is not made general without `--mode=semi`; the value check misses a value spelled otherwise
+  and a number above ten as a word; the description is not kept apart from the scenario, so `jli eval
+  --optimise` can rewrite it away; a name taken between its check and its claim becomes `<name>-x`, and
+  a global skill's name is refused, not shadowed, inside a project; a template whose program is a slot
+  recognises no command, a program is named only as a whole word, and its place is only the start of a
+  step or after `|`, `;`, `&`, `(` or a backtick; the risk is still the translator's guess; a one-word
+  phrase verifies near the threshold; `jli fix -- <command>` and a typed correction follow the
+  configured mode; and an older jli keeps the old matching, teaches in semi mode, and reads `--name`
+  and `--description` as words of the phrase.

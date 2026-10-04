@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 
 use crate::cli::{parse, App, Fix, FixHow, Flags, Parsed};
-use crate::learn::{learn_phrase, LearnInput};
+use crate::learn::{learn_phrase, LearnInput, Teaching};
 use crate::llm::Llm;
 use crate::plan::{run_plans, RunFlags, SlotValue};
 use crate::router::{route, Outcome, RouteOptions, DRY_RUN, NEEDS_CALLER_SHELL, NOT_A_COMMAND};
@@ -624,9 +624,11 @@ fn teaching_a_template_variant_needs_no_model() {
         phrase: "last 10 commits please".into(),
         steps: vec!["git log --oneline -n 10".into()],
         risk: None,
-        mode: Mode::Semi,
+        teaching: Mode::Semi.into(),
         threshold: 0.5,
         cwd: scratch.work.clone(),
+        name: None,
+        description: None,
     };
     let learned = learn_phrase(&scratch.brain, &models, &input, &quiet()).unwrap();
     assert_eq!((learned.label.as_str(), learned.created), ("git-recent-commits", false));
@@ -660,9 +662,11 @@ fn a_translated_row_is_kept_when_system1_confirms_it() {
         phrase: "show the last 3 commits".into(),
         steps: vec!["git log --oneline -n 3".into()],
         risk: None,
-        mode: Mode::Semi,
+        teaching: Mode::Semi.into(),
         threshold: 0.5,
         cwd: scratch.work.clone(),
+        name: None,
+        description: None,
     };
     let learned = learn_phrase(&scratch.brain, &models, &input, &quiet()).unwrap();
     assert_eq!(
@@ -689,9 +693,11 @@ fn a_row_that_fails_verification_twice_keeps_the_phrase_as_its_scenario() {
         phrase: "show the last 3 commits".into(),
         steps: vec!["git log --oneline -n 3".into()],
         risk: None,
-        mode: Mode::Semi,
+        teaching: Mode::Semi.into(),
         threshold: 0.5,
         cwd: scratch.work.clone(),
+        name: None,
+        description: None,
     };
     let learned = learn_phrase(&scratch.brain, &models, &input, &quiet()).unwrap();
     assert_eq!((learned.created, learned.translated), (true, false));
@@ -726,9 +732,11 @@ fn a_flag_is_never_a_slot() {
         phrase: "date in iso".into(),
         steps: vec!["date -I".into()],
         risk: None,
-        mode: Mode::Semi,
+        teaching: Mode::Semi.into(),
         threshold: 0.5,
         cwd: scratch.work.clone(),
+        name: None,
+        description: None,
     };
     learn_phrase(&scratch.brain, &models, &input, &quiet()).unwrap();
     let skill = scratch.brain.skill("date-iso").unwrap().unwrap();
@@ -745,9 +753,11 @@ fn an_unreachable_translator_falls_back_to_manual() {
         phrase: "how big is this folder".into(),
         steps: vec!["du -sh .".into()],
         risk: Some(Risk::Safe),
-        mode: Mode::Semi,
+        teaching: Mode::Semi.into(),
         threshold: 0.5,
         cwd: scratch.work.clone(),
+        name: None,
+        description: None,
     };
     let learned = learn_phrase(&scratch.brain, &models, &input, &quiet()).unwrap();
     assert_eq!((learned.label.as_str(), learned.created, learned.translated), ("du-sh", true, false));
@@ -1186,9 +1196,11 @@ fn a_skill_one_user_taught_is_invisible_to_every_other_user() {
         phrase: "how big is this folder".into(),
         steps: vec!["du -sh .".into()],
         risk: Some(Risk::Safe),
-        mode: Mode::Manual,
+        teaching: Mode::Manual.into(),
         threshold: 0.5,
         cwd: scratch.work.clone(),
+        name: None,
+        description: None,
     };
     let (silent, _) = models(|_| panic!("manual teaching asks nobody"), no_language_model());
     assert_eq!(learn_phrase(&agent, &silent, &taught, &quiet()).unwrap().label, "du-sh");
@@ -1304,9 +1316,11 @@ fn a_label_taken_while_the_translator_was_writing_is_not_overwritten() {
         phrase: "show the last 3 commits".into(),
         steps: vec!["git log --oneline -n 3".into()],
         risk: None,
-        mode: Mode::Semi,
+        teaching: Mode::Semi.into(),
         threshold: 0.5,
         cwd: scratch.work.clone(),
+        name: None,
+        description: None,
     };
     let learned = learn_phrase(&scratch.brain, &Models { system1, llm }, &input, &quiet()).unwrap();
     assert_eq!((learned.label.as_str(), learned.created, learned.translated), ("git-recent-commits-x", true, true));
@@ -1787,9 +1801,11 @@ fn run_the_tests_means_one_command_in_one_project_and_another_in_the_next() {
         phrase: "run the tests".into(),
         steps: vec!["echo cargo test".into()],
         risk: Some(Risk::Safe),
-        mode: Mode::Manual,
+        teaching: Mode::Manual.into(),
         threshold: 0.5,
         cwd: scratch.work.clone(),
+        name: None,
+        description: None,
     };
     assert_eq!(learn_phrase(&scratch.brain, &silent, &taught, &quiet()).unwrap().label, "echo-cargo-test");
     let (rust, node) = (in_project(&scratch, "rust"), in_project(&scratch, "node"));
@@ -1852,9 +1868,11 @@ fn a_skill_learned_in_a_project_stays_there_unless_taught_globally() {
         phrase: "how big is this folder".into(),
         steps: vec!["du -sh .".into()],
         risk: Some(Risk::Safe),
-        mode: Mode::Manual,
+        teaching: Mode::Manual.into(),
         threshold: 0.5,
         cwd: scratch.work.clone(),
+        name: None,
+        description: None,
     };
     let learned = shop.globally(|brain| learn_phrase(brain, &silent, &taught, &quiet())).unwrap();
     assert_eq!(scratch.brain.skill(&learned.label).unwrap().unwrap().steps, ["du -sh ."]);
@@ -2221,9 +2239,11 @@ fn teach(phrase: &str, command: &str, mode: Mode, scratch: &Scratch) -> LearnInp
         phrase: phrase.into(),
         steps: vec![command.into()],
         risk: None,
-        mode,
+        teaching: mode.into(),
         threshold: 0.5,
         cwd: scratch.work.clone(),
+        name: None,
+        description: None,
     }
 }
 
@@ -3212,9 +3232,11 @@ fn a_taught_flag_value_is_optional_and_the_command_without_it_joins_the_skill() 
             phrase: phrase.into(),
             steps: vec![command.into()],
             risk: None,
-            mode: Mode::Semi,
+            teaching: Mode::Semi.into(),
             threshold: 0.5,
             cwd: scratch.work.clone(),
+            name: None,
+            description: None,
         };
         learn_phrase(&scratch.brain, models, &input, &quiet()).unwrap()
     };
@@ -3489,4 +3511,274 @@ fn a_quiet_generalization_shows_what_would_be_written() {
             assert_eq!(about, "", "the trace showed it");
         }
     }
+}
+
+// ── A program is never a slot value, and what is taught is kept as given (ADR 30) ──
+
+/// The skill the agent wrote on 2026-10-03 for "open file=Cargo.toml with editor=nvim".
+fn editor_skill(brain: &Brain) {
+    let slot = |name: &str, kind: SlotKind| Slot { name: name.into(), kind, ..Slot::default() };
+    brain
+        .add_skill(&NewSkill {
+            label: "open-file-with-editor".into(),
+            steps: vec!["{editor} {file}".into()],
+            scenario: "the user wants to open a specific file in a text editor they name".into(),
+            risk: Risk::Safe,
+            origin: Origin::Agent,
+            examples: vec!["open file=… with editor=…".into()],
+            slots: vec![slot("editor", SlotKind::Text), slot("file", SlotKind::File)],
+        })
+        .unwrap();
+}
+
+fn examples_of(brain: &Brain, label: &str) -> Vec<String> {
+    brain.skill(label).unwrap().unwrap().examples
+}
+
+#[test]
+fn the_agents_new_command_is_not_taken_for_a_skill_whose_program_is_a_slot() {
+    let scratch = Scratch::new("program-slot-new");
+    editor_skill(&scratch.brain);
+    // As it ran live: System 1 knew no skill for "pull", and the agent proposed `git pull` as a new one.
+    let proposal = new_proposal("git-pull", "git pull", json!([]), json!([]));
+    let (models, _) = models(|_| decision(NONE, 1.0, 0.95, SAFE), vec![("proposal", proposal)]);
+    let options = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "pull", &mut Script::default(), &options);
+    assert_eq!(outcome.label.as_deref(), Some("git-pull"));
+    assert_eq!(outcome.commands, ["git pull"]);
+    assert!(outcome.values.is_empty(), "no {{editor}} = git, no {{file}} = pull");
+
+    // Run, it is learned as the new skill it is, and the editor skill keeps only its own phrasing.
+    let proposal = new_proposal("say-pulled", "echo pulled", json!([]), json!([]));
+    let (models, _) = self::models(once_known("say-pulled", decision(NONE, 1.0, 0.95, SAFE)), vec![("proposal", proposal)]);
+    let outcome = go(&scratch, &models, "pull", &mut Script::default(), &yes(&scratch));
+    assert_eq!((outcome.label.as_deref(), outcome.output.as_deref()), (Some("say-pulled"), Some("pulled\n")));
+    assert_eq!(outcome.learned, ["new skill say-pulled"]);
+    assert_eq!(examples_of(&scratch.brain, "open-file-with-editor"), ["open file=… with editor=…"]);
+}
+
+fn editor_proposal(editor: &str, file: &str) -> Value {
+    json!({
+        "kind": "existing", "existingLabel": "open-file-with-editor", "label": null, "steps": [],
+        "scenario": "", "slots": [],
+        "slotValues": [{ "name": "editor", "value": editor }, { "name": "file", "value": file }],
+        "risk": "safe", "explanation": "Known.", "answer": null,
+    })
+}
+
+#[test]
+fn a_program_the_request_does_not_name_is_written_into_the_command() {
+    let scratch = Scratch::new("program-slot-existing");
+    editor_skill(&scratch.brain);
+    std::fs::write(scratch.work.join("notes.txt"), "one\n").unwrap();
+    // The other road to the same mistake: the agent names the editor skill with `echo` for the editor.
+    let (models, _) = models(
+        once_known("echo-pulled", decision(NONE, 1.0, 0.95, SAFE)),
+        vec![("proposal", editor_proposal("echo", "pulled"))],
+    );
+    let outcome = go(&scratch, &models, "pull", &mut Script::default(), &yes(&scratch));
+    assert_eq!((outcome.label.as_deref(), outcome.output.as_deref()), (Some("echo-pulled"), Some("pulled\n")));
+    assert_eq!(outcome.learned, ["new skill echo-pulled"]);
+    assert_eq!(scratch.brain.skill("echo-pulled").unwrap().unwrap().steps, ["echo pulled"]);
+    assert_eq!(examples_of(&scratch.brain, "open-file-with-editor"), ["open file=… with editor=…"]);
+
+    // A program the request names is the value it asked for, so the skill is used as it was written.
+    let (models, _) =
+        self::models(|_| decision(NONE, 1.0, 0.95, SAFE), vec![("proposal", editor_proposal("cat", "notes.txt"))]);
+    let options = RouteOptions { dry_run: true, ..scratch.options(Mode::Semi) };
+    let outcome = go(&scratch, &models, "open file=notes.txt with editor=cat", &mut Script::default(), &options);
+    assert_eq!(outcome.label.as_deref(), Some("open-file-with-editor"));
+    assert_eq!(outcome.commands, ["cat notes.txt"]);
+}
+
+#[test]
+fn teaching_a_command_beside_a_skill_whose_program_is_a_slot_makes_its_own_skill() {
+    let scratch = Scratch::new("program-slot-teach");
+    editor_skill(&scratch.brain);
+    // Before ADR 30 this linked "pull" to open-file-with-editor, with no model asked.
+    let (models, _) = models_without_calls();
+    let learned =
+        learn_phrase(&scratch.brain, &models, &teach("pull", "git pull", Mode::Manual, &scratch), &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created), ("git-pull", true));
+    assert_eq!(examples_of(&scratch.brain, "open-file-with-editor"), ["open file=… with editor=…"]);
+
+    // Nor is the translator believed when it calls the command that skill with other values.
+    let row = json!({
+        "existingLabel": "open-file-with-editor", "label": "git-fetch", "steps": ["git fetch"],
+        "scenario": "the user wants the remote's changes fetched without merging them",
+        "slots": [], "slotValues": [{ "name": "editor", "value": "git" }, { "name": "file", "value": "fetch" }],
+        "risk": "safe",
+    });
+    let (models, _) = self::models(routes_phrase_to("fetch", "git-fetch"), vec![("matrix_row", row)]);
+    let learned =
+        learn_phrase(&scratch.brain, &models, &teach("fetch", "git fetch", Mode::Semi, &scratch), &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created, learned.translated), ("git-fetch", true, true));
+    assert_eq!(examples_of(&scratch.brain, "open-file-with-editor"), ["open file=… with editor=…"]);
+}
+
+fn described_input(
+    scratch: &Scratch,
+    phrase: &str,
+    command: &str,
+    name: Option<&str>,
+    description: Option<&str>,
+) -> LearnInput {
+    LearnInput {
+        teaching: Teaching::Described,
+        name: name.map(String::from),
+        description: description.map(String::from),
+        ..teach(phrase, command, Mode::Manual, scratch)
+    }
+}
+
+fn scenario_reply(label: &str, scenario: &str) -> Value {
+    json!({ "label": label, "scenario": scenario, "risk": "modifies" })
+}
+
+#[test]
+fn jli_teach_keeps_the_command_and_the_name_and_a_model_writes_only_the_scenario() {
+    let scratch = Scratch::new("teach-described");
+    // `jli config mode auto` is about routing: only --mode on the teach command line changes how it is taught.
+    scratch.brain.set_setting("mode", "auto").unwrap();
+    let said = "the user wants the current branch to fetch and merge what the origin remote has";
+    let (models, replies) =
+        models(routes_phrase_to("pull", "pull"), vec![("skill_scenario", scenario_reply("git-pull-origin", said))]);
+    let argv = [
+        "teach",
+        "-q",
+        "--name=pull",
+        "--description",
+        "sync my branch with origin before I start work",
+        "pull",
+        "--",
+        "git",
+        "pull",
+        "origin",
+    ];
+    assert_eq!(run_opened(&scratch, &argv, &scratch.work, models), 0);
+    let skill = scratch.brain.skill("pull").unwrap().unwrap();
+    assert_eq!(skill.steps, ["git pull origin"], "the command as taught, with no slot for the remote");
+    assert!(skill.slots.is_empty());
+    assert_eq!((skill.scenario.as_str(), skill.examples.as_slice()), (said, ["pull".to_string()].as_slice()));
+    assert_eq!(skill.risk, Risk::Modifies);
+    assert!(scratch.brain.skill("git-pull-origin").unwrap().is_none(), "the person's name, not the model's");
+    let seen = replies.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1, "one call, for the scenario");
+    let input: Value = serde_json::from_str(seen[0]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!((input["name"].as_str(), input["phrase"].as_str()), (Some("pull"), Some("pull")));
+    assert_eq!(input["description"], "sync my branch with origin before I start work");
+    assert_eq!(input["command"], json!(["git pull origin"]));
+}
+
+#[test]
+fn jli_teach_with_mode_semi_still_generalises_the_command() {
+    let scratch = Scratch::new("teach-semi-flag");
+    let (models, _) = models(
+        routes_phrase_to("show the last 3 commits", "git-recent-commits"),
+        vec![("matrix_row", draft("git log --oneline -n {count}", "3"))],
+    );
+    let argv = ["teach", "-q", "--mode=semi", "show the last 3 commits", "--", "git", "log", "--oneline", "-n", "3"];
+    assert_eq!(run_opened(&scratch, &argv, &scratch.work, models), 0);
+    assert_eq!(scratch.brain.skill("git-recent-commits").unwrap().unwrap().steps, ["git log --oneline -n {count}"]);
+}
+
+#[test]
+fn a_described_row_that_fails_the_check_twice_keeps_the_persons_own_words() {
+    let scratch = Scratch::new("teach-described-rejected");
+    let (models, replies) = models(
+        |_| decision("git-status", 0.9, 0.9, SAFE),
+        vec![
+            ("skill_scenario", scenario_reply("git-pull-origin", "the user wants to sync")),
+            ("skill_scenario", scenario_reply("git-pull-origin", "the user wants to sync with origin")),
+        ],
+    );
+    let input = described_input(&scratch, "pull", "git pull origin", None, Some("fetch origin and merge it"));
+    let learned = learn_phrase(&scratch.brain, &models, &input, &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created, learned.translated), ("git-pull-origin", true, false));
+    let skill = scratch.brain.skill("git-pull-origin").unwrap().unwrap();
+    assert_eq!(skill.scenario, "the user wants: pull. fetch origin and merge it");
+    assert_eq!(skill.steps, ["git pull origin"]);
+    let seen = replies.seen.lock().unwrap();
+    let retry: Value = serde_json::from_str(seen[1]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert!(retry["previousAttemptProblem"].as_str().unwrap().starts_with("the phrase itself routed to git-status"));
+
+    // With every model out of reach the command is still kept, in the person's own words.
+    let (models, _) = models_without_calls();
+    let models = Models { llm: Llm::with_transport(|_| Err("connection refused".into())), ..models };
+    let input = described_input(&scratch, "update the docs site", "mise run docs", Some("docs"), None);
+    let learned = learn_phrase(&scratch.brain, &models, &input, &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created), ("docs", true));
+    assert_eq!(scratch.brain.skill("docs").unwrap().unwrap().scenario, "the user wants: update the docs site");
+}
+
+#[test]
+fn a_described_scenario_must_name_the_values_the_command_runs_with() {
+    let scratch = Scratch::new("teach-described-values");
+    // Mercury wrote the first of these live: as broad as `wc -l {file}`, for a command that counts one file.
+    let (models, replies) = models(
+        routes_phrase_to("count lines in notes.txt", "count-lines"),
+        vec![
+            ("skill_scenario", scenario_reply("count-lines", "the user wants to count the lines in a file")),
+            ("skill_scenario", scenario_reply("count-lines", "the user wants the number of lines in notes.txt")),
+        ],
+    );
+    let input = described_input(&scratch, "count lines in notes.txt", "wc -l notes.txt", None, None);
+    let learned = learn_phrase(&scratch.brain, &models, &input, &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.translated), ("count-lines", true));
+    assert_eq!(
+        scratch.brain.skill("count-lines").unwrap().unwrap().scenario,
+        "the user wants the number of lines in notes.txt"
+    );
+    let seen = replies.seen.lock().unwrap();
+    let retry: Value = serde_json::from_str(seen[1]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        retry["previousAttemptProblem"],
+        "the scenario does not name notes.txt, which the command runs with every time, so a request for another value would fit it"
+    );
+}
+
+#[test]
+fn a_command_a_skill_already_runs_joins_it_with_no_model() {
+    let scratch = Scratch::new("teach-described-known");
+    literal_skill(&scratch.brain, "git-pull", "git pull", &["pull"]);
+    let (models, _) = models_without_calls();
+    let input = described_input(&scratch, "get the latest changes", "git pull", None, Some("before I start work"));
+    let learned = learn_phrase(&scratch.brain, &models, &input, &quiet()).unwrap();
+    assert_eq!((learned.label.as_str(), learned.created), ("git-pull", false));
+    assert_eq!(examples_of(&scratch.brain, "git-pull"), ["pull", "get the latest changes"]);
+    // Named as it is called, it joins it too.
+    let input = described_input(&scratch, "update from upstream", "git pull", Some("git-pull"), None);
+    assert_eq!(learn_phrase(&scratch.brain, &models, &input, &quiet()).unwrap().label, "git-pull");
+}
+
+#[test]
+fn a_name_that_is_taken_or_a_command_that_is_known_is_refused_before_any_model() {
+    let scratch = Scratch::new("teach-name-taken");
+    literal_skill(&scratch.brain, "pull", "git pull --rebase", &["pull and rebase"]);
+    literal_skill(&scratch.brain, "git-fetch", "git fetch", &["fetch"]);
+    let (models, _) = models_without_calls();
+    let refused = |brain: &Brain, input: LearnInput| {
+        let error = learn_phrase(brain, &models, &input, &quiet()).unwrap_err();
+        assert_eq!(error_code(&error), "usage");
+        format!("{error:#}")
+    };
+    assert_eq!(
+        refused(&scratch.brain, described_input(&scratch, "pull", "git pull origin", Some("pull"), None)),
+        "pull is already a skill, which runs git pull --rebase. Choose another name, or forget that skill first: jli forget pull"
+    );
+    let message = refused(&scratch.brain, described_input(&scratch, "get it", "git fetch", Some("get"), None));
+    assert!(message.starts_with("git-fetch already runs git fetch, so the phrase would join it, not a skill called get."));
+    assert!(message.ends_with("forget git-fetch first: jli forget git-fetch"), "{message}");
+    let generalised = LearnInput {
+        teaching: Teaching::Generalised,
+        ..described_input(&scratch, "get it", "git fetch", Some("get"), None)
+    };
+    assert!(refused(&scratch.brain, generalised).starts_with("git-fetch already runs git fetch"));
+    assert_eq!(examples_of(&scratch.brain, "pull"), ["pull and rebase"], "nothing was written");
+    assert!(scratch.brain.skill("get").unwrap().is_none());
+
+    // Inside a project a global skill's name is refused too, with the way to forget it everywhere.
+    let shop = in_project(&scratch, "shop");
+    let message = refused(&shop, described_input(&scratch, "pull", "git pull origin", Some("pull"), None));
+    assert!(message.ends_with("jli forget --global pull"), "{message}");
 }

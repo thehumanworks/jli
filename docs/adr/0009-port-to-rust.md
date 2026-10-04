@@ -1,6 +1,8 @@
 # 9. Port jli from TypeScript to Rust, keeping its behaviour and its brain
 
-- Status: accepted; done on 2026-10-02
+- Status: accepted; done on 2026-10-02; acceptance check 7 superseded in part by
+  [ADR 30](0030-taught-as-given.md), under which both teaches take `--mode=semi`, since `jli teach`
+  now keeps the command as given
 - Date: 2026-10-02
 
 ## Context
