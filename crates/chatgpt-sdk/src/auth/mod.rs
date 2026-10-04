@@ -49,8 +49,8 @@ use ring::rand::{SecureRandom, SystemRandom};
 use crate::error::{Error, Result};
 use crate::http::{HttpClient, HttpRequest};
 
-pub(crate) use flow::split_scopes;
 pub use flow::{exchange_code, refresh_tokens, revoke, AuthorizationRequest, Registration, TokenResponse};
+pub(crate) use flow::{post_form, split_scopes, token_reply};
 pub use host_id::HostId;
 pub use id_token::{unverified_claims, verify_id_token, IdTokenClaims, Jwk, Jwks, Validation};
 pub use loopback::{Callback, LoopbackListener};

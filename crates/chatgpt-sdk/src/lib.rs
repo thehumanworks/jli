@@ -12,6 +12,8 @@
 //! - [`Client`]: model lists and streamed Responses API requests, with typed requests
 //!   ([`ResponseRequest`]), events ([`StreamEvent`]) and results ([`Completion`]).
 //! - [`CodexAuth`]: the sign-in the Codex CLI already keeps, for the Codex backend.
+//! - [`DeviceCode`]: a sign-in with a one-time code entered on another device, for a host where no
+//!   browser opens. It goes through the Codex CLI's client, so its tokens are for the Codex backend.
 //! - [`Error::recovery`]: what the documentation says to do about each failure.
 //!
 //! Everything is blocking. HTTP goes through the [`HttpClient`] trait; the default,
@@ -22,7 +24,7 @@
 //! | Credentials | Backend | Base URL |
 //! | --- | --- | --- |
 //! | [`Session`], from Sign in with ChatGPT | [`Backend::Api`] | `https://api.openai.com/v1` |
-//! | [`CodexAuth`], from `codex login` | [`Backend::Codex`] | `https://chatgpt.com/backend-api/codex` |
+//! | [`CodexAuth`], from `codex login` or a [`DeviceCode`] | [`Backend::Codex`] | `https://chatgpt.com/backend-api/codex` |
 //!
 //! Each token works on its own backend only. Both take the same Responses request, streamed and
 //! unstored.
@@ -59,6 +61,7 @@ pub mod auth;
 mod client;
 mod codex;
 mod credentials;
+mod device;
 mod error;
 mod files;
 mod http;
@@ -71,8 +74,9 @@ mod stream;
 pub mod testing;
 
 pub use client::{AccessToken, Backend, Bearer, Client, ClientBuilder, Credential, DEFAULT_CODEX_CLIENT_VERSION};
-pub use codex::{CodexAccount, CodexAuth, CODEX_CLIENT_ID, CODEX_REFRESH_URL};
+pub use codex::{CodexAccount, CodexAuth, CODEX_CLIENT_ID, CODEX_REFRESH_URL, CODEX_REVOKE_URL};
 pub use credentials::{Credentials, REFRESH_MARGIN};
+pub use device::{DeviceCode, DEVICE_CODE_LIFETIME};
 pub use error::{
     ApiError, Error, IdTokenError, OAuthError, Recovery, ResponseError, Result, SignInError, TransportError,
     TransportErrorKind, MANAGE_USAGE_URL,

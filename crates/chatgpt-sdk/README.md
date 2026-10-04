@@ -9,7 +9,8 @@ dynamic client registration in the browser, a loopback callback, PKCE, ID token 
 credentials saved the way the documentation describes, refresh and revocation, and streamed
 Responses requests with typed events and errors.
 
-It also reads the sign-in the Codex CLI already keeps, for apps whose users have run `codex login`.
+It also reads the sign-in the Codex CLI already keeps, for apps whose users have run `codex login`,
+and signs in with a one-time code entered on another device, for hosts where no browser opens.
 
 Everything is blocking. HTTP goes through a small `HttpClient` trait; the default uses `ureq` with
 rustls.
@@ -61,7 +62,8 @@ an answer with the Codex CLI's sign-in.
 | `auth::verify_id_token` | RS256 against the published key set, then issuer, audience, expiry and nonce |
 | `CredentialStore` | one record per registration in the documented format, written atomically with mode 0600; the host id (`urn:uuid:…`) made once; the active account; sign-out that revokes the refresh token and keeps the client id |
 | `Session` | the saved sign-in as a credential: refreshed five minutes before expiry and after a 401, serialised across processes with a lock file, signed out when the refresh token is unusable |
-| `CodexAuth` | the Codex CLI's `auth.json` as a credential for the Codex backend |
+| `CodexAuth` | the Codex CLI's `auth.json` as a credential for the Codex backend; `create` saves a device code sign-in in the same format, in the app's own file, and `revoke` ends it as `codex logout` does |
+| `DeviceCode` | a sign-in with a one-time code entered on another device, through the Codex CLI's client (below): `request`, then `wait`, which polls and exchanges the code |
 | `Client` | `models()`, and `stream()` / `create()` for Responses requests, always with `store: false` and `stream: true` |
 | `StreamEvent`, `Accumulator`, `Completion` | typed stream events; the text assembled from the stream, since the final event may carry no output |
 | `Error::recovery` | the documented action for each failure: retry later, sign in again, manage usage, not eligible, fix the request |
@@ -71,7 +73,7 @@ an answer with the Codex CLI's sign-in.
 | Credentials | Backend | Base URL |
 | --- | --- | --- |
 | `Session`, from Sign in with ChatGPT | `Backend::Api` | `https://api.openai.com/v1` |
-| `CodexAuth`, from `codex login` | `Backend::Codex` | `https://chatgpt.com/backend-api/codex` |
+| `CodexAuth`, from `codex login` or a `DeviceCode` | `Backend::Codex` | `https://chatgpt.com/backend-api/codex` |
 
 A token works only on its own backend. On 2026-10-03, a Codex token sent to the public API was
 refused with "Missing scopes: api.responses.write", and the same token on the Codex backend
@@ -82,6 +84,30 @@ for a recent `client_version` (`ClientBuilder::client_version`).
 `CodexAuth` reads the file on every request, so a refresh Codex makes is picked up. It refreshes
 only a token that has expired, the way Codex does, and writes the new tokens back with every other
 field kept.
+
+## A code instead of a browser
+
+Over SSH the loopback callback reaches the wrong machine. OpenAI's device code endpoints answer only
+the Codex CLI's public client: on 2026-10-03, `POST https://auth.openai.com/api/accounts/deviceauth/usercode`
+gave Codex's client a code (an `interval` of `"5"`, 15 minutes to enter it) and refused
+`dynamic_agent_client` with `invalid_client`. `DeviceCode` therefore signs in as
+`codex login --device-auth` does, as other open-source agents do:
+
+```rust
+use chatgpt_sdk::{auth::ISSUER, CodexAuth, DeviceCode, UreqClient};
+
+let http = UreqClient::new();
+let code = DeviceCode::request(&http, ISSUER)?;
+eprintln!("Open {} on any device and enter {}", code.verification_url, code.user_code);
+let tokens = code.wait(&http, &mut std::thread::sleep)?;
+let auth = CodexAuth::create("/home/me/.config/my-app/chatgpt.json", &tokens)?.sign_in_command("my-app login");
+```
+
+The page the person opens names Codex, and device code sign-in has to be on in their ChatGPT
+security settings. The tokens are Codex's kind: they work on the Codex backend only. Keep them in a
+file of the app's own; given Codex's `auth.json`, `create` would replace Codex's sign-in. A poll
+answered 403 or 404 means the code has not been entered yet; an unknown code is answered 404 too,
+so a code that is never entered is told apart only by its expiry.
 
 ## The plan routes' rules
 
@@ -98,8 +124,9 @@ field kept.
 
 `cargo test -p chatgpt-sdk` runs offline: unit tests per module, and an end-to-end sign-in in
 which a fake browser drives the real loopback listener and a fake authorization server checks PKCE
-and signs ID tokens with a test key. `cargo test -p chatgpt-sdk --test live -- --ignored` calls the
-real Codex backend with the Codex CLI's sign-in.
+and signs ID tokens with a test key; the same fake serves the device code endpoints. `cargo test -p
+chatgpt-sdk --test live -- --ignored` calls the real Codex backend with the Codex CLI's sign-in, and
+asks for a device code that expires unused.
 
 ## Known gaps
 
@@ -108,6 +135,12 @@ real Codex backend with the Codex CLI's sign-in.
 - The Codex refresh is made as the Codex binary makes it (a JSON body with `client_id`,
   `grant_type` and `refresh_token`, to `https://auth.openai.com/oauth/token`), read from the binary
   and tested offline. It has not run live, because it rotates Codex's refresh token.
+- A device code sign-in completed live on 2026-10-04, and its tokens listed models and answered a
+  request on the Codex backend. Its refresh and its revocation (a JSON body to
+  `https://auth.openai.com/oauth/revoke`, which answered a made-up token with
+  `invalid_refresh_token`) have not run live; they are copied from the Codex binary, pi and
+  opencode, and tested offline. It uses another app's public client, which OpenAI could stop at any
+  time.
 - There is no async API, and no WebSocket transport.
 - Tools are typed only as functions; others go through `Tool::Raw`.
 

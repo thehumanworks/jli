@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 
-use crate::account::{Accounts, SignedIn, SignedOut, Source, MANAGE_USAGE_URL};
+use crate::account::{Accounts, SignInCode, SignedIn, SignedOut, Source, MANAGE_USAGE_URL};
 use crate::args;
 use crate::demo::run_demo;
 use crate::eval;
@@ -1282,7 +1282,7 @@ fn path_tag(path: Path) -> String {
     }
 }
 
-/// `jli login`, `jli login --codex`, `jli logout` and `jli models`: the ChatGPT plan on this host.
+/// `jli login` (`--new`, `--codex`, `--device-auth`), `jli logout` and `jli models`: the ChatGPT plan on this host.
 /// They need no brain (ADR 28). `None` when the words are not one of them.
 fn account(words: &[String], flags: &Flags) -> Result<Option<i32>> {
     let shape: Vec<&str> = words.iter().map(String::as_str).collect();
@@ -1300,6 +1300,22 @@ fn account(words: &[String], flags: &Flags) -> Result<Option<i32>> {
             say_signed_in(&signed_in, flags);
         }
         ["login", "--codex"] => say_signed_in(&Accounts::from_env()?.login_codex()?, flags),
+        ["login", "--device-auth"] | ["login", "--new", "--device-auth"] | ["login", "--device-auth", "--new"] => {
+            // The code is the sign-in itself, so it reaches stderr even with --quiet or --json.
+            let show = |code: &SignInCode| {
+                eprintln!(
+                    "{} To sign in with ChatGPT, open this page on any device:\n  {}\nand enter this code, which expires in {} minutes:\n  {}\n{}",
+                    c::yellow("!"),
+                    code.url,
+                    code.minutes,
+                    c::bold(&code.code),
+                    c::dim("The page names Codex: jli signs in through Codex's client. If it says device codes are off, turn\non device code sign-in in ChatGPT's security settings. Never give this code to anyone.")
+                )
+            };
+            let another = shape.contains(&"--new");
+            let signed_in = Accounts::from_env()?.login_device(&show, &mut std::thread::sleep, another)?;
+            say_signed_in(&signed_in, flags);
+        }
         ["logout"] => say_signed_out(&Accounts::from_env()?.logout()?, flags),
         ["models"] => {
             let (models, current) = Accounts::from_env()?.models()?;
@@ -1327,7 +1343,15 @@ fn account(words: &[String], flags: &Flags) -> Result<Option<i32>> {
 
 /// Whether the words are exactly one of the account commands.
 fn account_shape(shape: &[&str]) -> bool {
-    matches!(shape, ["login"] | ["login", "--new" | "--codex"] | ["logout"] | ["models"])
+    matches!(
+        shape,
+        ["login"]
+            | ["login", "--new" | "--codex" | "--device-auth"]
+            | ["login", "--new", "--device-auth"]
+            | ["login", "--device-auth", "--new"]
+            | ["logout"]
+            | ["models"]
+    )
 }
 
 fn say_signed_in(signed_in: &SignedIn, flags: &Flags) {
@@ -1350,12 +1374,11 @@ fn say_signed_in(signed_in: &SignedIn, flags: &Flags) {
         ));
         return;
     }
+    let plan = signed_in.plan_type.as_deref().map(|plan| format!(", {plan} plan")).unwrap_or_default();
     match signed_in.source {
         Source::SignIn => say(format!("Signed in with ChatGPT as {who}.")),
-        Source::Codex => {
-            let plan = signed_in.plan_type.as_deref().map(|plan| format!(", {plan} plan")).unwrap_or_default();
-            say(format!("Using the ChatGPT account Codex is signed in with: {who}{plan}."));
-        }
+        Source::Device => say(format!("Signed in with ChatGPT as {who}{plan}.")),
+        Source::Codex => say(format!("Using the ChatGPT account Codex is signed in with: {who}{plan}.")),
     }
     say(format!(
         "The agent and the translator now run on {} using your ChatGPT plan. jli models lists the others.",
@@ -1382,6 +1405,12 @@ fn say_signed_out(out: &SignedOut, flags: &Flags) {
             say(format!("Signed out of ChatGPT{who}. jli no longer uses your ChatGPT plan."));
             if !out.revoked {
                 say("The session could not be ended remotely: to end it now, disconnect jli in ChatGPT's settings.");
+            }
+        }
+        Some(Source::Device) => {
+            say(format!("Signed out of ChatGPT{who}. jli no longer uses your ChatGPT plan."));
+            if !out.revoked {
+                say("The session could not be ended remotely: to end it now, log out of all devices in ChatGPT's security settings.");
             }
         }
     }
@@ -1493,12 +1522,23 @@ mod tests {
             &["login", "to", "the", "server"],
             &["logout", "--now"],
             &["login", "--codex", "x"],
+            &["login", "--device-auth", "now"],
+            &["login", "--new", "--codex"],
+            &["login", "--codex", "--device-auth"],
         ] {
             assert_eq!(account(&args(words), &Flags::quiet()).unwrap(), None, "{words:?}");
         }
         // -n would show nothing and change everything: signing in or out refuses it before any account is read.
         let dry = Flags { dry_run: true, ..Flags::quiet() };
-        for words in [&["login"][..], &["login", "--new"], &["login", "--codex"], &["logout"]] {
+        for words in [
+            &["login"][..],
+            &["login", "--new"],
+            &["login", "--codex"],
+            &["login", "--device-auth"],
+            &["login", "--new", "--device-auth"],
+            &["login", "--device-auth", "--new"],
+            &["logout"],
+        ] {
             assert_eq!(account(&args(words), &dry).unwrap(), Some(1), "{words:?}");
         }
         assert_eq!(account(&args(&["login", "to", "the", "server"]), &dry).unwrap(), None, "a request stays a request");

@@ -39,6 +39,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [26](0026-project-flag.md) | `--project` names the project a command acts on, from any directory |
 | [27](0027-quiet.md) | A quiet run hides the trace, keeps its warnings, and still shows what a question asks about |
 | [28](0028-chatgpt-plan.md) | The agent and the translator can run on the user's ChatGPT plan, through a crate of jli's own |
+| [29](0029-device-code.md) | Where no browser opens, `jli login --device-auth` signs in with a code, through Codex's client |
 
 ## Known gaps, by record
 
@@ -135,3 +136,9 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   project; a returning sign-in's URL carries the saved ID token as a hint, printed without a browser
   and in the process list while the opener runs; a Codex refresh is locked against other jli
   processes, not against Codex; and an older jli ignores the sign-in.
+- [29](0029-device-code.md): the refresh (after 240 hours) and the revocation have not run live; jli
+  asks as Codex, which OpenAI could stop, and
+  the page names Codex; a refusal on the other device may look like a code not entered yet until
+  it expires; a sign-in refused as another account, or replaced by the same account, is dropped
+  without being revoked; an older jli cannot read `"source": "device"` in `jli.json`; and there is
+  one device sign-in per host.
