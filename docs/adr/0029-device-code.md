@@ -103,6 +103,16 @@ In jli:
 -- --ignored`: `DeviceCode::request` got Codex's client a code, polled every 5 s, valid for 15
 minutes.
 
+**Measured on 2026-10-04**, live, by the owner on a Pro plan, with a scratch `JLI_CHATGPT_DIR`:
+
+| Step | Result |
+| --- | --- |
+| `jli login --device-auth`, the code entered on another device | "Signed in with ChatGPT as …, pro plan.", then the first-sign-in message |
+| `device.json` | mode 0600 in a 0700 directory, Codex's format, with an ID token, an access token, a refresh token and the account id; `jli.json` has `"source": "device"` |
+| the access token's claims | issued to Codex's client, scopes `openid profile email offline_access`, audience `https://api.openai.com/v1`, valid for 240 hours |
+| `jli models` | nine listed models, `gpt-6-luna` in use |
+| `--json -n --agent show me the newest files in this directory` | System 2 proposed `ls -ltr`, `safe`, in 2.4 s on `gpt-6-luna` |
+
 ## Consequences
 
 - A person on a remote host signs jli in to their ChatGPT plan with any phone or laptop, without
@@ -114,10 +124,10 @@ minutes.
 
 ## Known gaps
 
-- No sign-in with a code has completed live: the code was issued, and no one entered it. The
-  exchange and the revocation follow the Codex binary, pi and opencode, and are tested offline;
-  the revocation's JSON body was chosen because the endpoint read it (`invalid_refresh_token`), and
-  has not ended a real session.
+- The refresh and the revocation have not run live. The access token lasts 240 hours, so the
+  refresh waits that long; the revocation's JSON body was chosen because the endpoint read it
+  (`invalid_refresh_token`), and has not ended a real session. Both follow the Codex binary, pi and
+  opencode, and are tested offline.
 - A refusal on the other device cannot be told from a code not entered yet unless the server says
   so; otherwise the wait runs to the code's expiry.
 - A sign-in refused because it is another account, and one replaced by a sign-in as the same

@@ -135,10 +135,12 @@ asks for a device code that expires unused.
 - The Codex refresh is made as the Codex binary makes it (a JSON body with `client_id`,
   `grant_type` and `refresh_token`, to `https://auth.openai.com/oauth/token`), read from the binary
   and tested offline. It has not run live, because it rotates Codex's refresh token.
-- A device code sign-in has run live only up to the code being issued: no one has entered one. Its
-  exchange and its revocation (a JSON body to `https://auth.openai.com/oauth/revoke`, which answered
-  a made-up token with `invalid_refresh_token`) are copied from the Codex binary, pi and opencode,
-  and tested offline. It uses another app's public client, which OpenAI could stop at any time.
+- A device code sign-in completed live on 2026-10-04, and its tokens listed models and answered a
+  request on the Codex backend. Its refresh and its revocation (a JSON body to
+  `https://auth.openai.com/oauth/revoke`, which answered a made-up token with
+  `invalid_refresh_token`) have not run live; they are copied from the Codex binary, pi and
+  opencode, and tested offline. It uses another app's public client, which OpenAI could stop at any
+  time.
 - There is no async API, and no WebSocket transport.
 - Tools are typed only as functions; others go through `Tool::Raw`.
 

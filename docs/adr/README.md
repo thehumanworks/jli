@@ -136,8 +136,8 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   project; a returning sign-in's URL carries the saved ID token as a hint, printed without a browser
   and in the process list while the opener runs; a Codex refresh is locked against other jli
   processes, not against Codex; and an older jli ignores the sign-in.
-- [29](0029-device-code.md): no sign-in with a code has completed live, only the code being issued,
-  and the revocation has not ended a real session; jli asks as Codex, which OpenAI could stop, and
+- [29](0029-device-code.md): the refresh (after 240 hours) and the revocation have not run live; jli
+  asks as Codex, which OpenAI could stop, and
   the page names Codex; a refusal on the other device may look like a code not entered yet until
   it expires; a sign-in refused as another account, or replaced by the same account, is dropped
   without being revoked; an older jli cannot read `"source": "device"` in `jli.json`; and there is
