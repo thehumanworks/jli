@@ -390,7 +390,15 @@ impl Route<'_> {
         self.outcome.missing = record.missing_info();
         let id = plan::save(self.brain, &self.options.cwd, &record)?;
         self.outcome.plan_id = Some(id);
-        self.ui.note(format!("Stored as plan {id}: jli run {id} runs exactly this, with no model call."));
+        // A plan waiting on a value runs once it is given one, so say how.
+        let waits: Vec<String> = record.missing.iter().map(|name| format!("{name}=<value>")).collect();
+        self.ui.note(match waits.as_slice() {
+            [] => format!("Stored as plan {id}: jli run {id} runs exactly this, with no model call."),
+            [one] => format!("Stored as plan {id}: jli run {id} {one} runs it with that value, with no model call."),
+            all => {
+                format!("Stored as plan {id}: jli run {id} {} runs it with those values, with no model call.", all.join(" "))
+            }
+        });
         Ok(())
     }
 
@@ -665,6 +673,7 @@ impl Route<'_> {
                 let chose = skill.slots.iter().find(|slot| &slot.name == name).and_then(|slot| slot.choice(value));
                 let chose = chose.map(|choice| match choice.text.trim() {
                     "" => ", which writes nothing".to_string(),
+                    text if text == choice.value => String::new(),
                     text => format!(", written {text}"),
                 });
                 ui.note(format!("{{{name}}} = {value}{} (from {source}{read_as}{written})", chose.unwrap_or_default()));

@@ -3139,6 +3139,7 @@ fn a_value_a_slot_does_not_offer_blocks_the_run_until_one_it_does() {
     assert_eq!(code(&outcome), Some("missing_value"));
     assert_eq!(outcome.blocked.as_deref(), Some("{profile} takes release or debug, not fast"));
     assert_eq!((outcome.missing[0].name.as_str(), outcome.missing[0].choices.len()), ("profile", 2));
+    assert!(outcome.missing[0].only_choices, "its choices write a flag");
 
     let id = outcome.plan_id.unwrap();
     let refused = plans(&scratch, &no_model_at_all(), &[id], &[("profile", "fast")], &mut Script::default());
@@ -3147,6 +3148,93 @@ fn a_value_a_slot_does_not_offer_blocks_the_run_until_one_it_does() {
     let ran = plans(&scratch, &no_model_at_all(), &[id], &[("profile", "Release")], &mut Script::default());
     assert_eq!(ran[0].commands, ["echo build --release"]);
     assert_eq!(ran[0].output.as_deref(), Some("build --release\n"));
+}
+
+/// The slots of a report from 2026-10-06, given choices with the same words: `xai tts`, its output and
+/// voice named values with defaults, and its text left empty unless the request gives one.
+fn speech_skill(scratch: &Scratch) -> String {
+    let steps = ["echo tts --voice {voice} --normalize -o {output} {text}".to_string()];
+    let (label, _) = scratch.brain.learn_command("tts", &steps, Risk::Safe).unwrap();
+    for settings in [
+        &["output", "--choice=output=output.mp3", "--default=output"][..],
+        &["voice", "--choice=carina", "--choice=eva", "--default=carina"],
+        &["text", "--choice=empty=", "--default=empty"],
+    ] {
+        let words: Vec<String> =
+            std::iter::once(label.as_str()).chain(settings.iter().copied()).map(str::to_string).collect();
+        let done = hand::slot(&mut mutable(scratch), &hand::slot_shape(&words, false).unwrap()).unwrap();
+        assert_eq!(done.refused, None, "{}", done.message);
+    }
+    label
+}
+
+#[test]
+fn a_slot_whose_choices_write_no_flag_takes_a_value_the_request_states() {
+    let scratch = Scratch::new("named-values");
+    let label = speech_skill(&scratch);
+    let slots = scratch.brain.skill(&label).unwrap().unwrap().slots;
+    let output = slots.iter().find(|slot| slot.name == "output").unwrap();
+    assert_eq!(output.settings(), "output → output.mp3, or another value; default output");
+
+    // Any language model call panics: every value is stated, a choice or a default.
+    let to = label.clone();
+    let (models, _) = models(move |_| decision(&to, 0.9, 0.9, SAFE), no_language_model());
+    let run = |request: &str| go(&scratch, &models, request, &mut Script::default(), &yes(&scratch));
+    let outcome = run("tts output=hello.mp3 text='Hello, my name is Tomas'");
+    assert_eq!(outcome.commands, ["echo tts --voice carina --normalize -o hello.mp3 'Hello, my name is Tomas'"]);
+    assert_eq!(outcome.output.as_deref(), Some("tts --voice carina --normalize -o hello.mp3 Hello, my name is Tomas\n"));
+    let sources: Vec<(&str, &str)> =
+        outcome.values.iter().map(|value| (value.name.as_str(), value.source.as_str())).collect();
+    assert_eq!(sources, [("output", "request"), ("text", "request"), ("voice", "default")]);
+    assert!(outcome.accepts.iter().all(|slot| !slot.only_choices && !slot.choices.is_empty()));
+
+    let command = |request: &str| run(request).commands.join(" && ");
+    assert_eq!(command("tts"), "echo tts --voice carina --normalize -o output.mp3", "each default; empty writes nothing");
+    assert_eq!(command("tts voice=ara"), "echo tts --voice ara --normalize -o output.mp3", "a voice that is no choice");
+    assert_eq!(command("tts in the eva voice"), "echo tts --voice eva --normalize -o output.mp3", "a choice named");
+    assert_eq!(command("tts output=OUTPUT"), "echo tts --voice carina --normalize -o output.mp3", "a choice by name");
+    assert_eq!(
+        command("tts voice=eva text: good morning to you"),
+        "echo tts --voice eva --normalize -o output.mp3 'good morning to you'",
+        "a text slot whose choices name values takes the rest of the request after its label"
+    );
+
+    // Read back from the command, a value that is no choice is the value itself.
+    let skill = scratch.brain.skill(&label).unwrap().unwrap();
+    let read = crate::slots::match_skill(&skill.steps, &skill.slots, "echo tts --voice ara --normalize -o a.mp3 'hi there'");
+    let read: Option<Vec<(String, String)>> = read.map(|values| {
+        let mut values: Vec<(String, String)> = values.into_iter().collect();
+        values.sort();
+        values
+    });
+    let pairs = |list: &[(&str, &str)]| list.iter().map(|(name, value)| (name.to_string(), value.to_string())).collect();
+    assert_eq!(read, Some(pairs(&[("output", "a.mp3"), ("text", "hi there"), ("voice", "ara")])));
+    let read = crate::slots::match_skill(&skill.steps, &skill.slots, "echo tts --voice eva --normalize -o output.mp3");
+    let mut read: Vec<(String, String)> = read.unwrap().into_iter().collect();
+    read.sort();
+    assert_eq!(read, pairs(&[("output", "output"), ("text", "empty"), ("voice", "eva")]), "each choice by its name");
+}
+
+#[test]
+fn a_plan_waiting_on_a_slot_whose_choices_write_no_flag_takes_any_value_given_to_it() {
+    let scratch = Scratch::new("named-values-plan");
+    let label = speech_skill(&scratch);
+    let words: Vec<String> = [label.as_str(), "voice", "--default="].iter().map(|word| word.to_string()).collect();
+    hand::slot(&mut mutable(&scratch), &hand::slot_shape(&words, false).unwrap()).unwrap();
+    // With no default, System 1 picks among the voices, and is not sure.
+    let to = label.clone();
+    let (models, _) = models(
+        move |request| match request["questions"].get("value") {
+            Some(_) => json!({"model": "m", "answers": {"value": {"type": "choice", "choice": "eva", "confidence": 0.3,
+                                                                 "probabilities": {"eva": 0.3}}}}),
+            None => decision(&to, 0.9, 0.9, SAFE),
+        },
+        no_language_model(),
+    );
+    let outcome = go(&scratch, &models, "read it aloud", &mut Script::default(), &yes(&scratch));
+    assert_eq!((code(&outcome), outcome.missing[0].name.as_str()), (Some("missing_value"), "voice"));
+    let ran = plans(&scratch, &no_model_at_all(), &[outcome.plan_id.unwrap()], &[("voice", "ara")], &mut Script::default());
+    assert_eq!(ran[0].commands, ["echo tts --voice ara --normalize -o output.mp3"]);
 }
 
 #[test]
@@ -3328,7 +3416,10 @@ fn a_choice_given_by_its_name_alone_puts_that_name_in_the_command() {
     assert_eq!(choices, [("release", "release"), ("debug", "debug")], "a choice's text is its name");
     let done = hand::slot(&mut mutable(&scratch), &edit).unwrap();
     assert_eq!(done.refused, None, "the default is one of the choices: {}", done.message);
-    assert_eq!(done.message, format!("{{profile}} in {label} is now a slot: release, debug; default release."));
+    assert_eq!(
+        done.message,
+        format!("{{profile}} in {label} is now a slot: release, debug, or another value; default release.")
+    );
 
     let to = label.clone();
     let (models, _) = models(move |_| decision(&to, 0.9, 0.9, SAFE), no_language_model());

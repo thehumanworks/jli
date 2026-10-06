@@ -613,7 +613,11 @@ mod tests {
             default: Some("release".into()),
             ..Slot::default()
         };
-        assert_eq!(plain.settings(), "release, debug → nothing; default release", "a choice that writes its own name");
+        assert_eq!(
+            plain.settings(),
+            "release, debug → nothing, or another value; default release",
+            "a choice that writes its own name, and no choice writes a flag"
+        );
         assert_eq!(Slot::default().settings(), "");
     }
 

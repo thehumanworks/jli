@@ -89,8 +89,9 @@ pub struct Slot {
     /// `-n` in `-n {count}`, `--profile=` in `--profile={profile}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flag: Option<String>,
-    /// The only values the slot takes, each with what it puts in the command. Written by a person
-    /// (`jli slot`), never by a model, so what reaches the shell unquoted is what they wrote.
+    /// Values with names, each with what it puts in the command; the only values the slot takes when
+    /// one of them writes a flag (ADR 31). Written by a person (`jli slot`), never by a model, so what
+    /// reaches the shell unquoted is what they wrote.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub choices: Vec<Choice>,
 }
@@ -116,9 +117,17 @@ impl Slot {
         self.choices.iter().find(|choice| choice.value.eq_ignore_ascii_case(said))
     }
 
+    /// Whether a value that names none of its choices is refused. Where a choice writes a flag, the
+    /// placeholder holds command text, and another value there means nothing: `cargo build fast`. Where
+    /// they write values, or nothing, a stated value is taken as written, quoted (ADR 31).
+    pub fn takes_only_choices(&self) -> bool {
+        self.choices.iter().any(|choice| choice.text.trim_start().starts_with('-'))
+    }
+
     /// What was set on it, for `jli skills`, `jli slot` and `jli generalize`: "optional, left out with
     /// -n; release → --release, debug → nothing; default release". A choice that puts its own name in
-    /// the command is shown as that name alone: "release, debug". Empty for a slot with none of it.
+    /// the command is shown as that name alone: "release, debug", and a slot that takes other values
+    /// says so: "carina, eva, or another value". Empty for a slot with none of it.
     pub fn settings(&self) -> String {
         let mut said: Vec<String> = Vec::new();
         if self.optional {
@@ -137,7 +146,8 @@ impl Slot {
                     text => format!("{} → {text}", choice.value),
                 })
                 .collect();
-            said.push(each.join(", "));
+            let other = if self.takes_only_choices() { "" } else { ", or another value" };
+            said.push(format!("{}{other}", each.join(", ")));
         }
         if let Some(default) = &self.default {
             said.push(format!("default {default}"));

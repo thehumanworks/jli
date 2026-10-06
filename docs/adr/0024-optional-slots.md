@@ -1,6 +1,7 @@
 # 24. A slot can be left out with its flag, a person can give it a default, and choices say how each value is written
 
-- Status: accepted
+- Status: accepted; superseded in part by [ADR 31](0031-choices-name-values.md), under which a slot
+  whose choices write no flag takes a stated value that names none of them, as written
 - Date: 2026-10-03
 - Origin: the Rust version
 - Supersedes in part: [ADR 7](0007-slot-templates.md), on a slot with no value blocking the run, on

@@ -50,8 +50,11 @@ pub struct SlotInfo {
     pub optional: bool,
     /// The flag left out with it.
     pub flag: Option<String>,
-    /// The only values it takes, each with what it puts in the command.
+    /// Values with names, each with what it puts in the command.
     pub choices: Vec<Choice>,
+    /// True when its choices are the only values it takes: one of them writes a flag (ADR 31).
+    #[serde(rename = "onlyChoices")]
+    pub only_choices: bool,
 }
 
 impl SlotInfo {
@@ -65,6 +68,7 @@ impl SlotInfo {
             optional: slot.optional,
             flag: slot.flag.clone(),
             choices: slot.choices.clone(),
+            only_choices: slot.takes_only_choices(),
         }
     }
 
@@ -299,14 +303,16 @@ fn run_one(
         let slot = record.slots.iter().find(|slot| slot.name == name);
         let is_number = slot.is_some_and(|slot| slot.kind == SlotKind::Number);
         let value = if is_number { args::as_number(value) } else { value.clone() };
-        // A slot with choices takes one of them, under its own spelling, as when the request states it (ADR 24).
+        // A choice is kept under its own spelling, and a slot that takes only its choices refuses any
+        // other value, as when the request states it (ADR 24, ADR 31).
         let value = match slot.filter(|slot| !slot.choices.is_empty()) {
             Some(slot) => match slot.choice(&value) {
                 Some(choice) => choice.value.clone(),
-                None => {
+                None if slot.takes_only_choices() => {
                     refused.push(format!("{{{name}}} takes {}, not {value}", slot.choice_list()));
                     continue;
                 }
+                None => value,
             },
             None => value,
         };

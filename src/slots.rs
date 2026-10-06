@@ -52,7 +52,8 @@ pub struct Filled {
     pub not_set: Vec<(String, String)>,
     /// Optional slots nothing gave a value: left out of the command with their flags (ADR 24).
     pub omitted: Vec<String>,
-    /// Values stated for a slot with choices that name none of them, as (slot, value). They block the run.
+    /// Values stated for a slot that takes only its choices that name none of them, as (slot, value).
+    /// They block the run.
     pub not_a_choice: Vec<(String, String)>,
     pub ms_system1: u64,
     pub ms_system2: u64,
@@ -76,19 +77,19 @@ impl Filled {
         self.has(name) || self.not_a_choice.iter().any(|(slot, _)| slot == name)
     }
 
-    /// Give `slot` a value. A slot with choices takes only one of them, under the choice's own spelling.
+    /// Give `slot` a value. A choice it names is kept under the choice's own spelling. Any other value
+    /// is taken by a slot with no choices, and by one whose choices write no flag when the person
+    /// stated it (ADR 31); a model's value there must be a choice (ADR 24).
     fn offer(&mut self, slot: &Slot, value: String, source: Source) -> bool {
-        if slot.choices.is_empty() {
-            self.set(&slot.name, value, source);
+        if let Some(choice) = slot.choice(&value) {
+            self.set(&slot.name, choice.value.clone(), source);
             return true;
         }
-        match slot.choice(&value) {
-            Some(choice) => {
-                self.set(&slot.name, choice.value.clone(), source);
-                true
-            }
-            None => false,
+        let taken = slot.choices.is_empty() || (source == Source::Request && !slot.takes_only_choices());
+        if taken {
+            self.set(&slot.name, value, source);
         }
+        taken
     }
 }
 
@@ -794,17 +795,23 @@ fn can_be_absent(slot: Option<&Slot>) -> bool {
 }
 
 /// The pattern for what a placeholder writes, as one capture group: a word or a quoted string, or for a
-/// slot with choices the text of one of them, longest first.
+/// slot with choices the text of one of them, longest first, and then, unless it takes only its
+/// choices, a word or a quoted string.
 fn value_pattern(slot: Option<&Slot>) -> String {
-    let Some(slot) = slot.filter(|slot| !slot.choices.is_empty()) else { return r#"(\S+|'[^']*'|"[^"]*")"#.to_string() };
+    const ANY: &str = r#"\S+|'[^']*'|"[^"]*""#;
+    let Some(slot) = slot.filter(|slot| !slot.choices.is_empty()) else { return format!("({ANY})") };
     let mut texts: Vec<&str> =
         slot.choices.iter().map(|choice| choice.text.trim()).filter(|text| !text.is_empty()).collect();
     texts.sort_by_key(|text| std::cmp::Reverse(text.len()));
-    let texts: Vec<String> = texts.into_iter().map(literal_pattern).collect();
+    let mut texts: Vec<String> = texts.into_iter().map(literal_pattern).collect();
+    if !slot.takes_only_choices() {
+        texts.push(ANY.to_string());
+    }
     format!("({})", texts.join("|"))
 }
 
 /// The value a slot was given, read back from what its placeholder wrote, or None when it wrote nothing.
+/// A choice's text reads back as that choice; anything else as the value itself.
 fn read_back(slot: Option<&Slot>, found: Option<&str>) -> Option<String> {
     let Some(slot) = slot.filter(|slot| !slot.choices.is_empty()) else {
         return found.map(|found| unquote(found).to_string());
@@ -813,7 +820,11 @@ fn read_back(slot: Option<&Slot>, found: Option<&str>) -> Option<String> {
         text.split_whitespace().collect()
     }
     let wrote = found.map(words).unwrap_or_default();
-    slot.choices.iter().find(|choice| words(&choice.text) == wrote).map(|choice| choice.value.clone())
+    let chosen = slot.choices.iter().find(|choice| words(&choice.text) == wrote).map(|choice| choice.value.clone());
+    match found {
+        Some(found) if chosen.is_none() && !slot.takes_only_choices() => Some(unquote(found).to_string()),
+        _ => chosen,
+    }
 }
 
 /// The value of each slot that makes `steps` produce `command`, flags included.
