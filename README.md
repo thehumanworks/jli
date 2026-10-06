@@ -36,7 +36,7 @@ Learning is writing to that database:
 | You ran `jli fix` | a phrasing, or a counter-example; if the agent then proposes the rejected command again, it is refused (`already_rejected`) and nothing is stored | as for a "no" and the command you typed |
 | You wrote `dir=src` for a slot called `directory` | `dir` as another name for that slot | `dir=` is read with no model next time |
 | You ran `jli alias` or `jli forget-phrase` | a slot name added or removed; a phrasing moved to the counter-examples | the same, by hand, for one name or one phrasing |
-| You ran `jli slot` | a slot's default, whether it may be left out with its flag, and the choices it takes | an unsaid value runs as you said it should, with no model ([ADR 24](docs/adr/0024-optional-slots.md)) |
+| You ran `jli slot` | a slot's default, whether it may be left out with its flag, and its choices: names for values, or the only values it takes when one writes a flag | an unsaid value runs as you said it should, with no model ([ADR 24](docs/adr/0024-optional-slots.md), [ADR 31](docs/adr/0031-choices-name-values.md)) |
 
 One command can hold many phrasings. Teaching a phrase for a command that a skill already runs adds
 the phrase to that skill. If that skill runs only the one command, as one taught by default does,
@@ -246,7 +246,7 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | `jli forget-phrase <label> "<phrase>"` | take one phrasing back from a skill and keep it as a counter-example, so it is not learned straight back; inside a project, for a global skill, in that project only (`--global` for every project) |
 | `jli alias <label> <slot> <name>` | give a slot another name for `name=value`; `--remove` takes one away. Inside a project an alias of a global skill holds in every project; `--global` reaches a global skill that a project skill of the same label hides |
 | `jli slot <label> <slot> --default=<value>` | the value a slot takes when the request names none; also `--optional` or `--required`, `--flag=<flag>`, `--choice=` and `--kind=`. Written where `jli alias` writes |
-| `jli slot <label> <slot> --choice=release --choice=debug` | the only values a slot takes, each put in the command as its own name; `--choice=release=--release` puts other text, `--choice=debug=` nothing, and `--no-choices` takes them away |
+| `jli slot <label> <slot> --choice=release --choice=debug` | names for a slot's values, each put in the command as its own name; `--choice=release=--release` puts other text, `--choice=debug=` nothing, and `--no-choices` takes them away. A slot whose choices write a flag takes only them; any other also takes a value you state |
 | `jli project` | the project this directory is in, from the nearest `.jlirc` (or the one `--project` names), and how many skills are its own |
 | `jli project init [<id>]` | make this directory a project: what jli learns here stays with it |
 | `jli --project=<id> …` | any command, in project `<id>`, as if run in one of its directories (also `--project <id>`); a bare `--project` is the project of this directory's `.jlirc` |
@@ -362,17 +362,31 @@ job without it. A model never leaves out a value that has no flag before it, nev
 slot a default, and never writes choices: those are yours.
 
 `jli slot` sets them. A default is what an unsaid value means, and it wins over leaving the slot out.
-Choices are the only values a slot takes. A choice puts its own name in the command, so for a skill
-that runs `cargo install --path . --profile {profile}`:
+Choices are names for a slot's values, and a default among them is used with no model. A choice puts
+its own name in the command, so for a skill that runs `cargo install --path . --profile {profile}`:
 
 ```sh
 jli slot install-app profile --choice=release --choice=dev --default=release
 ```
 
+A value you state that names no choice is taken as written, quoted as any value is: `profile=bench`
+runs `--profile bench`.
+
 When the command needs other text than the word you say, write that text after a second `=`. It is
-put in the command as you wrote it and never quoted, and an empty text puts nothing there. For
-`cargo build`, `release` is `--release` and `debug` is nothing, so teach the command with a
-placeholder and give it choices:
+put in the command as you wrote it and never quoted, and an empty text puts nothing there. For a
+skill that runs `xai tts --voice {voice} --normalize -o {output} {text}`, where the text is left out
+so that it can be piped in:
+
+```sh
+jli slot tts output --choice=output=output.mp3 --default=output
+jli slot tts text --choice=empty= --default=empty
+jli tts                               # xai tts … -o output.mp3
+jli tts output=hello.mp3 text='Hi'    # xai tts … -o hello.mp3 Hi
+```
+
+A slot whose choices write a flag takes only its choices, since any other value in that place would
+mean nothing to the command. For `cargo build`, `release` is `--release` and `debug` is nothing, so
+teach the command with a placeholder and give it choices:
 
 ```sh
 jli --mode=manual teach "build the app" -- 'cargo build {profile}'
@@ -387,9 +401,11 @@ jli slot list-largest-files count --default=5
 A choice is found by name (`profile=debug`), as a label, or as a word of its own in the request ("a
 debug build"). Each setting is written with `=`, so `--flag=-n` stays one word. `jli skills` shows
 what each slot has: `{profile}: release → --release, debug → nothing; default release`, and a choice
-that puts its own name in the command as that name alone: `{profile}: release, dev; default release`. An older jli
-reads a slot with choices as a plain one, and writes `cargo build release`. See
-[ADR 24](docs/adr/0024-optional-slots.md).
+that puts its own name in the command as that name alone, with a slot that takes other values saying
+so: `{profile}: release, dev, or another value; default release`. An older jli refuses a value that
+names no choice, and one older still reads a slot with choices as a plain one, and writes
+`cargo build release`. See [ADR 24](docs/adr/0024-optional-slots.md) and
+[ADR 31](docs/adr/0031-choices-name-values.md).
 
 A file value has a leading `~` and any `$NAME` or `${NAME}` expanded by jli before it is quoted, so
 `jli list dir=~/notes` runs `ls /Users/you/notes`, and the trace says

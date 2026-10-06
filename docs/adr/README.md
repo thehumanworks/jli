@@ -41,6 +41,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [28](0028-chatgpt-plan.md) | The agent and the translator can run on the user's ChatGPT plan, through a crate of jli's own |
 | [29](0029-device-code.md) | Where no browser opens, `jli login --device-auth` signs in with a code, through Codex's client |
 | [30](0030-taught-as-given.md) | What `jli teach` is told is kept as given, with the person's name and description, and a program is never a slot value |
+| [31](0031-choices-name-values.md) | A slot's choices name values unless one of them writes a flag, and a value stated for such a slot is taken as written |
 
 ## Known gaps, by record
 
@@ -154,3 +155,8 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   phrase verifies near the threshold; `jli fix -- <command>` and a typed correction follow the
   configured mode; and an older jli keeps the old matching, teaches in semi mode, and reads `--name`
   and `--description` as words of the phrase.
+- [31](0031-choices-name-values.md): a slot whose choices write no flag cannot be closed, so a
+  mistyped value runs; only a text that begins with `-` counts as a flag; a quoted string with no name
+  is still not handed to a slot with choices (`jli "tts 'Hello'"` leaves the text out); a plain
+  `--default` on a text slot is still the agent's last resort; a default of a slot with choices must
+  be one of them; and an older jli still refuses a value that names no choice.
