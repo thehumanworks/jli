@@ -166,7 +166,7 @@ const COMMANDS: &[Command] = &[
             ("    --optional | --required", "whether it, and its --flag=<flag>, may be left out of the command"),
             (
                 "    --choice=<value>[=<text>] …",
-                "the only values it takes. A choice puts its own name in the command,\nor <text> when one is given: --choice=release=--release.\n--choice=debug= puts nothing; --no-choices takes them away",
+                "named values. A choice puts its own name in the command, or <text>\nwhen one is given: --choice=release=--release. --choice=debug= puts\nnothing; --no-choices takes them away. A slot whose choices write a\nflag takes only them; any other takes a value you state as well",
             ),
             ("    --kind=file|branch|number|text", "what kind of value it takes, and so where one is looked for"),
         ],
