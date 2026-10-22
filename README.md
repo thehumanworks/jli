@@ -197,6 +197,11 @@ No API keys needed for the [durable corrections example](examples/README.md#dura
 choice, supplies the right command, and shows it still taking precedence after 1, 10 and 50 later
 lessons and a database reopen.
 
+The [fixed-word target harness](examples/README.md#fixed-word-targets) exposes a separate known gap:
+a confident wrong choice can still plan `git pull origin` for `pull from upstream`. Run
+`cargo run --offline --quiet --example fixed-targets`; it uses synthetic choices and executes no
+commands. Its strict mode fails on the unresolved gap, and its perfect-choice control passes.
+
 ```sh
 export TYPESAFE_API_KEY=…      # System 1
 

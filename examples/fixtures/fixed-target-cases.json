@@ -1,0 +1,14 @@
+[
+  {"id":"origin", "query":"get the latest changes from origin", "owner":"pull-origin", "command":"git pull origin"},
+  {"id":"upstream", "query":"pull from upstream", "owner":"pull-upstream", "command":"git pull upstream"},
+  {"id":"incidental-upstream", "query":"pull upstream changes from origin", "owner":"pull-origin", "command":"git pull origin"},
+  {"id":"negated-origin", "query":"pull from upstream, not origin", "owner":"pull-upstream", "command":"git pull upstream"},
+  {"id":"implicit-origin", "query":"refresh my checkout", "owner":"pull-origin", "command":"git pull origin"},
+  {"id":"arbitrary-remote", "query":"pull from the remote named orbital", "owner":"pull-orbital", "command":"git pull orbital"},
+  {"id":"main", "query":"switch to main", "owner":"switch-main", "command":"git switch main"},
+  {"id":"release", "query":"switch to release", "owner":"switch-release", "command":"git switch release"},
+  {"id":"source-branch", "query":"switch from release to main", "owner":"switch-main", "command":"git switch main"},
+  {"id":"private-preview", "query":"let me check my own preview build", "owner":"preview-private", "command":"mise run deploy-preview"},
+  {"id":"shared-preview", "query":"put up the preview the team reviews", "owner":"preview-shared", "command":"mise run deploy-preview-shared"},
+  {"id":"negated-team", "query":"publish my private preview, not the team preview", "owner":"preview-private", "command":"mise run deploy-preview"}
+]

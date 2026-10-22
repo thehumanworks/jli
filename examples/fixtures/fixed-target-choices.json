@@ -1,0 +1,14 @@
+{
+  "origin":"pull-origin",
+  "upstream":"pull-origin",
+  "incidental-upstream":"pull-origin",
+  "negated-origin":"pull-origin",
+  "implicit-origin":"pull-origin",
+  "arbitrary-remote":"pull-origin",
+  "main":"switch-main",
+  "release":"switch-main",
+  "source-branch":"switch-main",
+  "private-preview":"preview-private",
+  "shared-preview":"preview-private",
+  "negated-team":"preview-private"
+}
