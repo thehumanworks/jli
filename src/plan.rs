@@ -114,6 +114,9 @@ pub struct PlanRecord {
     pub aliases: Vec<(String, String)>,
     pub ms_system1: u64,
     pub ms_system2: u64,
+    /// The explicit decision this correction plan answers; old plans have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correction: Option<(i64, String)>,
 }
 
 impl PlanRecord {
@@ -339,6 +342,7 @@ fn run_one(
         yes: true,
         yolo: flags.yolo,
         capture: flags.capture,
+        correction: record.correction.clone(),
         ..RouteOptions::new(cwd.clone(), crate::router::DEFAULT_THRESHOLD, Mode::Semi)
     };
     let ready = Ready { id, state: &row.state, record: &record, commands, cwd };

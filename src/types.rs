@@ -275,6 +275,9 @@ pub enum Path {
     /// the user said no and typed the right command
     #[serde(rename = "taught")]
     Taught,
+    /// an explicit phrase binding chose the command
+    #[serde(rename = "binding")]
+    Binding,
     /// nothing ran
     #[serde(rename = "none")]
     None,
@@ -287,12 +290,13 @@ impl Path {
             Path::System1Confirmed => "system1-confirmed",
             Path::System2 => "system2",
             Path::Taught => "taught",
+            Path::Binding => "binding",
             Path::None => "none",
         }
     }
 
     pub fn parse(text: &str) -> Option<Path> {
-        [Path::System1, Path::System1Confirmed, Path::System2, Path::Taught, Path::None]
+        [Path::System1, Path::System1Confirmed, Path::System2, Path::Taught, Path::Binding, Path::None]
             .into_iter()
             .find(|path| path.as_str() == text)
     }

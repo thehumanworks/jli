@@ -60,6 +60,11 @@ const COMMANDS: &[Command] = &[
         )],
         options: &[PROJECT],
     },
+    Command {
+        name: "bindings",
+        lines: &[("jli bindings [--global] [remove <id>]", "inspect durable phrase choices and rejections, or revoke one in this scope")],
+        options: &[JSON, DRY_RUN, PROJECT],
+    },
     Command { name: "stats", lines: &[("jli stats", "how much it has learned")], options: &[] },
     Command { name: "history", lines: &[("jli history", "recent requests and how they were routed")], options: &[] },
     Command {
@@ -338,6 +343,7 @@ mod tests {
     fn every_command_has_its_help() {
         let names = [
             "skills",
+            "bindings",
             "stats",
             "history",
             "teach",

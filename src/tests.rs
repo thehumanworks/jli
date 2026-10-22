@@ -1117,6 +1117,9 @@ fn a_typed_cd_after_a_no_needs_the_shell_function_too() {
     assert!(!outcome.ran);
     assert!(!scratch.brain.skills().unwrap().iter().any(|skill| skill.steps == ["cd sub"]), "not learned");
 
+    // The declined route now stays excluded. Revoke it to exercise the same prompt with a shell.
+    let binding = scratch.brain.bindings().unwrap().remove(0);
+    assert!(scratch.brain.revoke_binding(binding.id).unwrap());
     let target = hand_off(&scratch, Shell::Bash);
     let mut script = Script::new(&[Some(false)], &["cd sub"]);
     let options = RouteOptions { hand_off: Some(target.clone()), ..scratch.options(Mode::Manual) };
@@ -1824,7 +1827,8 @@ fn run_the_tests_means_one_command_in_one_project_and_another_in_the_next() {
     let in_rust = criteria(&scratch, &rust, "run the tests");
     assert_eq!(in_rust["echo-cargo-test"]["examples"], json!(["run the tests"]));
     assert!(in_rust["echo-cargo-test"].get("doesNotApplyTo").is_none() && in_rust.get("echo-npm-test").is_none());
-    let in_node = criteria(&scratch, &node, "run the tests");
+    // The exact corrected phrase bypasses the matrix; inspect it using an unbound paraphrase.
+    let in_node = criteria(&scratch, &node, "please test");
     assert_eq!(in_node["echo-cargo-test"]["doesNotApplyTo"], json!(["run the tests"]));
     assert!(in_node["echo-cargo-test"].get("examples").is_none(), "the phrasing is not both an example and not one");
     assert_eq!(in_node["echo-npm-test"]["examples"], json!(["run the tests"]));
@@ -1837,7 +1841,7 @@ fn run_the_tests_means_one_command_in_one_project_and_another_in_the_next() {
     assert_eq!(outcome.learned, ["\"please run the tests\" means echo-cargo-test"]);
     assert_eq!(rust.skill("echo-cargo-test").unwrap().unwrap().examples, ["run the tests", "please run the tests"]);
     assert_eq!(scratch.brain.skill("echo-cargo-test").unwrap().unwrap().examples, ["run the tests"]);
-    assert_eq!(criteria(&scratch, &node, "run the tests"), in_node, "the node project is shown what it was");
+    assert_eq!(criteria(&scratch, &node, "please test"), in_node, "the node project is shown what it was");
     assert_eq!(scratch.brain.skill("echo-cargo-test").unwrap().unwrap().uses, 1, "a use is counted on the global row");
 }
 
@@ -3873,3 +3877,5 @@ fn a_name_that_is_taken_or_a_command_that_is_known_is_refused_before_any_model()
     let message = refused(&shop, described_input(&scratch, "pull", "git pull origin", Some("pull"), None));
     assert!(message.ends_with("jli forget --global pull"), "{message}");
 }
+
+mod bindings;

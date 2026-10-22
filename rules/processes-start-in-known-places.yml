@@ -8,3 +8,5 @@ ignores:
   - src/exec.rs
   - src/context.rs
   - src/demo.rs
+  # Offline integration tests must start the built CLI to verify persistence across processes.
+  - tests/bindings.rs

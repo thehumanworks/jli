@@ -6,10 +6,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context as _, Result};
 use libsql::{Builder, Connection, Database, Value};
+use serde::{Deserialize, Serialize};
+
+use crate::args;
 use tokio::runtime::Runtime;
 
 use crate::seed::seed_skills;
-use crate::slots::{keep_settings, match_proposal};
+use crate::slots::{keep_settings, match_proposal, match_skill};
 use crate::types::{add_alias, coded, remove_alias, BrainEvent, Origin, Path, Risk, Skill, Slot, STORAGE};
 
 /// Where the brain lives. One libSQL client covers every deployment:
@@ -159,6 +162,14 @@ const SCHEMA: &str = "
      commands_hash TEXT NOT NULL,
      ran_at        TEXT,
      event_id      INTEGER
+   );
+  CREATE TABLE IF NOT EXISTS phrase_bindings (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     user_id TEXT NOT NULL,
+     project_id TEXT NOT NULL DEFAULT '',
+     phrase TEXT NOT NULL,
+     body TEXT NOT NULL,
+     UNIQUE (user_id, project_id, phrase)
    );
   CREATE TABLE IF NOT EXISTS corrections (
      id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -547,6 +558,39 @@ pub struct Correction {
     pub result_event_id: Option<i64>,
 }
 
+/// A durable reference to the exact command the user chose or rejected. Reusing a label or
+/// changing its command cannot silently redirect an explicit correction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoundSkill {
+    pub label: String,
+    pub project: String,
+    pub created_at: String,
+    pub steps: Vec<String>,
+    /// Literal commands cannot accept a different stated value through a hidden phrase.
+    pub literal_query: Option<String>,
+    /// The example written by this explicit lesson, also usable after it is evicted.
+    pub example: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PhraseRule {
+    pub target: Option<BoundSkill>,
+    pub rejected: Vec<BoundSkill>,
+    pub source: String,
+    pub terminal: bool,
+    pub updated_at: String,
+}
+
+/// Inspection includes the scope and provenance, including inherited global rules.
+#[derive(Debug, Clone, Serialize)]
+pub struct Binding {
+    pub id: i64,
+    pub user: String,
+    pub project: String,
+    pub phrase: String,
+    pub rule: PhraseRule,
+}
+
 #[derive(Clone, Copy)]
 enum ListColumn {
     Examples,
@@ -682,6 +726,163 @@ impl Brain {
             }
             Ok(out)
         })
+    }
+
+    /// Rules visible here, global first and this project's own last. Corrupt rules fail closed.
+    pub fn bindings(&self) -> Result<Vec<Binding>> {
+        self.query(
+            "SELECT id, project_id, phrase, body FROM phrase_bindings
+             WHERE user_id = ? AND (project_id = '' OR project_id = ?) ORDER BY project_id != '', id",
+            vec![self.user().into(), self.scope.project.clone().into()],
+            |row| -> Result<Binding> {
+                Ok(Binding {
+                    id: row.get(0)?,
+                    user: self.user().into(),
+                    project: row.get(1)?,
+                    phrase: row.get(2)?,
+                    rule: serde_json::from_str(&row.get::<String>(3)?)?,
+                })
+            },
+        )?
+        .into_iter()
+        .collect()
+    }
+
+    /// Pin the correction a proposal answers. A later lesson or revocation makes this stale.
+    pub fn binding_guard(&self, query: &str) -> Result<Option<(i64, String)>> {
+        let phrase = args::phrase(query, &[]);
+        self.bindings()?
+            .into_iter()
+            .find(|binding| binding.project == self.scope.project && binding.phrase == phrase)
+            .map(|binding| Ok((binding.id, serde_json::to_string(&binding.rule)?)))
+            .transpose()
+    }
+
+    /// An accepted correction proposal binds only if no newer explicit decision intervened.
+    pub fn complete_correction(
+        &self,
+        query: &str,
+        label: &str,
+        steps: &[String],
+        example: &str,
+        guard: &(i64, String),
+    ) -> Result<bool> {
+        let mut target = self.bound_skill(label, query)?;
+        target.example = example.to_string();
+        if target.steps != steps {
+            return Ok(false);
+        }
+        let mut rule: PhraseRule = serde_json::from_str(&guard.1)?;
+        rule.rejected.retain(|old| old.label != target.label || old.project != target.project);
+        rule.target = Some(target);
+        rule.updated_at = now_iso();
+        Ok(self.execute(
+            "UPDATE phrase_bindings SET body = ? WHERE id = ? AND user_id = ? AND project_id = ? AND phrase = ? AND body = ?",
+            vec![serde_json::to_string(&rule)?.into(), guard.0.into(), self.user().into(), self.scope.project.clone().into(),
+                 args::phrase(query, &[]).into(), guard.1.clone().into()],
+        )? > 0)
+    }
+
+    /// Revoke only in the selected scope: an inherited global rule needs --global.
+    pub fn revoke_binding(&self, id: i64) -> Result<bool> {
+        Ok(self.execute(
+            "DELETE FROM phrase_bindings WHERE id = ? AND user_id = ? AND project_id = ?",
+            vec![id.into(), self.user().into(), self.scope.project.clone().into()],
+        )? > 0)
+    }
+
+    fn bound_skill(&self, label: &str, query: &str) -> Result<BoundSkill> {
+        let skill = self.skill(label)?.ok_or_else(|| anyhow!("skill {label} no longer exists"))?;
+        Ok(BoundSkill {
+            label: label.into(),
+            project: self.row_scope(label)?.project,
+            created_at: skill.created_at,
+            steps: skill.steps,
+            literal_query: skill.slots.is_empty().then(|| query.to_string()),
+            example: args::phrase(query, &skill.slots),
+        })
+    }
+
+    /// Resolve the original row, never a different project's shadow or a reused label.
+    pub fn bound_matches(&self, bound: &BoundSkill, skill: &Skill) -> Result<bool> {
+        Ok(bound.label == skill.label
+            && bound.created_at == skill.created_at
+            && bound.project == self.row_scope(&skill.label)?.project)
+    }
+
+    /// Generalising a literal command in place keeps its binding if the template still runs it.
+    pub fn bound_command_matches(&self, bound: &BoundSkill, skill: &Skill) -> Result<bool> {
+        Ok(self.bound_matches(bound, skill)?
+            && (bound.steps == skill.steps || match_skill(&skill.steps, &skill.slots, &bound.steps.join(" && ")).is_some()))
+    }
+
+    /// An explicit choice, separate from bounded examples. Ordinary learning never calls this.
+    pub fn bind_phrase(&self, query: &str, label: &str, source: &str, terminal: bool) -> Result<()> {
+        self.bind_phrase_as(query, query, label, source, terminal)
+    }
+
+    /// Keep the routed key and the learned example apart: learning also hides inferred values.
+    pub fn bind_phrase_as(&self, query: &str, example: &str, label: &str, source: &str, terminal: bool) -> Result<()> {
+        let mut target = self.bound_skill(label, query)?;
+        target.example = example.to_string();
+        self.edit_binding(query, source, terminal, |rule| {
+            rule.rejected.retain(|old| old.label != target.label || old.project != target.project);
+            rule.target = Some(target.clone());
+        })
+    }
+
+    /// Keep a rejected route excluded even if the later proposal is refused or never run.
+    pub fn reject_phrase(&self, query: &str, label: &str, source: &str, terminal: bool) -> Result<()> {
+        let rejected = self.bound_skill(label, query)?;
+        self.edit_binding(query, source, terminal, |rule| {
+            rule.rejected.retain(|old| old.label != rejected.label || old.project != rejected.project);
+            rule.rejected.push(rejected.clone());
+            if rule.target.as_ref().is_some_and(|target| {
+                target.label == rejected.label
+                    && target.project == rejected.project
+                    && target.created_at == rejected.created_at
+            }) {
+                rule.target = None;
+            }
+        })
+    }
+
+    /// The same compare-and-swap used for examples: concurrent lessons cannot erase rejections.
+    fn edit_binding(&self, query: &str, source: &str, terminal: bool, edit: impl Fn(&mut PhraseRule)) -> Result<()> {
+        let phrase = args::phrase(query, &[]);
+        let key = || vec![Value::from(self.user()), self.scope.project.clone().into(), phrase.clone().into()];
+        for _ in 0..WRITE_ATTEMPTS {
+            let stored = self
+                .query(
+                    "SELECT body FROM phrase_bindings WHERE user_id = ? AND project_id = ? AND phrase = ?",
+                    key(),
+                    |row| row.get::<String>(0),
+                )?
+                .into_iter()
+                .next()
+                .transpose()?;
+            let mut rule = stored.as_deref().map(serde_json::from_str).transpose()?.unwrap_or_default();
+            edit(&mut rule);
+            rule.source = source.into();
+            rule.terminal = terminal;
+            rule.updated_at = now_iso();
+            let body = serde_json::to_string(&rule)?;
+            let written = match stored {
+                Some(old) => self.execute(
+                    "UPDATE phrase_bindings SET body = ? WHERE user_id = ? AND project_id = ? AND phrase = ? AND body = ?",
+                    [vec![body.into()], key(), vec![old.into()]].concat(),
+                )?,
+                None => self.execute(
+                    "INSERT INTO phrase_bindings (user_id, project_id, phrase, body) VALUES (?, ?, ?, ?)
+                     ON CONFLICT(user_id, project_id, phrase) DO NOTHING",
+                    [key(), vec![body.into()]].concat(),
+                )?,
+            };
+            if written > 0 {
+                return Ok(());
+            }
+        }
+        Err(anyhow!("the phrase was being corrected concurrently; try again"))
     }
 
     /// Where this brain is stored, for display.
