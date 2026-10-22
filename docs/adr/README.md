@@ -43,6 +43,8 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 | [30](0030-taught-as-given.md) | What `jli teach` is told is kept as given, with the person's name and description, and a program is never a slot value |
 | [31](0031-choices-name-values.md) | A slot's choices name values unless one of them writes a flag, and a value stated for such a slot is taken as written |
 
+| [32](0032-durable-corrections.md) | Explicit phrase choices and rejections survive later learning, with scoped inspection and revocation |
+
 ## Known gaps, by record
 
 - [2](0002-brain-in-libsql.md): the remote and replica modes have never run against a live remote
@@ -50,8 +52,8 @@ paid for", and every known gap, sits in the record of the decision it belongs to
 - [6](0006-learning-modes.md): auto mode cannot learn from success alone, and the benchmark's
   paraphrases were written by its author.
 - [7](0007-slot-templates.md): a glob given as a slot value is quoted and does not expand.
-- [8](0008-corrections.md): a correction against a strongly matching seeded skill may not stick, and
-  two correction flows have not been tested live.
+- [8](0008-corrections.md): two correction flows have not been tested live. The persistence gap is
+  addressed by [ADR 32](0032-durable-corrections.md).
 - [11](0011-stated-arguments.md): a stated value has no escapes, and hidden requests were measured on a handful
   of live cases, not on the benchmark.
 - [12](0012-slot-aliases.md): an unknown name is only noticed as `name=value`, and a skill with no
@@ -160,3 +162,7 @@ paid for", and every known gap, sits in the record of the decision it belongs to
   is still not handed to a slot with choices (`jli "tts 'Hello'"` leaves the text out); a plain
   `--default` on a text slot is still the agent's last resort; a default of a slot with choices must
   be one of them; and an older jli still refuses a value that names no choice.
+
+- [32](0032-durable-corrections.md): exact keys do not cover paraphrases or alternate quoting;
+  old clients ignore bindings; live and remote/replica behaviour remains unverified; learning and
+  binding are separate writes, so an interrupted lesson may need to be repeated.

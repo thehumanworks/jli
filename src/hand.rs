@@ -487,7 +487,22 @@ fn forget_phrase_in(brain: &Brain, edit: &PhraseEdit, from: Option<&str>) -> Res
         }),
         refused: None,
     };
-    let Some(stored) = skill.examples.iter().find(|example| same(example, &edit.phrase)).cloned() else {
+    let bound: Vec<_> = brain
+        .bindings()?
+        .into_iter()
+        .filter(|binding| {
+            binding.rule.target.as_ref().is_some_and(|target| {
+                target.label == label && target.created_at == skill.created_at && same(&target.example, &edit.phrase)
+            })
+        })
+        .collect();
+    let stored = skill
+        .examples
+        .iter()
+        .find(|example| same(example, &edit.phrase))
+        .cloned()
+        .or_else(|| bound.first().and_then(|binding| binding.rule.target.as_ref().map(|target| target.example.clone())));
+    let Some(stored) = stored else {
         if skill.counter_examples.iter().any(|counter| same(counter, &edit.phrase)) {
             let message =
                 format!("\"{}\" is already a counter-example of {label}, not a phrasing. Nothing was changed.", edit.phrase);
@@ -508,6 +523,9 @@ fn forget_phrase_in(brain: &Brain, edit: &PhraseEdit, from: Option<&str>) -> Res
         }
         (examples, counter)
     } else {
+        for binding in &bound {
+            brain.reject_phrase(&binding.phrase, label, "forget-phrase", false)?;
+        }
         brain.remove_example(label, &stored)?;
         brain.add_counter_example(label, &stored)?;
         let now = brain.skill(label)?.unwrap_or(skill);

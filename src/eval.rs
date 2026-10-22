@@ -256,7 +256,8 @@ pub fn deemed_correct(event: &BrainEvent) -> bool {
 }
 
 fn routed(event: &BrainEvent) -> bool {
-    event.label.is_some() && matches!(event.path, Path::System1 | Path::System1Confirmed | Path::System2 | Path::Taught)
+    event.label.is_some()
+        && matches!(event.path, Path::System1 | Path::System1Confirmed | Path::System2 | Path::Taught | Path::Binding)
 }
 
 /// The events of each request, oldest first. A request is its first attempt plus the attempts made
@@ -323,6 +324,35 @@ pub fn correctness(oldest_first: &[BrainEvent]) -> Correctness {
         if event.ms_system2.unwrap_or(0) > 0 {
             tally.system1_with_model += 1;
         }
+    }
+    tally
+}
+
+/// Observed repeated corrections in the same event window used by evaluation. This measures
+/// user judgements, while leave-one-out still measures the unassisted model's generalisation.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorrectionRate {
+    pub judged_requests: usize,
+    pub repeated_corrections: usize,
+    pub per_100_judged: f64,
+}
+
+pub fn correction_rate(oldest_first: &[BrainEvent]) -> CorrectionRate {
+    let mut tally = CorrectionRate::default();
+    let mut corrected = HashSet::new();
+    for group in requests(oldest_first) {
+        if group.iter().any(|event| event.accepted || is_corrected(event)) {
+            tally.judged_requests += 1;
+        }
+        for event in group.into_iter().filter(|event| is_corrected(event)) {
+            if !corrected.insert(args::phrase(&event.query, &[])) {
+                tally.repeated_corrections += 1;
+            }
+        }
+    }
+    if tally.judged_requests > 0 {
+        tally.per_100_judged = round(100.0 * tally.repeated_corrections as f64 / tally.judged_requests as f64);
     }
     tally
 }
@@ -703,6 +733,7 @@ pub struct Report {
     /// System 1's own count and cost estimate for everything this run asked.
     pub system1_calls: u64,
     pub system1_cost: f64,
+    pub corrections: CorrectionRate,
 }
 
 /// What `jli stats` shows the trend from: one entry per evaluation, in `meta` under `eval:<ts>`.
@@ -840,6 +871,7 @@ pub fn run(brain: &Brain, models: &Models, options: &EvalOptions, ui: &Ui) -> Re
         stored: None,
         system1_calls: 0,
         system1_cost: 0.0,
+        corrections: correction_rate(&events),
     };
     if !options.dry_run {
         let key = format!("eval:{ts}");
@@ -1405,6 +1437,13 @@ pub fn render(report: &Report) -> String {
     out.push(summary_line("stored examples, each held out", &report.leave_one_out));
     out.push(summary_line("accepted requests, replayed", &report.replay));
     out.push(summary_line("overall", &report.overall));
+    out.push(format!(
+        "{} repeated corrections per 100 judged requests ({} repeats, {} judged; latest {} events in this scope).",
+        report.corrections.per_100_judged,
+        report.corrections.repeated_corrections,
+        report.corrections.judged_requests,
+        EVENT_WINDOW
+    ));
     if report.rebuilt_contexts > 0 {
         out.push(c::dim(format!(
             "  {} replays ran in an inferred context: their directory is gone.",

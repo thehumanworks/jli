@@ -77,6 +77,8 @@ pub struct RouteOptions {
     pub rejected: Vec<String>,
     /// The user's own words about what they expected, passed to the agent.
     pub clarification: Option<String>,
+    /// The explicit correction this route answers, pinned across a saved plan.
+    pub correction: Option<(i64, String)>,
     /// Where steps such as `cd` go to run in the calling shell, when the shell function started jli.
     pub hand_off: Option<HandOff>,
 }
@@ -94,6 +96,7 @@ impl RouteOptions {
             agent_only: false,
             rejected: vec![],
             clarification: None,
+            correction: None,
             hand_off: None,
         }
     }
@@ -336,7 +339,53 @@ pub fn route(
         all_skills: brain.skills()?,
         outcome: Outcome::new(query),
     };
-    route.run(prompt)
+    let mut options = options.clone();
+    let bindings = brain.bindings()?;
+    let rules: Vec<_> = bindings.iter().filter(|binding| binding.phrase == route.phrase).collect();
+    // A project rule is the more specific decision; rejections from both scopes still hold
+    // unless the more specific rule explicitly binds that skill again.
+    let mut binding = None;
+    let mut excluded = Vec::new();
+    for rule in &rules {
+        for rejected in &rule.rule.rejected {
+            for skill in &route.all_skills {
+                if brain.bound_matches(rejected, skill)? {
+                    excluded.push(skill.label.clone());
+                }
+            }
+        }
+        if let Some(target) = &rule.rule.target {
+            excluded.retain(|label| label != &target.label);
+            binding = Some(target);
+        }
+    }
+    let binding = binding.filter(|target| !excluded.contains(&target.label));
+    options.rejected.extend(excluded);
+    route.options = &options;
+    let bound = if !options.agent_only {
+        match binding {
+            Some(target) => {
+                let found = route.all_skills.iter().find(|skill| skill.label == target.label);
+                match found {
+                    Some(skill)
+                        if brain.bound_command_matches(target, skill)?
+                            && (!skill.slots.is_empty()
+                                || target.literal_query.as_ref().is_none_or(|original| original == query)) =>
+                    {
+                        Some(skill.clone())
+                    }
+                    _ => {
+                        route.outcome.block("the bound command changed or cannot take these values; inspect jli bindings and teach it again or revoke it", "binding_unavailable");
+                        return route.finish();
+                    }
+                }
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    route.run(prompt, bound)
 }
 
 impl Route<'_> {
@@ -422,23 +471,27 @@ impl Route<'_> {
             aliases: filled.aliases.clone(),
             ms_system1: self.outcome.ms_system1,
             ms_system2: self.outcome.ms_system2,
+            correction: self.options.correction.clone(),
         }
     }
 
-    fn run(&mut self, prompt: &mut dyn Prompt) -> Result<Outcome> {
+    fn run(&mut self, prompt: &mut dyn Prompt, bound: Option<Skill>) -> Result<Outcome> {
         let options = self.options;
         let ui = self.ui;
 
         // ── System 1: one fast call against the learned matrix ────────────────────
         let mut decision: Option<Decision> = None;
-        let mut plan: Option<Plan> = None;
+        let mut plan = bound.map(|skill| {
+            ui.note(format!("Explicit phrase binding: {}.", skill.label));
+            Plan { risk: skill.risk, skill, path: Path::Binding, confidence: None, is_new: false, provided: HashMap::new() }
+        });
         let mut escalation = if options.clarification.as_deref().is_some_and(|text| !text.is_empty()) {
             "working from what you said you expected".to_string()
         } else {
             "asked to skip the decision model".to_string()
         };
 
-        if !options.agent_only {
+        if !options.agent_only && plan.is_none() {
             let decided = self.models.system1.decide(&self.phrase, &self.context, &self.skills())?;
             self.outcome.ms_system1 += decided.ms;
             ui.decision(&decided);
@@ -857,6 +910,7 @@ impl Route<'_> {
         let Ran { result, diagnosed, asked, stderr_seen, checked, proposed } = ran;
         // A human yes vouches for the route even if the command itself failed; --yes and --yolo need a clean exit.
         let vouched = plan.path == Path::System2 || !(options.yes || options.yolo) || result.exit_code == 0;
+        let mut learned = !plan.is_new && vouched;
         // A name the request used for a slot is kept on the same terms as a phrasing.
         let mut renamed = Vec::new();
         for (slot, alias) in &filled.aliases {
@@ -903,6 +957,7 @@ impl Route<'_> {
                     examples: vec![self.phrase.clone()],
                     slots: skill.slots.clone(),
                 })?;
+                learned = true;
                 self.outcome.label = Some(label.clone());
                 self.brain.record_use(&label)?;
                 if created {
@@ -934,6 +989,13 @@ impl Route<'_> {
             if taught_something && self.brain.link_phrase(&skill.label, &self.phrase)? {
                 self.outcome.learned.push(format!("\"{}\" means {}", self.phrase, skill.label));
                 ui.learned(format!("\"{}\" means {}", self.phrase, c::bold(&skill.label)));
+            }
+        }
+        if learned {
+            if let (Some(guard), Some(label)) = (&options.correction, &self.outcome.label) {
+                if !self.brain.complete_correction(self.query, label, &skill.steps, &self.phrase, guard)? {
+                    ui.note("A newer correction or command change was kept; this run did not replace its binding.");
+                }
             }
         }
         Ok(())
@@ -1133,6 +1195,7 @@ impl Route<'_> {
             Correction::Clarification(_) => unlearn,
         };
         if was_wrong && !plan.is_new {
+            self.brain.reject_phrase(self.query, &skill.label, "prompt", true)?;
             unlearn_phrase(self.brain, ui, skill, &self.phrase)?;
         }
         let steps = match choice {
@@ -1141,7 +1204,13 @@ impl Route<'_> {
                 if unlearn {
                     rejected.push(skill.label.clone());
                 }
-                let again = RouteOptions { agent_only: true, clarification, rejected, ..options.clone() };
+                let again = RouteOptions {
+                    agent_only: true,
+                    clarification,
+                    rejected,
+                    correction: self.brain.binding_guard(self.query)?,
+                    ..options.clone()
+                };
                 return route(self.brain, self.models, self.query, ui, prompt, &again).map(Some);
             }
             Correction::Steps(steps) => steps,
@@ -1156,6 +1225,7 @@ impl Route<'_> {
             return self.finish().map(Some);
         }
         let taught = teach_instead(self.brain, self.models, ui, &self.phrase, &steps, options)?;
+        self.brain.bind_phrase_as(self.query, &self.phrase, &taught.label, "prompt", true)?;
         let risk = self.brain.skill(&taught.label)?.map_or(Risk::Modifies, |skill| skill.risk);
         ui.command(&steps, risk);
         self.outcome.caller_shell = for_shell.clone();

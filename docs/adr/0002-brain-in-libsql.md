@@ -1,6 +1,7 @@
 # 2. The brain is a libSQL database with a fixed schema, and rows are never replaced
 
-- Status: accepted; superseded in part by [ADR 15](0015-user-scope.md), which adds four tables
+- Status: accepted; superseded in part by [ADR 32](0032-durable-corrections.md), which makes explicit phrase choices durable;
+  and by [ADR 15](0015-user-scope.md), which adds four tables
   for users other than the default and makes finding a free label safe for parallel writers
 - Date: 2026-10-02
 - Origin: the TypeScript prototype; the Rust port kept the schema byte for byte

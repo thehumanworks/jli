@@ -1,6 +1,7 @@
 # 1. A decision model on every request, an agent only when it is unsure
 
-- Status: accepted
+- Status: accepted; superseded in part by [ADR 32](0032-durable-corrections.md), which makes explicit
+  phrase choices durable
 - Date: 2026-10-02
 - Origin: the TypeScript prototype; kept unchanged by the Rust port ([ADR 9](0009-port-to-rust.md))
 

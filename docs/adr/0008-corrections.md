@@ -1,6 +1,7 @@
 # 8. A "no" or a failed command is a lesson, but only a diagnosis says what kind
 
-- Status: accepted; superseded in part by [ADR 13](0013-learning-fixes.md): bare `jli fix`
+- Status: accepted; superseded in part by [ADR 32](0032-durable-corrections.md), which makes explicit phrase choices durable;
+  and by [ADR 13](0013-learning-fixes.md): bare `jli fix`
   unlearns this host's last route in this directory; and by
   [ADR 16](0016-measuring-the-matrix.md), which logs the declined route as its own event, marked `corrected`, before the correction;
   and by [ADR 18](0018-agent-contract.md), under which `jli fix <eventId> -- <command>` and

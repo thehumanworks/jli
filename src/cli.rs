@@ -386,6 +386,7 @@ impl App {
             dry_run: flags.dry_run,
             capture: flags.json,
             agent_only: flags.agent,
+            correction: if rejected.is_empty() { None } else { self.brain.binding_guard(query)? },
             rejected,
             clarification,
             hand_off: HandOff::from_env(env),
@@ -556,8 +557,12 @@ impl App {
         let slow: Vec<&BrainEvent> = events.iter().filter(|event| event.path == Path::System2).collect();
         let taught = events.iter().filter(|event| matches!(event.path, Path::Taught | Path::System1Confirmed)).count();
         say(format!("\n{} over {} requests", c::bold("Routing"), events.len()));
-        for (name, count) in [("system 1, instant", fast.len()), ("taught by you", taught), ("system 2, agent", slow.len())]
-        {
+        for (name, count) in [
+            ("system 1, instant", fast.len()),
+            ("explicit binding", events.iter().filter(|event| event.path == Path::Binding).count()),
+            ("taught by you", taught),
+            ("system 2, agent", slow.len()),
+        ] {
             say(format!("  {name:<22} {} {count:>4}", bar(count as f64 / events.len() as f64)));
         }
         let mean = |group: &[&BrainEvent]| {
@@ -578,7 +583,7 @@ impl App {
         let curve: Vec<f64> = (0..buckets)
             .map(|i| {
                 let chunk = &events[(i as f64 * size).floor() as usize..((i + 1) as f64 * size).floor() as usize];
-                let instant = chunk.iter().filter(|event| event.path == Path::System1).count();
+                let instant = chunk.iter().filter(|event| matches!(event.path, Path::System1 | Path::Binding)).count();
                 instant as f64 / chunk.len().max(1) as f64
             })
             .collect();
@@ -649,6 +654,7 @@ impl App {
         let (models, ui) = (&self.models, Ui::of(flags.quiet, false));
         let teach = |brain: &Brain| -> Result<_> {
             let learned = learn_phrase(brain, models, &input, &ui)?;
+            brain.bind_phrase(&phrase, &learned.label, "teach", self.terminal.interactive())?;
             let skill = brain.skill(&learned.label)?;
             Ok((learned, skill))
         };
@@ -903,6 +909,9 @@ impl App {
             self.brain.remove_example(&label, &stated)?;
             self.brain.remove_example(&label, &phrase)?;
             self.brain.add_counter_example(&label, &phrase)?;
+            if self.brain.skill(&label)?.is_some() {
+                self.brain.reject_phrase(&last.query, &label, "fix", self.terminal.interactive())?;
+            }
             self.brain.mark_rejected(last.id)?;
             eprintln!("{} \"{}\" does {} mean {label}. Trying again.\n", c::green("✚ learned"), last.query, c::bold("not"));
         }
@@ -959,9 +968,11 @@ impl App {
             wrong.as_ref().map(|skill| (skill.steps.clone(), skill.slots.clone())).unwrap_or_default();
         let phrase = learned_phrase(&last.query, &wrong_steps, &slots, last.command.as_deref());
         if let Some(wrong) = wrong.as_ref().filter(|wrong| is_another_command(wrong, steps)) {
+            self.brain.reject_phrase(&last.query, &wrong.label, "fix", self.terminal.interactive())?;
             unlearn_phrase(&self.brain, &ui, wrong, &phrase)?;
         }
         let taught = teach_instead(&self.brain, &self.models, &ui, &phrase, steps, &options)?;
+        self.brain.bind_phrase_as(&last.query, &phrase, &taught.label, "fix", self.terminal.interactive())?;
         self.brain.mark_rejected(last.id)?;
 
         let skill = self.brain.skill(&taught.label)?;
@@ -984,6 +995,7 @@ impl App {
             aliases: vec![],
             ms_system1: 0,
             ms_system2: 0,
+            correction: None,
         };
         let id = plan::save(&self.brain, &at, &record)?;
         let outcome = if run {
@@ -1255,6 +1267,44 @@ impl App {
         // `--global` reaches the user's global skills from inside a project (ADR 17).
         let global = others.iter().any(|word| word == "--global");
         let plain: Vec<String> = others.iter().filter(|word| *word != "--global").cloned().collect();
+        if first == "bindings" && rest.is_empty() {
+            let action = |brain: &Brain| -> Result<i32> {
+                match plain.as_slice() {
+                    [] => {
+                        let bindings = brain.bindings()?;
+                        if flags.json {
+                            say(serde_json::to_string_pretty(&bindings)?);
+                        } else {
+                            for binding in bindings {
+                                let target = binding.rule.target.as_ref().map_or("unbound", |target| target.label.as_str());
+                                let rejected: Vec<_> =
+                                    binding.rule.rejected.iter().map(|skill| skill.label.as_str()).collect();
+                                say(format!(
+                                    "{}  {:?} → {} · user {} · project {} · {} · terminal {} · rejected: {}",
+                                    binding.id,
+                                    binding.phrase,
+                                    target,
+                                    binding.user,
+                                    if binding.project.is_empty() { "global" } else { &binding.project },
+                                    binding.rule.source,
+                                    binding.rule.terminal,
+                                    rejected.join(", ")
+                                ));
+                            }
+                        }
+                        Ok(0)
+                    }
+                    [remove, id] if remove == "remove" => {
+                        let id: i64 = id.parse()?;
+                        let removed = if flags.dry_run { false } else { brain.revoke_binding(id)? };
+                        say(serde_json::json!({"id": id, "removed": removed, "dryRun": flags.dry_run}).to_string());
+                        Ok(if removed || flags.dry_run { 0 } else { 1 })
+                    }
+                    _ => Ok(refuse(flags, USAGE, "Usage: jli bindings [--global] [remove <id>]")),
+                }
+            };
+            return if global { self.brain.globally(action) } else { action(&self.brain) };
+        }
         if first == "forget" && plain.len() == 1 {
             return self.forget(&plain[0], global);
         }
@@ -1325,6 +1375,7 @@ fn path_tag(path: Path) -> String {
         Path::System1Confirmed => c::yellow("⚡ confirmed"),
         Path::System2 => c::magenta("◆ system 2"),
         Path::Taught => c::green("✎ taught  "),
+        Path::Binding => c::green("↳ binding "),
         Path::None => c::dim("· nothing "),
     }
 }

@@ -652,3 +652,21 @@ fn correctness_keeps_declined_and_corrected_attempts_in_the_count() {
     let evidence = eval::evidence(&events);
     assert_eq!((evidence["x"].judged, evidence["x"].correct), (2, 1));
 }
+
+#[test]
+fn repeated_corrections_are_counted_per_judged_request_with_values_hidden() {
+    let scratch = Scratch::new("eval-correction-rate");
+    // Two separately judged requests with different values, and one unjudged blocked request.
+    for (query, corrected) in [("commit message=one", true), ("files", false), ("commit message=two", true)] {
+        let id = scratch.brain.log_event(&event(&scratch, query, Some("git-commit"), Path::System1, true, Some(0))).unwrap();
+        if corrected {
+            scratch.brain.mark_rejected(id).unwrap();
+        }
+    }
+    scratch.brain.log_event(&event(&scratch, "blocked", Some("list-files"), Path::System1, false, None)).unwrap();
+    let mut events = scratch.brain.events(100).unwrap();
+    events.reverse();
+    let rate = crate::eval::correction_rate(&events);
+    assert_eq!((rate.judged_requests, rate.repeated_corrections, rate.per_100_judged), (3, 1, 33.333));
+    assert_eq!(crate::eval::correction_rate(&[]).per_100_judged, 0.0);
+}

@@ -11,7 +11,7 @@ $ jli show me the newest files
 
 ## How it works
 
-Two models, the way people think about fast and slow thinking.
+An explicit phrase choice is checked first. Otherwise, two models handle fast and slow thinking.
 
 - **System 1** is TypeSafe's `jev` decision model. One call, about 250 ms, answers three typed
   questions against the request: a `choice` over every known skill, a `noul` on whether a command is
@@ -31,9 +31,9 @@ Learning is writing to that database:
 | --- | --- | --- |
 | System 2 proposed a command and it ran, with exit 0 or a failure that was not the command's fault ([ADR 13](docs/adr/0013-learning-fixes.md)) | a new skill with the request as its first example, its values hidden, once System 1 has checked it; a command a skill already runs adds the phrasing to that skill instead, and drops it from that skill's counter-examples ([ADR 20](docs/adr/0020-write-back.md)) | System 1 answers next time |
 | You said yes to "Run it?" | the phrasing, as an example of that skill and no longer a counter-example of it | that phrasing becomes more confident |
-| You said no and typed the right command | a counter-example on the wrong skill, and the phrasing on the right one | it routes to your command next time |
-| You ran `jli teach` | the phrase, and the command exactly as you wrote it, under the name you gave it with `--name`; a fast model writes only when to run it, from your phrase and your `--description`, and it is kept once System 1 has checked it ([ADR 30](docs/adr/0030-taught-as-given.md)) | System 1 answers next time, and runs what you taught |
-| You ran `jli fix` | a phrasing, or a counter-example; if the agent then proposes the rejected command again, it is refused (`already_rejected`) and nothing is stored | as for a "no" and the command you typed |
+| You said no and typed the right command | a durable scoped binding to the right skill, a durable rejection of the wrong one, and examples for paraphrases | the exact phrase bypasses System 1 next time |
+| You ran `jli teach` | the phrase, and the command exactly as you wrote it, under the name you gave it with `--name`; a fast model writes only when to run it, from your phrase and your `--description`, and it is kept once System 1 has checked it ([ADR 30](docs/adr/0030-taught-as-given.md)) | the exact phrase bypasses System 1 next time, and runs what you taught |
+| You ran `jli fix` | a durable rejection and, when a replacement is chosen, a binding; a repeated rejected proposal is refused (`already_rejected`) | as for a "no" and the command you typed |
 | You wrote `dir=src` for a slot called `directory` | `dir` as another name for that slot | `dir=` is read with no model next time |
 | You ran `jli alias` or `jli forget-phrase` | a slot name added or removed; a phrasing moved to the counter-examples | the same, by hand, for one name or one phrasing |
 | You ran `jli slot` | a slot's default, whether it may be left out with its flag, and its choices: names for values, or the only values it takes when one writes a flag | an unsaid value runs as you said it should, with no model ([ADR 24](docs/adr/0024-optional-slots.md), [ADR 31](docs/adr/0031-choices-name-values.md)) |
@@ -44,6 +44,13 @@ and you teach it again with `--mode=semi` and the translator finds a value in it
 general in place and keeps its phrasings: teaching `git log --oneline -n 3` again turns it into
 `git log --oneline -n {count}`, with 3 as the count's default. Two jli processes teaching one command
 at once also end up with one skill. See [ADR 19](docs/adr/0019-one-row-per-command.md).
+
+Explicit choices survive later learning, even after examples expire. `jli bindings` shows their
+IDs, scopes and source; `jli bindings --json` includes their commands and timestamps. Revoke one
+with `jli bindings remove <id>` (`--global` for an inherited global rule). Removing a project rule
+reveals a global rule for the same phrase. `forget-phrase` also rejects a matching bound phrase.
+Bindings preserve the existing value parser, confirmation and saved-plan behavior. A correction of
+an argument value keeps the skill eligible. See [ADR 32](docs/adr/0032-durable-corrections.md).
 
 ## Teaching
 
@@ -57,9 +64,7 @@ $ jli teach --name=pull --risk=modifies --description "bring the current branch 
 ✚ learned "pull" means pull (git pull origin)
   new skill
 $ jli -n pull
-⚡ system 1 · jev-1.13.0 · 260 ms · 10 skills in the matrix
-   pull           █████████████░░░░░░░  0.63
-   none-of-these  ███████░░░░░░░░░░░░░  0.37
+  Explicit phrase binding: pull.
 → git pull origin  risk: modifies
 ```
 
@@ -135,7 +140,9 @@ translator calls. Earlier runs, including the TypeScript prototype's, are in
 ## Measuring the matrix
 
 The learning curve in `jli stats` counts a confident wrong route as a win. `jli eval` measures
-whether routes are right, from the brain's own evidence and with the real System 1:
+whether routes are right, from the brain's own evidence and with the real System 1. The matrix
+measurement remains unassisted by bindings. The report also counts repeated corrections per 100
+judged requests in its latest 2,000 scoped events, with stated values hidden. The matrix probes are:
 
 - every stored example is routed with itself held out of the matrix, and should come home;
 - every accepted request that was not declined or corrected later is routed again, and should
@@ -225,6 +232,7 @@ second time, and the time spent deciding fell from 12.5 s to 1.4 s.
 | `jli models` | the models your ChatGPT plan has, the one in use marked |
 | `jli --json <request>` | machine-readable outcome with captured output, for agents; an error is one JSON object too |
 | `jli run <planId> [<planId> …] [name=value …]` | run stored plans exactly as shown, in order, with no model call; stop at the first that fails |
+| `jli bindings [--global] [remove <id>]` | inspect durable phrase choices and rejections, or revoke a rule in the selected scope; supports `--json` and `-n` |
 | `jli skills` | every skill, with learned phrasings and counter-examples |
 | `jli skills --project` | only the project's own skills, not the global ones |
 | `jli stats` | routing mix, latency, the learning curve, how often routes were right first time, and the `jli eval` trend |
@@ -512,7 +520,7 @@ no `--project`. See [ADR 26](docs/adr/0026-project-flag.md).
 | `crates/chatgpt-sdk/` | a library of its own: Sign in with ChatGPT, saved credentials, Codex's sign-in, sign-in with a device code, and streamed Responses requests, with typed errors |
 | `src/router.rs` | the loop: decide, escalate, confirm, run, write back; and a stored plan through the same confirmation and write-back |
 | `src/plan.rs` | plans: what a route pins, and `jli run` |
-| `src/store.rs` | the brain: skills, events, settings, plans and corrections per user and project in libSQL, behind a runtime that never leaves the module |
+| `src/store.rs` | the brain: skills, events, settings, plans, corrections and durable phrase rules per user and project in libSQL, behind a runtime that never leaves the module |
 | `src/project.rs` | finds, reads and writes the `.jlirc` that names a project |
 | `src/generalize.rs` | `jli generalize`: checks the agent's proposal for a project skill and writes it once approved |
 | `src/hand.rs` | `jli alias`, `jli forget-phrase` and `jli slot`: one slot name, one phrasing or one slot's settings changed by hand, where the router would write it |
@@ -526,6 +534,7 @@ no `--project`. See [ADR 26](docs/adr/0026-project-flag.md).
 | `src/ui.rs` | the trace and its warnings on stderr, and the one owner of stdin, which shows each question after what it asks about |
 | `src/demo.rs` | the two-pass learning demo |
 | `src/tests.rs` | the router and learning loop, offline, against fake models and a scripted prompt |
+| `src/tests/bindings.rs` and `tests/bindings.rs` | durable correction routing, isolation, revocation and concurrency, including separate offline CLI processes |
 | `src/tests/eval_tests.rs` | `jli eval`, the optimiser, undo, and the check a new row gets, offline |
 | `examples/bench-translator.rs` | manual, `jli teach`'s default and semi on held-out paraphrases, and with `--forgetting` the forgetting rate |
 | `examples/bench-context.rs` | one phrase taught to two commands in two projects: whether a correction in one undoes the other |

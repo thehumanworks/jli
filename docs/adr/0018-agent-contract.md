@@ -1,6 +1,7 @@
 # 18. A contract for agent callers: pinned plans, run in order, and corrections without a terminal
 
-- Status: accepted; superseded in part by [ADR 20](0020-write-back.md), which adds
+- Status: accepted; superseded in part by [ADR 32](0032-durable-corrections.md), which makes explicit phrase choices durable;
+  and by [ADR 20](0020-write-back.md), which adds
   `already_rejected` to the closed set of `blockedCode`; by [ADR 21](0021-hand-edits.md), which
   adds seven error kinds; by [ADR 24](0024-optional-slots.md), which adds three more, and
   `optional`, `flag` and `choices` to each slot in `accepts` and `missing`; and by

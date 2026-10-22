@@ -1,6 +1,7 @@
 # 21. One slot name and one phrasing can be changed by hand, written where the router would write the same lesson
 
-- Status: accepted
+- Status: accepted; superseded in part by [ADR 32](0032-durable-corrections.md), which makes explicit
+  phrase choices durable
 - Date: 2026-10-03
 - Origin: the Rust version, issues #23 and #24
 - Supersedes in part: [ADR 12](0012-slot-aliases.md), on an alias being removable only with its
