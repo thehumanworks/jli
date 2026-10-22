@@ -16,6 +16,10 @@ mise run fix          # apply what the linters can fix
 The hooks run the same checks: `pre-commit` runs the linters and fixes what it can, `pre-push` adds
 `cargo test --workspace`. Do not skip them with `--no-verify`. A commit that fails them is not done.
 
+For user-visible changes, add or update a simple runnable example when applicable, showing the
+value of the change. Document its invocation and expected output, run it, and link it in the PR.
+Prefer offline fixtures; distinguish what they demonstrate from live model quality.
+
 | Check | Command | What it holds |
 | --- | --- | --- |
 | Format | `cargo fmt --check` | `rustfmt.toml`: 125 columns |

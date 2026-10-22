@@ -192,6 +192,11 @@ across hosts), `JLI_THRESHOLD=0.7` (`JLI_CONFIDENCE` also works), or `--confiden
 
 ## Try it
 
+No API keys needed for the [durable corrections example](examples/README.md#durable-corrections):
+`cargo run --quiet --example durable-corrections`. It rejects a deliberately wrong fixture model's
+choice, supplies the right command, and shows it still taking precedence after 1, 10 and 50 later
+lessons and a database reopen.
+
 ```sh
 export TYPESAFE_API_KEY=…      # System 1
 
