@@ -35,6 +35,11 @@ path = "examples/bench-translator.rs"
 name = "bench-context"
 path = "examples/bench-context.rs"
 
+[[example]]
+name = "fixed-targets"
+path = "examples/fixed-targets.rs"
+test = true
+
 [lints]
 workspace = true
 
